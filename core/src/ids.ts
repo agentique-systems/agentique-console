@@ -34,6 +34,8 @@ export const ID_PREFIXES = {
   runtimeToolCall: "rtc",
   completionRequest: "crq",
   signoffResolution: "sres",
+  requirementProposal: "rqp",
+  orchestratorInput: "oin",
   budgetIncrease: "binc",
   allocationExtension: "aext",
 } as const;
@@ -73,6 +75,8 @@ export type ApprovedToolCallUseId = Id<"acu">;
 export type RuntimeToolCallId = Id<"rtc">;
 export type CompletionRequestId = Id<"crq">;
 export type SignoffResolutionId = Id<"sres">;
+export type RequirementProposalId = Id<"rqp">;
+export type OrchestratorInputId = Id<"oin">;
 export type BudgetIncreaseId = Id<"binc">;
 export type AllocationExtensionId = Id<"aext">;
 

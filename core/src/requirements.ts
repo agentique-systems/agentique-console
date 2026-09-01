@@ -7,7 +7,9 @@ import type {
   DecisionId,
   EvaluationId,
   GateId,
+  InvocationId,
   RequirementId,
+  RequirementProposalId,
   RequirementRevisionId,
   RunId,
   SnapshotId,
@@ -360,3 +362,155 @@ export const acceptanceCriterionSchema: z.ZodType<AcceptanceCriterion> = z
     message: "a Requirement criterion is pinned to the revision it was authored in",
     path: ["requirementRevisionId"],
   });
+
+// ---------------------------------------------------------------------------
+// Requirement proposals (execution-model §8.1 `propose_requirements`)
+// ---------------------------------------------------------------------------
+
+/**
+ * A proposal's life: `proposed` until the operator approves it (creating the
+ * Requirement revision it describes, edited or not), rejects it, or the
+ * Orchestrator proposes again (`superseded`). Approval is the operator's;
+ * the proposal never changes a Requirement by itself.
+ */
+export const REQUIREMENT_PROPOSAL_STATUSES = ["proposed", "approved", "rejected", "superseded"] as const;
+export type RequirementProposalStatus = (typeof REQUIREMENT_PROPOSAL_STATUSES)[number];
+
+export const REQUIREMENT_PROPOSAL_BOUNDS = Object.freeze({
+  maxEntries: 200,
+  maxCriteriaPerEntry: 20,
+  statementMaxBytes: 2_000,
+  rationaleMaxBytes: 4_000,
+  keyPattern: /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/,
+});
+
+/** One entry of a proposed Requirement tree, addressed by a proposal-local key; `requirementId` keeps an existing Requirement's identity. */
+export interface ProposedRequirement {
+  key: string;
+  parentKey: string | null;
+  /** Non-null exactly for entries other entries name as their parent. */
+  composition: RequirementComposition | null;
+  statement: string;
+  /** An existing Requirement of the Conversation this entry continues; `null` proposes a new one. */
+  requirementId: RequirementId | null;
+  /** The Acceptance Criteria authored for the entry in the revision the approval creates. */
+  acceptanceCriteria: AcceptanceCheck[];
+}
+
+export const proposedRequirementSchema: z.ZodType<ProposedRequirement> = z.strictObject({
+  key: z.string().regex(REQUIREMENT_PROPOSAL_BOUNDS.keyPattern),
+  parentKey: z.string().regex(REQUIREMENT_PROPOSAL_BOUNDS.keyPattern).nullable(),
+  composition: z.enum(REQUIREMENT_COMPOSITIONS).nullable(),
+  statement: nonEmptyString.max(REQUIREMENT_PROPOSAL_BOUNDS.statementMaxBytes),
+  requirementId: idSchema("requirement").nullable(),
+  acceptanceCriteria: z.array(acceptanceCheckSchema).max(REQUIREMENT_PROPOSAL_BOUNDS.maxCriteriaPerEntry),
+});
+
+/** The structural defects of a proposed tree, by path: duplicate or unknown keys, self or cyclic parents, a composition on a leaf or missing on a parent, a Requirement kept twice. */
+export function proposedRequirementTreeDefects(entries: readonly ProposedRequirement[]): { path: string; message: string }[] {
+  const defects: { path: string; message: string }[] = [];
+  const byKey = new Map<string, number>();
+  entries.forEach((entry, i) => {
+    if (byKey.has(entry.key)) defects.push({ path: `${i}.key`, message: `key ${entry.key} is used twice` });
+    else byKey.set(entry.key, i);
+  });
+  const kept = new Map<string, number>();
+  entries.forEach((entry, i) => {
+    if (entry.requirementId === null) return;
+    if (kept.has(entry.requirementId)) defects.push({ path: `${i}.requirementId`, message: `Requirement ${entry.requirementId} is kept by two entries` });
+    else kept.set(entry.requirementId, i);
+  });
+  const parents = new Set(entries.flatMap((e) => (e.parentKey === null ? [] : [e.parentKey])));
+  entries.forEach((entry, i) => {
+    if (entry.parentKey !== null) {
+      if (entry.parentKey === entry.key) defects.push({ path: `${i}.parentKey`, message: `entry ${entry.key} names itself as parent` });
+      else if (!byKey.has(entry.parentKey)) defects.push({ path: `${i}.parentKey`, message: `parent key ${entry.parentKey} names no entry` });
+    }
+    const isParent = parents.has(entry.key);
+    if (isParent && entry.composition === null) defects.push({ path: `${i}.composition`, message: `entry ${entry.key} has children and needs a composition` });
+    if (!isParent && entry.composition !== null) defects.push({ path: `${i}.composition`, message: `entry ${entry.key} has no children and carries a composition` });
+  });
+  // A parent chain that never reaches a root is a cycle.
+  entries.forEach((entry, i) => {
+    const seen = new Set<string>();
+    let cursor: string | null = entry.parentKey;
+    while (cursor !== null && byKey.has(cursor)) {
+      if (cursor === entry.key || seen.has(cursor)) {
+        defects.push({ path: `${i}.parentKey`, message: `entry ${entry.key} is part of a parent cycle` });
+        break;
+      }
+      seen.add(cursor);
+      cursor = entries[byKey.get(cursor)!]!.parentKey;
+    }
+  });
+  return defects;
+}
+
+export const proposedRequirementTreeSchema: z.ZodType<ProposedRequirement[]> = z
+  .array(proposedRequirementSchema)
+  .min(1)
+  .max(REQUIREMENT_PROPOSAL_BOUNDS.maxEntries)
+  .superRefine((entries, ctx) => {
+    for (const defect of proposedRequirementTreeDefects(entries)) ctx.addIssue({ code: "custom", path: defect.path.split(".").map((p) => (/^\d+$/.test(p) ? Number(p) : p)), message: defect.message });
+  });
+
+/** The operator's resolution of a proposal: approved (edited or verbatim) with the revision it created, or rejected. */
+export interface RequirementProposalResolution {
+  status: "approved" | "rejected";
+  requirementRevisionId: RequirementRevisionId | null;
+  /** Whether the operator approved an edited tree rather than the proposed one. */
+  edited: boolean;
+  rationale: string | null;
+  resolvedAt: Timestamp;
+}
+
+/**
+ * The canonical record of one `propose_requirements` call (execution-model
+ * §8.1): the proposed tree and rationale exactly as accepted, who proposed
+ * it, and how the operator resolved it. Its id is the proposal's identity
+ * everywhere — the tool result, the operator boundary, the Orchestrator's
+ * later `requirement_proposal_resolution` input.
+ */
+export interface RequirementProposal {
+  id: RequirementProposalId;
+  conversationId: ConversationId;
+  runId: RunId;
+  /** The Orchestrator Invocation whose accepted call created the proposal. */
+  invocationId: InvocationId;
+  status: RequirementProposalStatus;
+  entries: ProposedRequirement[];
+  rationale: string;
+  resolution: RequirementProposalResolution | null;
+  /** The later proposal of the same Run that superseded this one while it was still `proposed`. */
+  supersededByProposalId: RequirementProposalId | null;
+  createdAt: Timestamp;
+}
+
+export const requirementProposalResolutionSchema: z.ZodType<RequirementProposalResolution> = z
+  .strictObject({
+    status: z.enum(["approved", "rejected"]),
+    requirementRevisionId: idSchema("requirementRevision").nullable(),
+    edited: z.boolean(),
+    rationale: nonEmptyString.max(REQUIREMENT_PROPOSAL_BOUNDS.rationaleMaxBytes).nullable(),
+    resolvedAt: timestampSchema,
+  })
+  .refine((r) => (r.status === "approved") === (r.requirementRevisionId !== null), { message: "an approval names the revision it created; a rejection names none", path: ["requirementRevisionId"] })
+  .refine((r) => r.status === "approved" || !r.edited, { message: "only an approval can be edited", path: ["edited"] });
+
+export const requirementProposalSchema: z.ZodType<RequirementProposal> = z
+  .strictObject({
+    id: idSchema("requirementProposal"),
+    conversationId: idSchema("conversation"),
+    runId: idSchema("run"),
+    invocationId: idSchema("invocation"),
+    status: z.enum(REQUIREMENT_PROPOSAL_STATUSES),
+    entries: proposedRequirementTreeSchema,
+    rationale: nonEmptyString.max(REQUIREMENT_PROPOSAL_BOUNDS.rationaleMaxBytes),
+    resolution: requirementProposalResolutionSchema.nullable(),
+    supersededByProposalId: idSchema("requirementProposal").nullable(),
+    createdAt: timestampSchema,
+  })
+  .refine((p) => (p.status === "approved" || p.status === "rejected") === (p.resolution !== null), { message: "exactly an approved or rejected proposal carries its resolution", path: ["resolution"] })
+  .refine((p) => p.resolution === null || p.resolution.status === p.status, { message: "the resolution status is the proposal status", path: ["resolution"] })
+  .refine((p) => (p.status === "superseded") === (p.supersededByProposalId !== null), { message: "exactly a superseded proposal names its superseder", path: ["supersededByProposalId"] })
+  .refine((p) => p.supersededByProposalId !== p.id, { message: "a proposal never supersedes itself", path: ["supersededByProposalId"] });

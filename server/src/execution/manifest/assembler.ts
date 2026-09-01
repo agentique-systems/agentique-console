@@ -543,6 +543,17 @@ export class ContextManifestAssembler {
           }
           break;
         }
+        case "requirement_proposal_resolution": {
+          // The operator's resolution restates the canonical proposal exactly (execution-model §8.1): its Run, status, revision, edit flag, and rationale.
+          const proposal = this.stores.requirementProposals.get(input.proposalId);
+          if (proposal.runId !== run.id) throw new InvariantViolationError(`RequirementProposal ${input.proposalId} belongs to another Run`);
+          if (invocation.role !== "orchestrator") throw new ValidationError(`a requirement_proposal_resolution input is delivered to the Orchestrator, not a ${invocation.role}`);
+          const resolution = proposal.resolution;
+          if (resolution === null || resolution.status !== input.status || resolution.requirementRevisionId !== input.requirementRevisionId || resolution.edited !== input.edited || resolution.rationale !== input.rationale) {
+            throw new InvariantViolationError(`requirement_proposal_resolution input disagrees with the canonical facts of RequirementProposal ${proposal.id}`, { proposalId: proposal.id });
+          }
+          break;
+        }
         case "plan_revision":
           break;
       }

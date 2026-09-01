@@ -20,6 +20,7 @@ import type {
   InvocationId,
   PlanNodeId,
   RequirementId,
+  RequirementProposalId,
   RequirementRevisionId,
   RunId,
   SignoffResolutionId,
@@ -1093,6 +1094,12 @@ export type ManifestInput =
    */
   | { kind: "signoff_resolution"; signoffResolutionId: SignoffResolutionId; gateId: GateId; decisionId: DecisionId; completionGateId: GateId; outcome: "request_changes"; operatorMessageId: ConversationMessageId; verifiedSnapshotId: SnapshotId; reportArtifactId: ArtifactId }
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
+  /**
+   * The operator's resolution of a `propose_requirements` proposal of this Run (execution-model §8.1): approved — with the
+   * Requirement revision the approval created and whether the operator edited the proposed tree — or rejected, with the
+   * operator's bounded rationale. The proposal id is the canonical identity; the tree itself is read through `read_requirements`.
+   */
+  | { kind: "requirement_proposal_resolution"; proposalId: RequirementProposalId; status: "approved" | "rejected"; requirementRevisionId: RequirementRevisionId | null; edited: boolean; rationale: string | null }
   /** The canonical route-selection Evaluation of the route node an inline branch Invocation executes for (execution-model §5.3). */
   | { kind: "route_selection"; evaluationId: EvaluationId; selectedLabel: string }
   /**
@@ -1203,6 +1210,9 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
     })
     .refine((i) => i.gateId !== i.completionGateId, { message: "the signoff Gate and the completion Gate are distinct", path: ["completionGateId"] }),
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
+  z
+    .strictObject({ kind: z.literal("requirement_proposal_resolution"), proposalId: idSchema("requirementProposal"), status: z.enum(["approved", "rejected"]), requirementRevisionId: idSchema("requirementRevision").nullable(), edited: z.boolean(), rationale: nonEmptyString.nullable() })
+    .refine((i) => (i.status === "approved") === (i.requirementRevisionId !== null), { message: "an approval names the revision it created; a rejection names none", path: ["requirementRevisionId"] }),
   z.strictObject({ kind: z.literal("route_selection"), evaluationId: idSchema("evaluation"), selectedLabel: nonEmptyString }),
   z.strictObject({
     kind: z.literal("coordinator_turn"),

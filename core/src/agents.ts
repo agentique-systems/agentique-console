@@ -38,7 +38,7 @@ export const agentDefinitionProvenanceSchema: z.ZodType<AgentDefinitionProvenanc
   }),
 ]);
 
-export const MODEL_EFFORTS = ["low", "medium", "high", "max"] as const;
+export const MODEL_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ModelEffort = (typeof MODEL_EFFORTS)[number];
 
 export interface ModelPolicy {

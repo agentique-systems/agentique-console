@@ -118,6 +118,10 @@ export const RUNTIME_TOOL_DESCRIPTIONS: Readonly<Record<ExecutableRuntimeTool, s
   update_task: "Update one Task you are permitted to update; the runtime applies the transition.",
   request_completion: "Request Run completion (root Orchestrator only); the runtime opens the completion Gate after this turn.",
   request_decision: "Request a Decision (an operator choice or a Requirement waiver); a blocking request ends this turn.",
+  create_tasks: "Create Run-level Tasks for the source Execution Plan to bind (root Orchestrator only); the runtime pins Requirement scope and identity.",
+  record_decision: "Record a choice you made yourself, with the options you considered and your rationale, as a resolved orchestrator_choice Decision.",
+  propose_requirements: "Propose a complete Requirement tree with rationale for the operator to approve, edit, or reject; nothing changes until the operator resolves it.",
+  revise_execution_plan: "Submit a complete source Execution Plan; the runtime compiles it and records the accepted revision or the typed rejection.",
 });
 
 const RETURN_RESULT_DESCRIPTION = "Return the typed result of this Attempt exactly once, then stop.";

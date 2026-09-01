@@ -210,11 +210,11 @@ describe("request_completion runtime tool", () => {
     expect(runtimeToolsFor("orchestrator", "final_synthesis")).toEqual([...RUNTIME_TOOL_READ_TOOLS, "return_result"]);
     const READS = [...RUNTIME_TOOL_READ_TOOLS];
     for (const purpose of ["operator_input", "node_result", "decision_resolution", "gate_result", "plan_revision"] as const) {
-      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", purpose), "orchestrator", purpose)).toEqual([...READS, "request_completion", "request_decision", "write_artifact"]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", purpose), "orchestrator", purpose)).toEqual([...READS, "update_task", "request_completion", "request_decision", "write_artifact", "create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"]);
     }
     expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "final_synthesis"), "orchestrator", "final_synthesis")).toEqual(READS);
     expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "decompose"), "coordinator", "decompose")).toEqual([...READS, "propose_tasks", "update_task", "request_decision", "write_artifact"]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "step"), "worker", "step")).toEqual([...READS, "request_decision", "write_artifact"]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "step"), "worker", "step")).toEqual([...READS, "update_task", "request_decision", "write_artifact"]);
     expect(effectiveRuntimeTools(runtimeToolsFor("evaluator", "evaluate"), "evaluator", "evaluate")).toEqual([...READS, "write_artifact"]);
     expect(runtimeToolCallRequestSchema.safeParse({ tool: "request_completion", input: {} }).success).toBe(true);
     expect(runtimeToolCallRequestSchema.safeParse({ tool: "request_completion", input: { summary: "done" } }).success).toBe(false);

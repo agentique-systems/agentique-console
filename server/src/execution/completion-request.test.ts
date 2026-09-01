@@ -48,7 +48,7 @@ describe("request_completion", () => {
       expect(types.filter((t) => t.startsWith("completion_request"))).toEqual(["completion_request.created"]);
       expect(types.indexOf("runtime_tool_call.committed")).toBeLessThan(types.indexOf("completion_request.created"));
       // The provider saw the tool as callable and the call is recorded without its input.
-      expect(h.provider.requests[0]!.runtimeTools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_completion", "request_decision", "write_artifact"]);
+      expect(h.provider.requests[0]!.runtimeTools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "update_task", "request_completion", "request_decision", "write_artifact", "create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"]);
       expect(JSON.stringify(h.ctx.journal.read({ runId, type: "runtime_tool_call.committed" })[0]!.payload)).not.toContain('"input"');
     } finally {
       h.close();
@@ -95,12 +95,13 @@ describe("request_completion", () => {
       const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const binding = (role: Invocation["role"], purpose: Invocation["purpose"]) => new RuntimeToolExecutor(h.ctx, h.stores, { runId, planNodeId: s.created.root.id, invocationId: s.invocation.id, attemptId: `att_${"0".repeat(24)}`, role, purpose, manifestTools: runtimeToolsFor(role, purpose) });
-      expect(binding("worker", "step").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_decision", "write_artifact"]);
-      expect(binding("worker", "task").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_decision", "write_artifact"]);
+      expect(binding("worker", "step").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "update_task", "request_decision", "write_artifact"]);
+      expect(binding("worker", "task").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "update_task", "request_decision", "write_artifact"]);
       expect(binding("coordinator", "decompose").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "propose_tasks", "update_task", "request_decision", "write_artifact"]);
       expect(binding("evaluator", "evaluate").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "write_artifact"]);
       expect(binding("orchestrator", "final_synthesis").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions"]);
-      expect(binding("orchestrator", "operator_input").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_completion", "request_decision", "write_artifact"]);
+      // A binding without a configured plan-revision service exposes every other Orchestrator handler; revise_execution_plan needs its service.
+      expect(binding("orchestrator", "operator_input").tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "update_task", "request_completion", "request_decision", "write_artifact", "create_tasks", "record_decision", "propose_requirements"]);
       // A non-root caller with the Orchestrator role cannot exist; the handler still refuses it and writes nothing.
       const node = planNodes(h, s, [{ pattern: "single", operation: { agentDefinitionRevisionId: s.worker.id, title: "work" } }]).nodes[0] as PatternPlanNode;
       const service = new CompletionRequestService(h.ctx, h.stores);

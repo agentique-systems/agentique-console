@@ -56,6 +56,7 @@ import {
   type GateId,
   type InvocationId,
   type OperatorPauseMode,
+  type OrchestratorInputId,
   type Pattern,
   type PatternPosition,
   type PlanNode,
@@ -106,6 +107,8 @@ export type SchedulerAction =
   | { kind: "settle_root"; invocationId: InvocationId }
   /** Nothing else can proceed: every pending root-owned remediation Task of a failed node_exit Gate goes to one batched `gate_result` Orchestrator turn (execution-model §10). */
   | { kind: "prepare_gate_remediation"; taskIds: TaskId[] }
+  /** The idle root has queued typed inputs (operator steering or resolutions): one Orchestrator turn delivers them (execution-model §4.6). */
+  | { kind: "prepare_root_turn"; inputIds: OrchestratorInputId[] }
   /** The latest `gate_result` turn ended: its Changeset is integrated and its remediation Tasks are addressed or ended. */
   | { kind: "settle_gate_remediation"; invocationId: InvocationId }
   /** The requesting root turn settled: the Run enters `verifying` and the `run_completion` Gate opens (execution-model §10). */
@@ -309,6 +312,11 @@ export class RunScheduler {
       case "remediate":
         // Batched after every other node had its turn: a Gate failing later in this pass joins the same turn.
         remediate = rootAdvice;
+        break;
+      case "prepare_turn":
+        // Queued root inputs make one Orchestrator turn now; an unfundable turn waits on budget like every root turn.
+        if (rootAdvice.funded) actions.push({ kind: "prepare_root_turn", inputIds: rootAdvice.inputIds });
+        else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
         break;
       case "idle":
       case "run_terminal":
@@ -666,6 +674,8 @@ export class RunScheduler {
         return this.runners.root.settle(runId, meta);
       case "prepare_gate_remediation":
         return this.runners.root.prepareRemediation(runId, meta);
+      case "prepare_root_turn":
+        return this.runners.root.prepareTurn(runId, meta);
       case "settle_gate_remediation":
         return this.runners.root.settleRemediation(runId, meta);
       case "begin_run_completion":

@@ -37,6 +37,8 @@ import {
   DECISION_STATUSES,
   DECISION_SUPERSESSION_REASONS,
   REQUESTABLE_DECISION_KINDS,
+  REQUIREMENT_PROPOSAL_STATUSES,
+  ORCHESTRATOR_INPUT_KINDS,
   REQUIREMENT_WAIVER_MAX_EVIDENCE,
   EVALUATOR_PURPOSES,
   FAN_IN_POLICIES,
@@ -129,6 +131,8 @@ import {
   type TaskBlockReason,
   type ToolPolicy,
   type VerificationPolicy,
+  type ProposedRequirement,
+  type QueuedOrchestratorInput,
 } from "@agentique-console/core";
 
 /** Renders a closed value set as a SQL `IN (...)` list. */
@@ -658,7 +662,7 @@ export const decisions = sqliteTable(
       sql`${t.kind} <> 'requirement_waiver' OR (json_extract(${t.subject}, '$.requirementId') GLOB 'req_*' AND json_extract(${t.subject}, '$.requirementRevisionId') GLOB 'reqr_*' AND json_type(${t.subject}, '$.evidenceArtifactIds') = 'array' AND json_array_length(${t.subject}, '$.evidenceArtifactIds') <= ${sql.raw(String(REQUIREMENT_WAIVER_MAX_EVIDENCE))} AND json_array_length(${t.affects}, '$.requirementIds') = 1 AND json_extract(${t.affects}, '$.requirementIds[0]') = json_extract(${t.subject}, '$.requirementId'))`,
     ),
     // An Invocation requests only the requestable kinds (execution-model §8.2); the runtime records a side_effect_approval on its behalf.
-    check("decisions_requestable_by_invocation", sql`json_extract(${t.requestedBy}, '$.kind') <> 'invocation' OR ${t.kind} IN (${inList(REQUESTABLE_DECISION_KINDS)}, 'side_effect_approval')`),
+    check("decisions_requestable_by_invocation", sql`json_extract(${t.requestedBy}, '$.kind') <> 'invocation' OR ${t.kind} IN (${inList(REQUESTABLE_DECISION_KINDS)}, 'side_effect_approval', 'orchestrator_choice')`),
     check("decisions_no_self_supersede", sql`${t.supersedesDecisionId} IS NULL OR ${t.supersedesDecisionId} <> ${t.id}`),
   ],
 );
@@ -1812,6 +1816,88 @@ export const events = sqliteTable(
   ],
 );
 
+/**
+ * Requirement proposals (execution-model §8.1 `propose_requirements`): the
+ * Orchestrator's proposed tree awaiting the operator. One `proposed` row per
+ * Run at a time (a new proposal supersedes the open one); an approval names
+ * the one revision it created; a rejection names none; a superseded row
+ * names its superseder. Rows never change identity and are never deleted.
+ */
+export const requirementProposals = sqliteTable(
+  "requirement_proposals",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    invocationId: text("invocation_id")
+      .notNull()
+      .references(() => invocations.id),
+    status: text("status").notNull(),
+    entries: text("entries", { mode: "json" }).$type<ProposedRequirement[]>().notNull(),
+    rationale: text("rationale").notNull(),
+    resolutionStatus: text("resolution_status"),
+    requirementRevisionId: text("requirement_revision_id").references(() => requirementRevisions.id),
+    resolutionEdited: integer("resolution_edited", { mode: "boolean" }),
+    resolutionRationale: text("resolution_rationale"),
+    resolvedAt: timestamp("resolved_at"),
+    /** The later proposal that superseded this one; recorded in the transaction that inserts the superseder, so it is not a foreign key (the CHECKs below and the store hold the rule). */
+    supersededByProposalId: text("superseded_by_proposal_id"),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (t) => [
+    index("requirement_proposals_run").on(t.runId, t.createdAt),
+    index("requirement_proposals_invocation").on(t.invocationId),
+    uniqueIndex("requirement_proposals_one_open_per_run")
+      .on(t.runId)
+      .where(sql`status = 'proposed'`),
+    uniqueIndex("requirement_proposals_revision")
+      .on(t.requirementRevisionId)
+      .where(sql`requirement_revision_id IS NOT NULL`),
+    check("requirement_proposals_status", sql`${t.status} IN (${inList(REQUIREMENT_PROPOSAL_STATUSES)})`),
+    check("requirement_proposals_resolution_status", sql`${t.resolutionStatus} IS NULL OR ${t.resolutionStatus} IN ('approved', 'rejected')`),
+    check(
+      "requirement_proposals_resolved",
+      sql`(${t.status} IN ('approved', 'rejected')) = (${t.resolutionStatus} IS NOT NULL AND ${t.resolvedAt} IS NOT NULL AND ${t.resolutionEdited} IS NOT NULL) AND (${t.resolutionStatus} IS NULL OR ${t.resolutionStatus} = ${t.status})`,
+    ),
+    check("requirement_proposals_approval_revision", sql`(${t.status} = 'approved') = (${t.requirementRevisionId} IS NOT NULL)`),
+    check("requirement_proposals_edited_only_approved", sql`${t.resolutionEdited} IS NULL OR ${t.resolutionEdited} = 0 OR ${t.status} = 'approved'`),
+    check("requirement_proposals_superseded", sql`(${t.status} = 'superseded') = (${t.supersededByProposalId} IS NOT NULL)`),
+    check("requirement_proposals_no_self_supersede", sql`${t.supersededByProposalId} IS NULL OR ${t.supersededByProposalId} <> ${t.id}`),
+  ],
+);
+
+/**
+ * Queued root inputs (execution-model §4.6): typed inputs the operator's
+ * actions produce for the Orchestrator's next logical turn — a message, a
+ * superseding Decision resolution, a proposal resolution — each delivered
+ * by exactly one later Orchestrator Invocation whose manifest lists it.
+ */
+export const orchestratorInputs = sqliteTable(
+  "orchestrator_inputs",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    kind: text("kind").notNull(),
+    input: text("input", { mode: "json" }).$type<QueuedOrchestratorInput>().notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    deliveredByInvocationId: text("delivered_by_invocation_id").references(() => invocations.id),
+    deliveredAt: timestamp("delivered_at"),
+  },
+  (t) => [
+    index("orchestrator_inputs_run").on(t.runId, t.createdAt, t.id),
+    index("orchestrator_inputs_delivery").on(t.deliveredByInvocationId),
+    check("orchestrator_inputs_kind", sql`${t.kind} IN (${inList(ORCHESTRATOR_INPUT_KINDS)})`),
+    check("orchestrator_inputs_input_kind", sql`json_extract(${t.input}, '$.kind') = ${t.kind}`),
+    check("orchestrator_inputs_delivery", sql`(${t.deliveredByInvocationId} IS NULL) = (${t.deliveredAt} IS NULL)`),
+  ],
+);
+
 export const TABLE_NAMES = [
   "schema_info",
   "workspaces",
@@ -1827,6 +1913,7 @@ export const TABLE_NAMES = [
   "requirement_revisions",
   "requirement_status_changes",
   "acceptance_criteria",
+  "requirement_proposals",
   "decisions",
   "tasks",
   "task_dependencies",
@@ -1840,6 +1927,7 @@ export const TABLE_NAMES = [
   "runtime_tool_calls",
   "provider_continuations",
   "context_manifests",
+  "orchestrator_inputs",
   "evaluations",
   "gates",
   "completion_requests",

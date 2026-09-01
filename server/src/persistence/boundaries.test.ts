@@ -468,6 +468,10 @@ describe("import boundaries", () => {
       ["request_completion", "CompletionCallInput"],
       ["request_decision", "RequestDecisionInput"],
       ["write_artifact", "WriteArtifactInput"],
+      ["create_tasks", "CreateTasksInput"],
+      ["record_decision", "RecordDecisionInput"],
+      ["propose_requirements", "ProposeRequirementsInput"],
+      ["revise_execution_plan", "ReviseExecutionPlanInput"],
       ["read_requirements", "ReadRequirementsInput"],
       ["read_decisions", "ReadDecisionsInput"],
       ["read_tasks", "ReadTasksInput"],
@@ -528,12 +532,12 @@ describe("import boundaries", () => {
     const superseders = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.endsWith("stores/decisions.ts")).filter((f) => /stores\.decisions\.supersede\(/.test(read(rel(f)))).map(rel).sort();
     expect(superseders).toEqual(["server/src/execution/decision-requests.ts"]);
     const requesters = executionFiles.filter((f) => /stores\.decisions\.request\(/.test(read(rel(f)))).map(rel).sort();
-    expect(requesters).toEqual(["server/src/execution/attempt-executor.ts", "server/src/execution/budget-increases.ts", "server/src/execution/completion.ts", "server/src/execution/decision-requests.ts", "server/src/execution/publication.ts"]);
+    expect(requesters).toEqual(["server/src/execution/attempt-executor.ts", "server/src/execution/budget-increases.ts", "server/src/execution/completion.ts", "server/src/execution/decision-records.ts", "server/src/execution/decision-requests.ts", "server/src/execution/publication.ts"]);
     for (const [file, kind] of [["server/src/execution/attempt-executor.ts", "side_effect_approval"], ["server/src/execution/budget-increases.ts", "budget_increase"], ["server/src/execution/completion.ts", "signoff"], ["server/src/execution/publication.ts", "publish"]] as const) {
       expect(read(file), file).toMatch(new RegExp(`kind: "${kind}"`));
     }
     const resolvers = executionFiles.filter((f) => /stores\.decisions\.resolve\(/.test(read(rel(f)))).map(rel).sort();
-    expect(resolvers).toEqual(["server/src/execution/budget-increases.ts", "server/src/execution/decision-requests.ts", "server/src/execution/publication.ts", "server/src/execution/signoff.ts"]);
+    expect(resolvers).toEqual(["server/src/execution/budget-increases.ts", "server/src/execution/decision-records.ts", "server/src/execution/decision-requests.ts", "server/src/execution/publication.ts", "server/src/execution/signoff.ts"]);
     expect(read("server/src/execution/runtime-tools.ts")).toMatch(/this\.#decisions\.request\(/);
     // 8. The requester is refused typed before validation for every kind with another owner, and the store enforces the same closed set.
     expect(read("server/src/execution/runtime-tools.ts")).toMatch(/forbiddenDecisionKindOf\(/);
@@ -595,7 +599,7 @@ describe("import boundaries", () => {
     expect(`${port}\n${service}`).not.toMatch(/\b(legacy|compat\w*|fallback|shim|deprecated)\b/i);
   });
 
-  it("runtime reads are ephemeral projections and write_artifact is store-owned: no transaction, row, Event, cursor state, timer, transcript, messaging, or compatibility mechanism, and future tools stay unbound (execution-model §6.4)", () => {
+  it("runtime reads are ephemeral projections and write_artifact is store-owned: no transaction, row, Event, cursor state, timer, transcript, messaging, or compatibility mechanism, and every authoring tool is bound to the Orchestrator alone (execution-model §6.4)", () => {
     const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     // 1. The read service reads canonical stores only: it opens no transaction, appends no Event, and performs no store write.
     const reads = strip(fs.readFileSync(path.join(repoRoot, "server/src/execution/runtime-reads.ts"), "utf8"));
@@ -638,17 +642,31 @@ describe("import boundaries", () => {
     const executor = strip(fs.readFileSync(path.join(repoRoot, "server/src/execution/runtime-tools.ts"), "utf8"));
     expect(executor).toMatch(/if \(isRuntimeToolReadTool\(tool\)\) return this\.#read\(/);
     expect(executor.slice(executor.indexOf("#read(tool:"), executor.indexOf("#handle("))).not.toMatch(/tx\.write\(|runtimeToolCalls\.record\(|journal\.append/);
-    // 8. Future tools remain permitted-but-not-executable, and no full update_task semantics exist: the closed executable
-    //    tuples name exactly the executable tools, and the one update_task operation is the Coordinator's cancel.
+    // 8. Every executable tool is a typed member of the closed tuples and has exactly one handler binding: the four authoring
+    //    tools bind to the Orchestrator's authoring purposes alone (never the final synthesis, never another role), and the
+    //    closed `update_task` operations are cancel, add_evidence, and add_outputs — no other status transition.
     const core = fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8");
-    expect(core).toMatch(/export const RUNTIME_TOOL_CALL_TOOLS = \["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact"\] as const;/);
+    expect(core).toMatch(/export const RUNTIME_TOOL_CALL_TOOLS = \["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact", "create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"\] as const;/);
     expect(core).toMatch(/export const RUNTIME_TOOL_READ_TOOLS = \["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions"\] as const;/);
-    for (const future of ["create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"]) {
-      expect(core, future).not.toMatch(new RegExp(`${future}: \\[\\{ role`));
-      expect(core, future).not.toMatch(new RegExp(`tool: "${future}"`));
+    for (const authoring of ["create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"]) {
+      expect(core, authoring).toMatch(new RegExp(`${authoring}: \\[\\{ role: "orchestrator", purposes: AUTHORING_ORCHESTRATOR_PURPOSES \\}\\],`));
+      expect(core, authoring).toMatch(new RegExp(`${authoring}: \\["final_synthesis"\\],`));
     }
-    expect(core).toMatch(/update_task: \[\{ role: "coordinator", purposes: \["decompose", "replan"\] \}\]/);
-    expect(core).toMatch(/z\.discriminatedUnion\("kind", \[z\.strictObject\(\{ kind: z\.literal\("cancel"\), reason: nonEmptyString\.max\(TASK_UPDATE_MAX_REASON_LENGTH\) \}\)\]\)/);
+    expect(core).toMatch(/export const AUTHORING_ORCHESTRATOR_PURPOSES = COMPLETION_REQUESTING_PURPOSES;/);
+    expect(core).toMatch(/update_task: \[\r?\n\s+\{ role: "orchestrator", purposes: AUTHORING_ORCHESTRATOR_PURPOSES \},\r?\n\s+\{ role: "coordinator", purposes: \["decompose", "replan"\] \},\r?\n\s+\{ role: "worker", purposes: WORKER_PURPOSES \},\r?\n\s+\],/);
+    expect(core).toMatch(/kind: z\.literal\("cancel"\), reason: nonEmptyString\.max\(TASK_UPDATE_MAX_REASON_LENGTH\)/);
+    expect(core).toMatch(/kind: z\.literal\("add_evidence"\), evidence: z\.array\(evidenceSchema\)\.min\(1\)\.max\(TASK_UPDATE_MAX_EVIDENCE\)/);
+    expect(core).toMatch(/kind: z\.literal\("add_outputs"\), artifactIds: uniqueIds\(idSchema\("artifact"\)\)\.min\(1\)\.max\(TASK_UPDATE_MAX_OUTPUTS\)/);
+    expect(core).not.toMatch(/kind: z\.literal\("(complete|fail|start|reopen|set_status)"\)/);
+    // The four handlers live in their own services; the executor only dispatches, and no provider file names a handler service.
+    const executorSource = fs.readFileSync(path.join(repoRoot, "server/src/execution/runtime-tools.ts"), "utf8");
+    for (const [tool, call] of [["create_tasks", "this.#authoring.createTasks("], ["update_task", "this.#authoring.updateTask("], ["record_decision", "this.#records.record("], ["propose_requirements", "this.#requirementProposals.propose("], ["revise_execution_plan", "this.#revisePlan("]] as const) {
+      expect(executorSource, tool).toContain(`case "${tool}":`);
+      expect(executorSource, tool).toContain(call);
+    }
+    for (const file of listFiles("server/src/provider", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      expect(fs.readFileSync(file, "utf8"), rel(file)).not.toMatch(/TaskAuthoringService|DecisionRecordService|RequirementProposalService|OrchestratorInputService|PlanRevisionService/);
+    }
     // 9. Raw Artifact content stays out of the safe result, the record, and the read rejections by shape: the result union's
     //    write_artifact member carries metadata fields only.
     expect(core).toMatch(/\{ tool: "write_artifact"; artifactId: ArtifactId; mediaType: string; digest: string; byteSize: number; title: string \}/);
@@ -784,7 +802,7 @@ describe("import boundaries", () => {
     expect(read("server/src/execution/invocation-preparation-service.ts")).toMatch(/run\.operatorPause !== null/);
     expect(namers(/\brunAdmitsExecution\(/)).toEqual(["server/src/execution/runtime-tools.ts"]);
     expect(namers(/\brunExecutionInterruptionOf\(/)).toEqual(["server/src/execution/attempt-executor.ts", "server/src/execution/tool-call-authorization.ts"]);
-    expect(namers(/\brunIsRunningOrDraining\(/)).toEqual(["server/src/execution/completion-requests.ts", "server/src/execution/decision-requests.ts", "server/src/persistence/stores/completion-requests.ts"]);
+    expect(namers(/\brunIsRunningOrDraining\(/)).toEqual(["server/src/execution/completion-requests.ts", "server/src/execution/decision-records.ts", "server/src/execution/decision-requests.ts", "server/src/execution/requirement-proposals.ts", "server/src/execution/runtime-tools.ts", "server/src/execution/task-authoring.ts", "server/src/persistence/stores/completion-requests.ts"]);
     expect(read("server/src/execution/scheduler.ts")).toMatch(/run\.operatorPause !== null\) \{/);
     expect(read("server/src/execution/scheduler.ts")).toMatch(/run\.waitReason !== "operator" && actions\.length > 0\) actions\.unshift\(\{ kind: "resume_run"/);
     // 5. No permanent paused status, no second wait vocabulary, no compatibility mechanism, no timer, no polling, no messaging, no provider persistence, no scheduler driving from control.

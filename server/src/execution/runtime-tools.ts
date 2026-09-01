@@ -34,15 +34,17 @@
 import {
   boundedFailureMessage,
   canonicalRuntimeToolCall,
-  failureKindOf,
   effectiveRuntimeTools,
+  failureKindOf,
   INVOCATION_MACHINE,
   isRuntimeToolReadTool,
   NotFoundError,
   patternPositionKey,
   runAdmitsExecution,
+  runIsRunningOrDraining,
   runtimeToolCallMaxBytes,
   runtimeToolCallRequestSchema,
+  runtimeToolHandlerBound,
   type AttemptId,
   type ExecutableRuntimeTool,
   type Invocation,
@@ -50,6 +52,7 @@ import {
   type InvocationPurpose,
   type InvocationRole,
   type PlanNodeId,
+  type ReviseExecutionPlanInput,
   type RunId,
   type RuntimeTool,
   type RuntimeToolCallOutcome,
@@ -57,6 +60,7 @@ import {
   type RuntimeToolCallTool,
   type RuntimeToolReadRequest,
   type RuntimeToolReadTool,
+  type RuntimeToolRejection,
 } from "@agentique-console/core";
 import { sha256Hex } from "../persistence/blob-store.ts";
 import type { PersistenceContext } from "../persistence/context.ts";
@@ -65,8 +69,12 @@ import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { RuntimeToolCallPort } from "../provider/adapter.ts";
 import { ArtifactWriteService } from "./artifact-writes.ts";
 import { CompletionRequestService } from "./completion-requests.ts";
+import { DecisionRecordService } from "./decision-records.ts";
 import { DecisionRequestService, forbiddenDecisionKindOf } from "./decision-requests.ts";
+import type { PlanRevisionService } from "./plan-revision-service.ts";
+import { RequirementProposalService } from "./requirement-proposals.ts";
 import { ReadRefused, RuntimeReadService } from "./runtime-reads.ts";
+import { TaskAuthoringService } from "./task-authoring.ts";
 import { TaskProposalService, type HandlerOutcome, type RuntimeToolCaller } from "./task-proposals.ts";
 import type { ExecutionDiagnosticSink } from "./workspace-cleanup.ts";
 
@@ -149,6 +157,15 @@ function approvalContinuationPurpose(role: InvocationRole, from: InvocationPurpo
   return role === "orchestrator" && to === "decision_resolution" && from !== "gate_result";
 }
 
+/**
+ * The configured services a handler needs beyond the stores: `revise_execution_plan` compiles through the one plan-revision
+ * service (execution-model §4.5), whose defaults and limits are console configuration. A tool whose service is not configured
+ * is not callable — it never reaches a handler, so the executor's effective set never lists it.
+ */
+export interface RuntimeToolServices {
+  planRevisions?: PlanRevisionService;
+}
+
 export class RuntimeToolExecutor implements RuntimeToolCallPort {
   readonly tools: readonly ExecutableRuntimeTool[];
   readonly #ctx: PersistenceContext;
@@ -161,8 +178,12 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
   readonly #decisions: DecisionRequestService;
   readonly #artifacts: ArtifactWriteService;
   readonly #reads: RuntimeReadService;
+  readonly #authoring: TaskAuthoringService;
+  readonly #records: DecisionRecordService;
+  readonly #requirementProposals: RequirementProposalService;
+  readonly #planRevisions: PlanRevisionService | null;
 
-  constructor(ctx: PersistenceContext, stores: Stores, binding: RuntimeToolBinding, options: WriteOptions = {}, diagnostics: ExecutionDiagnosticSink = () => {}) {
+  constructor(ctx: PersistenceContext, stores: Stores, binding: RuntimeToolBinding, options: WriteOptions = {}, diagnostics: ExecutionDiagnosticSink = () => {}, services: RuntimeToolServices = {}) {
     this.#ctx = ctx;
     this.#stores = stores;
     this.#binding = binding;
@@ -173,7 +194,11 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
     this.#decisions = new DecisionRequestService(ctx, stores);
     this.#artifacts = new ArtifactWriteService(stores);
     this.#reads = new RuntimeReadService(stores);
-    this.tools = effectiveRuntimeTools(binding.manifestTools, binding.role, binding.purpose);
+    this.#authoring = new TaskAuthoringService(ctx, stores, this.#proposals);
+    this.#records = new DecisionRecordService(ctx, stores);
+    this.#requirementProposals = new RequirementProposalService(ctx, stores);
+    this.#planRevisions = services.planRevisions ?? null;
+    this.tools = effectiveRuntimeTools(binding.manifestTools, binding.role, binding.purpose).filter((tool) => tool !== "revise_execution_plan" || this.#planRevisions !== null);
   }
 
   async call(request: RuntimeToolCallRequest): Promise<RuntimeToolCallOutcome> {
@@ -296,7 +321,15 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
         return this.#proposals.propose(caller, request.input, this.#options);
       }
       case "update_task":
-        return this.#proposals.cancel(caller, request.input, this.#options);
+        return this.#authoring.updateTask(caller, request.input, this.#options);
+      case "create_tasks":
+        return this.#authoring.createTasks(caller, request.input, this.#options);
+      case "record_decision":
+        return this.#records.record(caller, request.input, this.#options);
+      case "propose_requirements":
+        return this.#requirementProposals.propose(caller, request.input, this.#options);
+      case "revise_execution_plan":
+        return this.#revisePlan(caller, request.input);
       case "request_completion":
         return this.#completion.request(caller, this.#options);
       case "request_decision":
@@ -307,5 +340,26 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
         // Read tools never reach the mutating handler; the executor dispatched them before opening a transaction.
         throw new Error(`no mutating handler for ${request.tool}`);
     }
+  }
+
+  /**
+   * `revise_execution_plan` (execution-model §4.5): the Orchestrator's source plan goes through the one plan-revision service —
+   * compiled, validated, and recorded as the accepted revision or the typed rejection — inside the call's transaction. The
+   * call itself is accepted either way: the compiler's verdict is the result, and a rejection is recorded as an Event by the
+   * service, never as a refused call.
+   */
+  #revisePlan(caller: RuntimeToolCaller, input: ReviseExecutionPlanInput): HandlerOutcome {
+    const { invocation, node } = caller;
+    const rejected = (code: RuntimeToolRejection["code"], message: string): HandlerOutcome => ({ kind: "rejected", reasons: [{ code, message, path: null }] });
+    if (this.#planRevisions === null) return rejected("caller_not_permitted", "revise_execution_plan has no configured plan-revision service");
+    if (invocation.role !== "orchestrator" || !runtimeToolHandlerBound("revise_execution_plan", invocation.role, invocation.purpose) || invocation.gateId !== null) return rejected("caller_not_permitted", `a ${invocation.role} Invocation with purpose ${invocation.purpose} never revises the Execution Plan`);
+    if (invocation.status !== "running" || invocation.planNodeId !== node.id) return rejected("caller_not_running", `Invocation ${invocation.id} is ${invocation.status} or does not belong to PlanNode ${node.id}`);
+    const run = this.#stores.runs.get(invocation.runId);
+    if (!runIsRunningOrDraining(run) || node.status !== "running") return rejected("plan_not_revisable", `Run ${run.id} is ${run.status}${run.operatorPause === null ? "" : ` and paused (${run.operatorPause})`} and PlanNode ${node.id} is ${node.status}; the plan is revised from a running Orchestrator turn`);
+    const outcome = this.#planRevisions.propose({ runId: run.id, proposedByInvocationId: invocation.id, source: input.source, correlationId: this.#options.correlationId ?? null, causationSeq: this.#options.causationSeq ?? null });
+    return {
+      kind: "applied",
+      result: outcome.accepted ? { tool: "revise_execution_plan", accepted: true, revisionNumber: outcome.revision.number, reasons: [] } : { tool: "revise_execution_plan", accepted: false, revisionNumber: null, reasons: outcome.reasons },
+    };
   }
 }

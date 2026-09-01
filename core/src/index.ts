@@ -19,6 +19,7 @@ export * from "./index-artifacts.ts";
 export * from "./handoffs.ts";
 export * from "./agents.ts";
 export * from "./invocations.ts";
+export * from "./orchestrator-inputs.ts";
 export * from "./pattern-positions.ts";
 export * from "./capability-policy.ts";
 export * from "./verification.ts";

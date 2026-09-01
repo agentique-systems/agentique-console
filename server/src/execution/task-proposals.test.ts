@@ -144,9 +144,10 @@ describe("Task proposals", () => {
       const prepared = await h.executor.prepareNextAttempt(worker.invocation.id);
       if (prepared.kind !== "prepared") throw new Error(prepared.kind);
       const workerPort = portFor(h, prepared.invocation, prepared.attempt);
-      expect(workerPort.tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_decision", "write_artifact"]);
+      expect(workerPort.tools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "update_task", "request_decision", "write_artifact"]);
       expect(await workerPort.call(propose([proposal({ key: "z", requirementIds: [d.leafIds[0]!] })]))).toEqual({ kind: "not_callable", tool: "propose_tasks" });
-      expect(await workerPort.call(cancel(b!))).toEqual({ kind: "not_callable", tool: "update_task" });
+      // A Worker holds update_task (its own Evidence and outputs) but never cancels: the handler refuses, and nothing is written.
+      expect(await workerPort.call(cancel(b!))).toMatchObject({ kind: "rejected", tool: "update_task", reasons: [{ code: "caller_not_permitted", path: "update" }] });
       expect(h.stores.runtimeToolCalls.listByInvocation(worker.invocation.id)).toEqual([]);
     } finally {
       h.close();

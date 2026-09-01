@@ -108,6 +108,11 @@ function renderInput(input: ManifestInput): string[] {
         `- plan_revision ${input.accepted ? `accepted revision ${input.revisionNumber ?? NONE}` : "rejected"}`,
         ...input.reasons.map((r) => `  - ${r.code}${r.path === null ? "" : ` at ${r.path}`}: ${r.message}`),
       ];
+    case "requirement_proposal_resolution":
+      return [
+        `- requirement_proposal_resolution ${input.proposalId} ${input.status}${input.requirementRevisionId === null ? "" : ` requirement_revision ${input.requirementRevisionId}`}${input.edited ? " edited" : ""}`,
+        ...(input.rationale === null ? [] : [`  rationale: ${input.rationale}`]),
+      ];
     case "route_selection":
       return [`- route_selection ${input.evaluationId} selected ${input.selectedLabel}`];
     case "coordinator_turn":

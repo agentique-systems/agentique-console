@@ -2,6 +2,7 @@ import { and, asc, eq, gt, inArray, isNotNull, notExists, or } from "drizzle-orm
 import { alias } from "drizzle-orm/sqlite-core";
 import {
   assertTaskCompletion,
+  canonicalJson,
   ConflictError,
   InvariantViolationError,
   parseOrThrow,
@@ -12,6 +13,8 @@ import {
   taskSchema,
   ValidationError,
   wouldCreateDependencyCycle,
+  type ArtifactId,
+  type Evidence,
   type GateId,
   type PlanNodeId,
   type RunId,
@@ -280,6 +283,46 @@ export class TaskStore {
     if (edges.length === 0) return true;
     const rows = this.ctx.db.select({ id: tasks.id, status: tasks.status }).from(tasks).where(inArray(tasks.id, edges.map((e) => e.dependsOnTaskId))).all();
     return rows.every((r) => r.status === "completed");
+  }
+
+  /**
+   * Associates Evidence and output Artifacts with a non-terminal Task
+   * (execution-model §5.5.1 `update_task`): additions only, deduplicated
+   * against what the Task already carries; a repeat of an existing
+   * association changes nothing and writes nothing. Output Artifacts belong
+   * to the Task's Run. A terminal Task is immutable.
+   */
+  recordEvidence(id: TaskId, additions: { evidence: Evidence[]; outputArtifactIds: ArtifactId[] }, options?: WriteOptions): Task {
+    return this.ctx.tx.write(() => {
+      const current = this.get(id);
+      if (TASK_MACHINE.isTerminal(current.status)) throw new ConflictError(`Task ${id} is ${current.status}; a terminal Task is immutable`, { taskId: id, status: current.status });
+      const run = loadRunRef(this.ctx, current.runId);
+      const seen = new Set(current.evidence.map((e) => canonicalJson(e)));
+      const evidence = additions.evidence.filter((e) => {
+        const key = canonicalJson(e);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const outputArtifactIds = [...new Set(additions.outputArtifactIds)].filter((artifactId) => !current.outputArtifactIds.includes(artifactId));
+      if (outputArtifactIds.length > 0) {
+        const rows = this.ctx.db.select({ id: artifacts.id, runId: artifacts.runId }).from(artifacts).where(inArray(artifacts.id, outputArtifactIds)).all();
+        for (const artifactId of outputArtifactIds) assertSameRun("Artifact", artifactId, requireRow(rows.find((r) => r.id === artifactId), "Artifact", artifactId).runId, current.runId);
+      }
+      if (evidence.length === 0 && outputArtifactIds.length === 0) return current;
+      const next: Task = { ...current, evidence: [...current.evidence, ...evidence], outputArtifactIds: [...current.outputArtifactIds, ...outputArtifactIds], updatedAt: this.ctx.clock() };
+      parseOrThrow(taskSchema, next, "Task");
+      this.ctx.journal.append({
+        type: "task.evidence_recorded",
+        scope: runScope(run, { planNodeId: current.planNodeId, invocationId: current.invocationId }),
+        subjectType: "task",
+        subjectId: id,
+        payload: { taskId: id, evidence, outputArtifactIds },
+        ...writeMeta(options),
+      });
+      this.ctx.db.update(tasks).set({ evidence: next.evidence, outputArtifactIds: next.outputArtifactIds, updatedAt: next.updatedAt }).where(eq(tasks.id, id)).run();
+      return next;
+    });
   }
 
   transition(id: TaskId, transition: TaskTransition, options?: WriteOptions): Task {

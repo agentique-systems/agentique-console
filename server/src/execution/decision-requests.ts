@@ -36,6 +36,7 @@
 import {
   DECISION_KINDS,
   DecisionRequestRefusedError,
+  decisionResolutionInputOf,
   isAgentRequestedDecision,
   isRequestableDecisionKind,
   NotFoundError,
@@ -105,6 +106,26 @@ export type DecisionResolutionOutcome =
   | { kind: "superseded"; decisionId: DecisionId; reason: "requirement_waiver_stale"; replayed: boolean };
 
 /** A requester whose Decision ended and whose one successor does not exist yet: what the scheduler's `continue_decision_request` names. */
+export interface DecisionSupersedeInput {
+  /** The requested `operator_choice` the runtime resolved by its default policy. */
+  decisionId: DecisionId;
+  /** The option the operator chooses instead. */
+  optionId: string;
+  rationale?: string | null;
+  artifactIds?: ArtifactId[];
+}
+
+export interface DecisionSupersessionOutcome {
+  kind: "superseded";
+  decisionId: DecisionId;
+  /** The operator-requested `operator_choice` recorded as the explicit superseder, resolved to `chosenOptionId`. */
+  supersedingDecisionId: DecisionId;
+  chosenOptionId: string;
+  replayed: boolean;
+  /** How the choice reaches the work: the requester's pending continuation carries both resolutions, or the Orchestrator's next turn receives the superseding resolution as a queued input. */
+  followUp: "continuation" | "queued_input" | "none";
+}
+
 export interface PendingContinuation {
   invocation: Invocation;
   decision: Decision;
@@ -154,8 +175,8 @@ export class DecisionRequestService {
 
   /** An `operator_choice`: the caller's scope bounds every affected id and the activation condition; options keep their order. */
   private requestChoice(run: Run, node: PatternPlanNode, invocation: Invocation, manifest: ContextManifest, input: Extract<RequestDecisionInput, { kind: "operator_choice" }>, options: WriteOptions): HandlerOutcome {
-    const scope = this.scopeOf(run, node, invocation, manifest);
-    const outOfScope = this.outOfScope(scope, input.affects);
+    const scope = requestScopeOf(this.stores, run, node, invocation, manifest);
+    const outOfScope = scopeViolationOf(scope, input.affects);
     if (outOfScope !== null) return reject("decision_scope_invalid", outOfScope.message, outOfScope.path);
     const policy = input.resolutionPolicy;
     let activationCondition: ActivationCondition | null = null;
@@ -208,7 +229,7 @@ export class DecisionRequestService {
     if (!REQUIREMENT_MACHINE.canTransition(requirement.status, "waived")) return reject("requirement_not_waivable", `Requirement ${requirement.id} is ${requirement.status}; it cannot become waived`, "requirementId");
     if (this.stores.decisions.openWaiversOf(run.conversationId, requirement.id).length > 0) return reject("requirement_not_waivable", `Requirement ${requirement.id} already has an open requirement_waiver Decision`, "requirementId");
     const evidence = [...new Set(input.evidenceArtifactIds ?? [])].sort();
-    const readable = this.readableArtifactIds(invocation, manifest);
+    const readable = readableArtifactIds(this.stores, invocation, manifest);
     for (const id of evidence) {
       let artifact;
       try {
@@ -300,6 +321,83 @@ export class DecisionRequestService {
         this.stores.requirements.recordStatusChange({ requirementId: subject.requirementId, runId: run.id, to: "waived", actor: "operator", evidence, gateId: null, decisionId: decision.id, rationale }, { ...meta, causationSeq: this.ctx.journal.lastSeq() });
       }
       return { kind: "resolved", decisionId: decision.id, chosenOptionId: input.optionId, resolvedBy: "operator", replayed: false };
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Operator supersession of a policy resolution
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Supersedes a requested `operator_choice` the runtime resolved by its
+   * default policy (execution-model §8.2): a new `operator_choice`
+   * requested by the operator — the same question, options, and affected
+   * ids — is recorded as the explicit superseder (the original stays in
+   * history as `superseded`, naming it) and resolved by the operator to the
+   * chosen option in the same transaction. Nothing is undone, rerun, or
+   * reallocated: a requester still awaiting its continuation continues once,
+   * through the scheduler, with both resolutions in its manifest; when work
+   * already proceeded, the superseding resolution is queued as a typed
+   * input of the Orchestrator's next turn. A repeat with the same option
+   * replays; a different option, or an operator-resolved Decision, is refused.
+   */
+  supersede(input: DecisionSupersedeInput, options: WriteOptions = {}): DecisionSupersessionOutcome {
+    if (options.actor !== undefined && options.actor.kind !== "operator") throw new DecisionRequestRefusedError("operator_required", `a policy resolution is superseded by the operator, not ${options.actor.kind}`, { decisionId: input.decisionId });
+    return this.ctx.tx.write((): DecisionSupersessionOutcome => {
+      const decision = this.requested(input.decisionId);
+      const run = this.stores.runs.get(decision.runId!);
+      if (RUN_MACHINE.isTerminal(run.status)) throw new DecisionRequestRefusedError("run_terminal", `Run ${run.id} is ${run.status}; nothing is superseded for a terminal Run`, { decisionId: decision.id, runId: run.id });
+      if (decision.kind !== "operator_choice") throw new DecisionRequestRefusedError("not_supersedable", `Decision ${decision.id} is a ${decision.kind}; only a policy-resolved operator_choice is superseded`, { decisionId: decision.id, kind: decision.kind });
+      if (!decision.options.some((o) => o.id === input.optionId)) throw new DecisionRequestRefusedError("option_invalid", `${input.optionId} is not an option of Decision ${decision.id}`, { decisionId: decision.id, optionId: input.optionId });
+      if (decision.status === "superseded") {
+        const earlier = decision.supersededByDecisionId === null ? null : this.stores.decisions.get(decision.supersededByDecisionId);
+        if (earlier !== null && earlier.resolution?.chosenOptionId === input.optionId) return { kind: "superseded", decisionId: decision.id, supersedingDecisionId: earlier.id, chosenOptionId: input.optionId, replayed: true, followUp: "none" };
+        throw new DecisionRequestRefusedError("conflicting_resolution", `Decision ${decision.id} was already superseded${earlier === null ? "" : ` by Decision ${earlier.id} choosing ${String(earlier.resolution?.chosenOptionId)}`}`, { decisionId: decision.id });
+      }
+      if (decision.status !== "resolved" || decision.resolution === null || decision.resolution.resolvedBy !== "policy:use_default_after_deadline") {
+        throw new DecisionRequestRefusedError("not_policy_resolved", `Decision ${decision.id} is ${decision.status}${decision.resolution === null ? "" : ` by ${decision.resolution.resolvedBy}`}; only a Decision the runtime resolved by its default policy is superseded by the operator`, { decisionId: decision.id });
+      }
+      if (decision.resolution.chosenOptionId === input.optionId) throw new DecisionRequestRefusedError("option_unchanged", `Decision ${decision.id} already resolved to ${input.optionId}; a supersession chooses another option`, { decisionId: decision.id, optionId: input.optionId });
+      if (decision.requestedBy.kind !== "invocation") throw new DecisionRequestRefusedError("boundary_inconsistent", `Decision ${decision.id} names no requesting Invocation`, { decisionId: decision.id });
+      const rationale = input.rationale ?? null;
+      const artifactIds = [...new Set(input.artifactIds ?? [])].sort();
+      for (const id of artifactIds) {
+        let artifact;
+        try {
+          artifact = this.stores.artifacts.get(id);
+        } catch {
+          throw new DecisionRequestRefusedError("evidence_invalid", `Artifact ${id} does not exist`, { decisionId: decision.id, artifactId: id });
+        }
+        if (artifact.runId !== run.id) throw new DecisionRequestRefusedError("evidence_invalid", `Artifact ${id} belongs to another Run`, { decisionId: decision.id, artifactId: id });
+      }
+      const meta: WriteOptions = { actor: OPERATOR_ACTOR, correlationId: options.correlationId ?? decision.id, causationSeq: options.causationSeq ?? null };
+      const chained = (): WriteOptions => ({ ...meta, causationSeq: this.ctx.journal.lastSeq() });
+      const superseding = this.stores.decisions.request(
+        {
+          conversationId: run.conversationId,
+          runId: run.id,
+          kind: "operator_choice",
+          resolutionPolicy: "operator_required",
+          requestedBy: { kind: "operator" },
+          question: decision.question,
+          options: decision.options,
+          recommendedOptionId: null,
+          rationale,
+          affects: decision.affects,
+          deadlineAt: null,
+          activationCondition: null,
+          subject: null,
+          supersedesDecisionId: decision.id,
+        },
+        meta,
+      );
+      this.stores.decisions.resolve(superseding.id, { resolvedBy: "operator", chosenOptionId: input.optionId, rationale, artifactIds }, chained());
+      // The follow-up goes through canonical turns only: the requester's pending continuation (prepared by the scheduler from rows,
+      // carrying both resolutions), or a typed input of the Orchestrator's next turn when work already proceeded.
+      const requester = this.stores.invocations.get(decision.requestedBy.invocationId);
+      const followUp: DecisionSupersessionOutcome["followUp"] = this.awaitsContinuation(requester, decision.id) ? "continuation" : "queued_input";
+      if (followUp === "queued_input") this.stores.orchestratorInputs.enqueue(run.id, decisionResolutionInputOf(this.stores.decisions.get(superseding.id)), chained());
+      return { kind: "superseded", decisionId: decision.id, supersedingDecisionId: superseding.id, chosenOptionId: input.optionId, replayed: false, followUp };
     });
   }
 
@@ -444,53 +542,54 @@ export class DecisionRequestService {
     if (resolution.chosenOptionId === optionId) return { kind: "resolved", decisionId: decision.id, chosenOptionId: optionId, resolvedBy: resolution.resolvedBy, replayed: true };
     throw new DecisionRequestRefusedError("conflicting_resolution", `Decision ${decision.id} is resolved to ${resolution.chosenOptionId}; ${optionId} conflicts with it`, { decisionId: decision.id, chosen: resolution.chosenOptionId, requested: optionId });
   }
+}
 
-  // ---------------------------------------------------------------------------
-  // Scope (rows only)
-  // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Scope (rows only; shared with the Orchestrator's recorded choices and Task authoring)
+// ---------------------------------------------------------------------------
 
-  /**
-   * The ids a caller may affect: a Worker its own Tasks, its own node, and the Requirements of its manifest; a Coordinator its node,
-   * the node's Tasks, and the node's pinned scope; the Orchestrator the current graph's nodes, the Run's current Tasks, and the
-   * current revision's unretired Requirements. Historical, superseded, foreign, hidden, or inaccessible ids are never in scope.
-   */
-  private scopeOf(run: Run, node: PatternPlanNode, invocation: Invocation, manifest: ContextManifest): RequestScope {
-    switch (invocation.role) {
-      case "worker":
-        return { requirementIds: new Set(manifest.content.requirements.map((r) => r.requirementId)), taskIds: new Set(invocation.taskIds), planNodeIds: new Set([node.id]) };
-      case "coordinator":
-        return {
-          requirementIds: new Set(this.stores.plans.listScope(node.id).map((row) => row.requirementId)),
-          taskIds: new Set(this.stores.tasks.listByPlanNode(node.id).map((t) => t.id)),
-          planNodeIds: new Set([node.id]),
-        };
-      case "orchestrator": {
-        const revision = this.stores.requirements.currentRevision(run.conversationId);
-        const live = new Set(this.stores.requirements.listByConversation(run.conversationId).filter((r) => r.status !== "retired").map((r) => r.id));
-        return {
-          requirementIds: new Set((revision?.tree ?? []).map((e) => e.id).filter((id) => live.has(id))),
-          taskIds: new Set(this.stores.tasks.listByRun(run.id).filter((t) => this.stores.tasks.replacementOf(t.id) === null).map((t) => t.id)),
-          planNodeIds: new Set(this.stores.plans.currentGraph(run.id).nodes.map((n) => n.id)),
-        };
-      }
-      case "evaluator":
-        return { requirementIds: new Set(), taskIds: new Set(), planNodeIds: new Set() };
+
+/**
+ * The ids a caller may affect: a Worker its own Tasks, its own node, and the Requirements of its manifest; a Coordinator its node,
+ * the node's Tasks, and the node's pinned scope; the Orchestrator the current graph's nodes, the Run's current Tasks, and the
+ * current revision's unretired Requirements. Historical, superseded, foreign, hidden, or inaccessible ids are never in scope.
+ */
+export function requestScopeOf(stores: Stores, run: Run, node: PatternPlanNode, invocation: Invocation, manifest: ContextManifest): RequestScope {
+  switch (invocation.role) {
+    case "worker":
+      return { requirementIds: new Set(manifest.content.requirements.map((r) => r.requirementId)), taskIds: new Set(invocation.taskIds), planNodeIds: new Set([node.id]) };
+    case "coordinator":
+      return {
+        requirementIds: new Set(stores.plans.listScope(node.id).map((row) => row.requirementId)),
+        taskIds: new Set(stores.tasks.listByPlanNode(node.id).map((t) => t.id)),
+        planNodeIds: new Set([node.id]),
+      };
+    case "orchestrator": {
+      const revision = stores.requirements.currentRevision(run.conversationId);
+      const live = new Set(stores.requirements.listByConversation(run.conversationId).filter((r) => r.status !== "retired").map((r) => r.id));
+      return {
+        requirementIds: new Set((revision?.tree ?? []).map((e) => e.id).filter((id) => live.has(id))),
+        taskIds: new Set(stores.tasks.listByRun(run.id).filter((t) => stores.tasks.replacementOf(t.id) === null).map((t) => t.id)),
+        planNodeIds: new Set(stores.plans.currentGraph(run.id).nodes.map((n) => n.id)),
+      };
     }
+    case "evaluator":
+      return { requirementIds: new Set(), taskIds: new Set(), planNodeIds: new Set() };
   }
+}
 
-  private outOfScope(scope: RequestScope, affects: RequestedDecisionAffects): { message: string; path: string } | null {
-    for (const id of affects.requirementIds) if (!scope.requirementIds.has(id)) return { message: `Requirement ${id} is outside the caller's scope`, path: "affects.requirementIds" };
-    for (const id of affects.taskIds) if (!scope.taskIds.has(id)) return { message: `Task ${id} is outside the caller's scope`, path: "affects.taskIds" };
-    for (const id of affects.planNodeIds) if (!scope.planNodeIds.has(id)) return { message: `PlanNode ${id} is outside the caller's scope`, path: "affects.planNodeIds" };
-    return null;
-  }
+export function scopeViolationOf(scope: RequestScope, affects: RequestedDecisionAffects): { message: string; path: string } | null {
+  for (const id of affects.requirementIds) if (!scope.requirementIds.has(id)) return { message: `Requirement ${id} is outside the caller's scope`, path: "affects.requirementIds" };
+  for (const id of affects.taskIds) if (!scope.taskIds.has(id)) return { message: `Task ${id} is outside the caller's scope`, path: "affects.taskIds" };
+  for (const id of affects.planNodeIds) if (!scope.planNodeIds.has(id)) return { message: `PlanNode ${id} is outside the caller's scope`, path: "affects.planNodeIds" };
+  return null;
+}
 
-  /** The Artifacts a caller may read: those its immutable manifest lists, and those its own logical turn produced. */
-  private readableArtifactIds(invocation: Invocation, manifest: ContextManifest): Set<ArtifactId> {
-    const ids = new Set<ArtifactId>(manifest.content.artifacts.map((a) => a.artifactId));
-    for (const artifact of this.stores.artifacts.listByRun(invocation.runId)) {
-      if (artifact.producer.kind === "invocation" && artifact.producer.invocationId === invocation.id) ids.add(artifact.id);
-    }
-    return ids;
+/** The Artifacts a caller may read: those its immutable manifest lists, and those its own logical turn produced. */
+export function readableArtifactIds(stores: Stores, invocation: Invocation, manifest: ContextManifest): Set<ArtifactId> {
+  const ids = new Set<ArtifactId>(manifest.content.artifacts.map((a) => a.artifactId));
+  for (const artifact of stores.artifacts.listByRun(invocation.runId)) {
+    if (artifact.producer.kind === "invocation" && artifact.producer.invocationId === invocation.id) ids.add(artifact.id);
   }
+  return ids;
 }

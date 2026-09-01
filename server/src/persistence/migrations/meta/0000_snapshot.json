@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "be3920ad-a7cb-428d-b4db-197445936cb2",
+  "id": "b235a346-ffad-4ecf-beff-3174d3040b90",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -2730,7 +2730,7 @@
         },
         "decisions_requestable_by_invocation": {
           "name": "decisions_requestable_by_invocation",
-          "value": "json_extract(\"decisions\".\"requested_by\", '$.kind') <> 'invocation' OR \"decisions\".\"kind\" IN ('operator_choice', 'requirement_waiver', 'side_effect_approval')"
+          "value": "json_extract(\"decisions\".\"requested_by\", '$.kind') <> 'invocation' OR \"decisions\".\"kind\" IN ('operator_choice', 'requirement_waiver', 'side_effect_approval', 'orchestrator_choice')"
         },
         "decisions_no_self_supersede": {
           "name": "decisions_no_self_supersede",
@@ -4233,6 +4233,122 @@
         }
       }
     },
+    "orchestrator_inputs": {
+      "name": "orchestrator_inputs",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "input": {
+          "name": "input",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "delivered_by_invocation_id": {
+          "name": "delivered_by_invocation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "delivered_at": {
+          "name": "delivered_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "orchestrator_inputs_run": {
+          "name": "orchestrator_inputs_run",
+          "columns": [
+            "run_id",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "orchestrator_inputs_delivery": {
+          "name": "orchestrator_inputs_delivery",
+          "columns": [
+            "delivered_by_invocation_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "orchestrator_inputs_run_id_runs_id_fk": {
+          "name": "orchestrator_inputs_run_id_runs_id_fk",
+          "tableFrom": "orchestrator_inputs",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "orchestrator_inputs_delivered_by_invocation_id_invocations_id_fk": {
+          "name": "orchestrator_inputs_delivered_by_invocation_id_invocations_id_fk",
+          "tableFrom": "orchestrator_inputs",
+          "tableTo": "invocations",
+          "columnsFrom": [
+            "delivered_by_invocation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "orchestrator_inputs_kind": {
+          "name": "orchestrator_inputs_kind",
+          "value": "\"orchestrator_inputs\".\"kind\" IN ('operator_message', 'decision_resolution', 'requirement_proposal_resolution')"
+        },
+        "orchestrator_inputs_input_kind": {
+          "name": "orchestrator_inputs_input_kind",
+          "value": "json_extract(\"orchestrator_inputs\".\"input\", '$.kind') = \"orchestrator_inputs\".\"kind\""
+        },
+        "orchestrator_inputs_delivery": {
+          "name": "orchestrator_inputs_delivery",
+          "value": "(\"orchestrator_inputs\".\"delivered_by_invocation_id\" IS NULL) = (\"orchestrator_inputs\".\"delivered_at\" IS NULL)"
+        }
+      }
+    },
     "plan_edges": {
       "name": "plan_edges",
       "columns": {
@@ -5364,6 +5480,228 @@
         }
       }
     },
+    "requirement_proposals": {
+      "name": "requirement_proposals",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "invocation_id": {
+          "name": "invocation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "entries": {
+          "name": "entries",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rationale": {
+          "name": "rationale",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "resolution_status": {
+          "name": "resolution_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "requirement_revision_id": {
+          "name": "requirement_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolution_edited": {
+          "name": "resolution_edited",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolution_rationale": {
+          "name": "resolution_rationale",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "superseded_by_proposal_id": {
+          "name": "superseded_by_proposal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "requirement_proposals_run": {
+          "name": "requirement_proposals_run",
+          "columns": [
+            "run_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "requirement_proposals_invocation": {
+          "name": "requirement_proposals_invocation",
+          "columns": [
+            "invocation_id"
+          ],
+          "isUnique": false
+        },
+        "requirement_proposals_one_open_per_run": {
+          "name": "requirement_proposals_one_open_per_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "status = 'proposed'"
+        },
+        "requirement_proposals_revision": {
+          "name": "requirement_proposals_revision",
+          "columns": [
+            "requirement_revision_id"
+          ],
+          "isUnique": true,
+          "where": "requirement_revision_id IS NOT NULL"
+        }
+      },
+      "foreignKeys": {
+        "requirement_proposals_conversation_id_conversations_id_fk": {
+          "name": "requirement_proposals_conversation_id_conversations_id_fk",
+          "tableFrom": "requirement_proposals",
+          "tableTo": "conversations",
+          "columnsFrom": [
+            "conversation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "requirement_proposals_run_id_runs_id_fk": {
+          "name": "requirement_proposals_run_id_runs_id_fk",
+          "tableFrom": "requirement_proposals",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "requirement_proposals_invocation_id_invocations_id_fk": {
+          "name": "requirement_proposals_invocation_id_invocations_id_fk",
+          "tableFrom": "requirement_proposals",
+          "tableTo": "invocations",
+          "columnsFrom": [
+            "invocation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "requirement_proposals_requirement_revision_id_requirement_revisions_id_fk": {
+          "name": "requirement_proposals_requirement_revision_id_requirement_revisions_id_fk",
+          "tableFrom": "requirement_proposals",
+          "tableTo": "requirement_revisions",
+          "columnsFrom": [
+            "requirement_revision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "requirement_proposals_status": {
+          "name": "requirement_proposals_status",
+          "value": "\"requirement_proposals\".\"status\" IN ('proposed', 'approved', 'rejected', 'superseded')"
+        },
+        "requirement_proposals_resolution_status": {
+          "name": "requirement_proposals_resolution_status",
+          "value": "\"requirement_proposals\".\"resolution_status\" IS NULL OR \"requirement_proposals\".\"resolution_status\" IN ('approved', 'rejected')"
+        },
+        "requirement_proposals_resolved": {
+          "name": "requirement_proposals_resolved",
+          "value": "(\"requirement_proposals\".\"status\" IN ('approved', 'rejected')) = (\"requirement_proposals\".\"resolution_status\" IS NOT NULL AND \"requirement_proposals\".\"resolved_at\" IS NOT NULL AND \"requirement_proposals\".\"resolution_edited\" IS NOT NULL) AND (\"requirement_proposals\".\"resolution_status\" IS NULL OR \"requirement_proposals\".\"resolution_status\" = \"requirement_proposals\".\"status\")"
+        },
+        "requirement_proposals_approval_revision": {
+          "name": "requirement_proposals_approval_revision",
+          "value": "(\"requirement_proposals\".\"status\" = 'approved') = (\"requirement_proposals\".\"requirement_revision_id\" IS NOT NULL)"
+        },
+        "requirement_proposals_edited_only_approved": {
+          "name": "requirement_proposals_edited_only_approved",
+          "value": "\"requirement_proposals\".\"resolution_edited\" IS NULL OR \"requirement_proposals\".\"resolution_edited\" = 0 OR \"requirement_proposals\".\"status\" = 'approved'"
+        },
+        "requirement_proposals_superseded": {
+          "name": "requirement_proposals_superseded",
+          "value": "(\"requirement_proposals\".\"status\" = 'superseded') = (\"requirement_proposals\".\"superseded_by_proposal_id\" IS NOT NULL)"
+        },
+        "requirement_proposals_no_self_supersede": {
+          "name": "requirement_proposals_no_self_supersede",
+          "value": "\"requirement_proposals\".\"superseded_by_proposal_id\" IS NULL OR \"requirement_proposals\".\"superseded_by_proposal_id\" <> \"requirement_proposals\".\"id\""
+        }
+      }
+    },
     "requirement_revisions": {
       "name": "requirement_revisions",
       "columns": {
@@ -6276,7 +6614,7 @@
       "checkConstraints": {
         "runtime_tool_calls_tool": {
           "name": "runtime_tool_calls_tool",
-          "value": "\"runtime_tool_calls\".\"tool\" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision', 'write_artifact')"
+          "value": "\"runtime_tool_calls\".\"tool\" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision', 'write_artifact', 'create_tasks', 'record_decision', 'propose_requirements', 'revise_execution_plan')"
         },
         "runtime_tool_calls_digest_shape": {
           "name": "runtime_tool_calls_digest_shape",
@@ -7258,7 +7596,7 @@
       "checkConstraints": {
         "usage_effort": {
           "name": "usage_effort",
-          "value": "\"usage\".\"effort\" IS NULL OR \"usage\".\"effort\" IN ('low', 'medium', 'high', 'max')"
+          "value": "\"usage\".\"effort\" IS NULL OR \"usage\".\"effort\" IN ('low', 'medium', 'high', 'xhigh', 'max')"
         },
         "usage_non_negative": {
           "name": "usage_non_negative",

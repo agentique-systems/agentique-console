@@ -14,6 +14,7 @@ import {
   type ConversationId,
   type Decision,
   type DecisionId,
+  type DecisionKind,
   type DecisionRequest,
   type DecisionResolutionInput,
   type DecisionStatus,
@@ -129,7 +130,8 @@ export class DecisionStore {
         assertSameConversation("Run", valid.runId, run.conversationId, conversation.id);
       }
       this.assertAffectsOwnership(valid, conversation.id);
-      if (valid.requestedBy.kind === "invocation" && isRequestableDecisionKind(valid.kind)) this.assertRequester(valid.requestedBy.invocationId, valid.runId);
+      // A requestable kind and the Orchestrator's own recorded `orchestrator_choice` name a running Invocation of the Run as requester.
+      if (valid.requestedBy.kind === "invocation" && (isRequestableDecisionKind(valid.kind) || valid.kind === "orchestrator_choice")) this.assertRequester(valid.requestedBy.invocationId, valid.runId, valid.kind);
       if (valid.subject !== null) this.assertSubjectOwnership(valid.subject, valid.runId, conversation.id);
       const decision: Decision = {
         id: this.ctx.ids("decision"),
@@ -368,10 +370,11 @@ export class DecisionStore {
   }
 
   /** An Invocation requesting a Decision belongs to the Decision's Run and is running (execution-model §8.2). */
-  private assertRequester(invocationId: InvocationId, runId: string | null): void {
-    const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId, status: invocations.status }).from(invocations).where(eq(invocations.id, invocationId)).get(), "Invocation", invocationId);
+  private assertRequester(invocationId: InvocationId, runId: string | null, kind: DecisionKind): void {
+    const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId, status: invocations.status, role: invocations.role }).from(invocations).where(eq(invocations.id, invocationId)).get(), "Invocation", invocationId);
     if (runId === null || invocation.runId !== runId) throw new InvariantViolationError(`Invocation ${invocationId} belongs to Run ${invocation.runId}, not ${String(runId)}`, { invocationId, runId });
     if (invocation.status !== "running") throw new ConflictError(`Invocation ${invocationId} is ${invocation.status}; a Decision is requested by a running Invocation`, { invocationId, status: invocation.status });
+    if (kind === "orchestrator_choice" && invocation.role !== "orchestrator") throw new InvariantViolationError(`Invocation ${invocationId} is a ${invocation.role}; only an Orchestrator Invocation records an orchestrator_choice`, { invocationId, role: invocation.role });
   }
 
   /**

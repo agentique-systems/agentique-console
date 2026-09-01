@@ -31,9 +31,13 @@
  * approved and the next scheduler pass resumes it.
  */
 import {
+  approvalSubjectOf,
+  decisionResolutionInputOf,
   InvariantViolationError,
   INVOCATION_MACHINE,
+  isAgentRequestedDecision,
   operationAt,
+  orchestratorInputPurposeOf,
   PLAN_NODE_MACHINE,
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
@@ -47,14 +51,13 @@ import {
   type InvocationId,
   type InvocationPurpose,
   type ManifestInput,
+  type OrchestratorInputId,
   type PatternPlanNode,
+  type QueuedOrchestratorInput,
   type RunId,
   type Task,
   type TaskId,
   type Timestamp,
-  approvalSubjectOf,
-  decisionResolutionInputOf,
-  isAgentRequestedDecision,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import type { RunCompletionEngine } from "../completion.ts";
@@ -75,6 +78,8 @@ export type RootAdvice =
   | { kind: "blocked"; invocationId: InvocationId; decisionId: DecisionId }
   /** The root is idle and these remediation Tasks of failed node_exit Gates await one batched `gate_result` turn; `funded` says the root can fund it now — directly or through the Allocation Extension its `extend` policy admits. */
   | { kind: "remediate"; taskIds: TaskId[]; funded: boolean }
+  /** The root is idle and typed inputs are queued for the Orchestrator (operator steering, operator resolutions; execution-model §4.6); `funded` as for `remediate`. */
+  | { kind: "prepare_turn"; inputIds: OrchestratorInputId[]; funded: boolean }
   | { kind: "run_terminal" };
 
 export type RootOutcome =
@@ -86,6 +91,8 @@ export type RootOutcome =
   | { kind: "remediation_prepared"; invocationId: InvocationId; taskIds: TaskId[] }
   /** The `gate_result` turn's Tasks ended: addressed (`completed`) after a completed turn, or ended (`failed`/`cancelled`) after a turn that did not complete. */
   | { kind: "remediation_settled"; invocationId: InvocationId; completed: TaskId[]; ended: TaskId[] }
+  /** One Orchestrator turn was prepared delivering these queued root inputs, now marked delivered by it. */
+  | { kind: "turn_prepared"; invocationId: InvocationId; inputIds: OrchestratorInputId[] }
   /** The root's effective allocation cannot fund the turn and no Allocation Extension fits the Run's effective ordinary capacity: nothing was written; the Run waits with reason `budget` until a Budget Increase is approved. */
   | { kind: "unfunded" }
   | { kind: "no_change" };
@@ -161,10 +168,17 @@ export class RootNodeSupport {
     return turn.purpose === "gate_result" ? { kind: "settle_remediation", invocationId: turn.id, funded } : { kind: "settle", invocationId: turn.id, funded };
   }
 
-  /** An idle root with pending root-owned remediations advises one batched `gate_result` turn. */
+  /**
+   * An idle root with queued typed inputs advises one turn that delivers them (execution-model §4.6) — the operator's
+   * steering and resolutions reach the Orchestrator before routine remediation, and a Gate failing meanwhile joins the later
+   * remediation turn; an idle root with pending root-owned remediations advises one batched `gate_result` turn.
+   */
   private idle(runId: RunId, invocationId: InvocationId | null): RootAdvice {
+    if (this.rootOf(runId).status !== "running") return { kind: "idle", invocationId };
+    const queued = this.deps.stores.orchestratorInputs.pending(runId);
+    if (queued.length > 0) return { kind: "prepare_turn", inputIds: queued.map((q) => q.id), funded: this.funded(runId) };
     const pending = this.pendingRemediations(runId);
-    if (pending.length === 0 || this.rootOf(runId).status !== "running") return { kind: "idle", invocationId };
+    if (pending.length === 0) return { kind: "idle", invocationId };
     return { kind: "remediate", taskIds: pending.map((r) => r.task.id), funded: this.funded(runId) };
   }
 
@@ -311,7 +325,11 @@ export class RootNodeSupport {
     if (isAgentRequestedDecision(decision)) {
       if (decision.status === "open") return null;
       const carried = previous.filter((i) => i.kind !== "decision_resolution" && i.kind !== "side_effect_approval_resolution");
-      return { purpose: turn.purpose, inputs: [...carried, decisionResolutionInputOf(decision)] };
+      const resolutions = [decisionResolutionInputOf(decision)];
+      // A Decision the operator superseded (execution-model §8.2) continues with the superseding Decision's resolution too: the
+      // original is history, the operator's choice is the answer.
+      if (decision.status === "superseded" && decision.supersededByDecisionId !== null) resolutions.push(decisionResolutionInputOf(this.deps.stores.decisions.get(decision.supersededByDecisionId)));
+      return { purpose: turn.purpose, inputs: [...carried, ...resolutions] };
     }
     if (decision.status !== "resolved" || decision.resolution === null || decision.subject === null) return null;
     const approval: ManifestInput = { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" };
@@ -429,6 +447,46 @@ export class RootNodeSupport {
       });
       const taskIds = pending.map((r) => this.gates.assignRemediation(r.task, prepared.invocation, options).id);
       return { kind: "remediation_prepared", invocationId: prepared.invocation.id, taskIds };
+    });
+  }
+
+  /**
+   * Inside the transaction: one Orchestrator turn delivering every queued
+   * root input (execution-model §4.6) — purposed by the input table, funded
+   * through the one capacity operation, continuing the latest turn — with
+   * the inputs marked delivered by it. Advised only from an idle root, so no
+   * input is ever injected into an active or unsettled turn.
+   */
+  prepareTurn(runId: RunId, options: WriteOptions = {}): RootOutcome {
+    const { ctx, stores, preparation } = this.deps;
+    return ctx.tx.write((): RootOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
+      const root = this.rootOf(runId);
+      if (root.status !== "running") return { kind: "no_change" };
+      const advice = this.inspect(runId);
+      if (advice.kind !== "prepare_turn") return { kind: "no_change" };
+      const unfunded = this.fund(root, "root_turn", options);
+      if (unfunded !== null) return unfunded;
+      const queued = stores.orchestratorInputs.pending(runId);
+      const inputs: QueuedOrchestratorInput[] = queued.map((q) => q.input);
+      const latest = this.latestTurn(runId);
+      const prepared = preparation.prepare({
+        runId,
+        planNodeId: root.id,
+        role: "orchestrator",
+        purpose: orchestratorInputPurposeOf(inputs),
+        patternPosition: { kind: "orchestrator" },
+        continuedFromInvocationId: latest?.id ?? null,
+        funding: { source: "plan_node" },
+        handoffIds: [],
+        inputs,
+        correlationId: options.correlationId ?? null,
+        causationSeq: options.causationSeq ?? null,
+      });
+      const inputIds = queued.map((q) => q.id);
+      stores.orchestratorInputs.markDelivered(inputIds, prepared.invocation.id, { ...options, causationSeq: ctx.journal.lastSeq() });
+      return { kind: "turn_prepared", invocationId: prepared.invocation.id, inputIds };
     });
   }
 }

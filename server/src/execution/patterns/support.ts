@@ -374,7 +374,9 @@ export class PatternNodeSupport {
         ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
         : decisionResolutionInputOf(decision);
     const handoffIds = stores.invocations.getManifest(predecessor.id).content.handoffs.map((h) => h.handoffId);
-    const prepared = this.prepareAs(node, position, predecessor.purpose, { continuedFromInvocationId: predecessor.id, handoffIds, inputs: [...extraInputs, resolution] }, options);
+    // A requested Decision the operator superseded (execution-model §8.2) continues with the superseding Decision's resolution too.
+    const superseding: ManifestInput[] = isAgentRequestedDecision(decision) && decision.status === "superseded" && decision.supersededByDecisionId !== null ? [decisionResolutionInputOf(stores.decisions.get(decision.supersededByDecisionId))] : [];
+    const prepared = this.prepareAs(node, position, predecessor.purpose, { continuedFromInvocationId: predecessor.id, handoffIds, inputs: [...extraInputs, resolution, ...superseding] }, options);
     if (prepared.kind !== "prepared") return prepared.outcome;
     return { kind: "successor_prepared", invocationId: prepared.invocationId, position, decisionId: decision.id };
   }

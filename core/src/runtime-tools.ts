@@ -2,8 +2,10 @@ import { z } from "zod";
 import { mediaTypeSchema } from "./artifacts.ts";
 import { COMPLETION_PREFLIGHT_CODES, COMPLETION_REQUEST_STATUSES, type CompletionRequestStatus } from "./completion.ts";
 import { activationConditionSchema, type ActivationCondition } from "./decisions.ts";
-import type { ArtifactId, AttemptId, CompletionRequestId, DecisionId, InvocationId, PlanNodeId, RequirementId, RunId, RuntimeToolCallId, TaskId } from "./ids.ts";
+import type { ArtifactId, AttemptId, CompletionRequestId, DecisionId, InvocationId, PlanNodeId, RequirementId, RequirementProposalId, RunId, RuntimeToolCallId, TaskId } from "./ids.ts";
 import { COORDINATOR_PURPOSES, EVALUATOR_PURPOSES, ORCHESTRATOR_PURPOSES, RUNTIME_TOOLS_BY_ROLE, WORKER_PURPOSES, type InvocationPurpose, type InvocationRole, type RuntimeTool } from "./invocations.ts";
+import { planRejectionReasonSchema, type PlanRejectionReason } from "./plans.ts";
+import { evidenceSchema, proposedRequirementTreeSchema, REQUIREMENT_PROPOSAL_BOUNDS, type Evidence, type ProposedRequirement } from "./requirements.ts";
 import {
   ARTIFACT_CONTENT_ENCODINGS,
   readAgentDefinitionsInputSchema,
@@ -22,7 +24,7 @@ import {
   type RuntimeToolReadResult,
 } from "./runtime-reads.ts";
 import { TASK_STATUSES, type TaskStatus } from "./tasks.ts";
-import { boundedString, canonicalJson, count, idSchema, nonEmptyString, sha256Hex, timestampSchema, uniqueIds, utf8ByteLength, type Timestamp } from "./validation.ts";
+import { boundedString, canonicalJson, count, idSchema, nonEmptyString, positiveCount, sha256Hex, timestampSchema, uniqueIds, utf8ByteLength, type Timestamp } from "./validation.ts";
 
 /**
  * The runtime-tool call boundary (execution-model §6.4 "Runtime tools").
@@ -52,7 +54,7 @@ import { boundedString, canonicalJson, count, idSchema, nonEmptyString, sha256He
  * append-only `runtime_tool_calls` row with a canonical digest and replay
  * semantics.
  */
-export const RUNTIME_TOOL_CALL_TOOLS = ["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact"] as const;
+export const RUNTIME_TOOL_CALL_TOOLS = ["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact", "create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"] as const;
 export type RuntimeToolCallTool = (typeof RUNTIME_TOOL_CALL_TOOLS)[number];
 
 /**
@@ -77,6 +79,8 @@ export const COMPLETION_REQUESTING_PURPOSES = ORCHESTRATOR_PURPOSES.filter((purp
 
 /** The Orchestrator purposes from which a Decision may be requested: every turn but the read-only `final_synthesis` report. */
 export const DECISION_REQUESTING_ORCHESTRATOR_PURPOSES = COMPLETION_REQUESTING_PURPOSES;
+/** The Orchestrator purposes that author: every turn but the read-only final synthesis (execution-model §5.5.1, §8.1). */
+export const AUTHORING_ORCHESTRATOR_PURPOSES = COMPLETION_REQUESTING_PURPOSES;
 
 /** Purposes for which a role-permitted tool is withheld from the manifest; a tool absent here is permitted for every purpose of its role. */
 const PURPOSE_EXCLUSIONS: Readonly<Partial<Record<RuntimeTool, readonly InvocationPurpose[]>>> = {
@@ -123,8 +127,20 @@ export const RUNTIME_TOOL_HANDLER_BINDINGS: Readonly<Record<ExecutableRuntimeToo
   read_execution_plan: EVERY_ROLE_AND_PURPOSE,
   read_agent_definitions: EVERY_ROLE_AND_PURPOSE,
   propose_tasks: [{ role: "coordinator", purposes: ["decompose", "replan"] }],
-  // The Coordinator-permitted subset of `update_task`: cancelling the node's own unstarted or blocked current Tasks.
-  update_task: [{ role: "coordinator", purposes: ["decompose", "replan"] }],
+  // `update_task` in full (execution-model §5.5.1): the Orchestrator over the Run's current Tasks (never from the final synthesis), a
+  // Coordinator over its own node's Tasks, a Worker over the Tasks assigned to it; the handler enforces visibility, ownership,
+  // terminal immutability, and Evidence scope per operation.
+  update_task: [
+    { role: "orchestrator", purposes: AUTHORING_ORCHESTRATOR_PURPOSES },
+    { role: "coordinator", purposes: ["decompose", "replan"] },
+    { role: "worker", purposes: WORKER_PURPOSES },
+  ],
+  // The Orchestrator's authoring tools (execution-model §5.5.1, §8.1, §8.2, §4.5): Run-level Tasks, its own recorded choices, a
+  // Requirement proposal for the operator, and a source Execution Plan revision — from every turn but the final synthesis.
+  create_tasks: [{ role: "orchestrator", purposes: AUTHORING_ORCHESTRATOR_PURPOSES }],
+  record_decision: [{ role: "orchestrator", purposes: AUTHORING_ORCHESTRATOR_PURPOSES }],
+  propose_requirements: [{ role: "orchestrator", purposes: AUTHORING_ORCHESTRATOR_PURPOSES }],
+  revise_execution_plan: [{ role: "orchestrator", purposes: AUTHORING_ORCHESTRATOR_PURPOSES }],
   // Only the root Orchestrator requests completion (execution-model §10), never from its read-only final-synthesis turn.
   request_completion: [{ role: "orchestrator", purposes: COMPLETION_REQUESTING_PURPOSES }],
   // An Orchestrator turn (never the final synthesis), a Coordinator's executable turns, and a Worker's current work may request a
@@ -214,20 +230,89 @@ export const taskProposalBatchSchema: z.ZodType<TaskProposalBatch> = z.strictObj
 });
 
 // ---------------------------------------------------------------------------
-// update_task (Coordinator-permitted subset)
+// create_tasks (the Orchestrator's Run-level Tasks)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Orchestrator's `create_tasks` batch (execution-model §5.5.1): the same
+ * bounded proposal form as a Coordinator's, but the Tasks belong to the Run
+ * (no owning node, no Task reservation) and are bound to operations by the
+ * source Execution Plan. Requirement scope is the current revision's live
+ * leaves; dependencies and replacements name the Run's current Tasks.
+ */
+export interface CreateTasksInput {
+  tasks: TaskProposal[];
+}
+
+export const createTasksInputSchema: z.ZodType<CreateTasksInput> = taskProposalBatchSchema;
+
+// ---------------------------------------------------------------------------
+// update_task
 // ---------------------------------------------------------------------------
 
 export const TASK_UPDATE_MAX_REASON_LENGTH = 500;
+export const TASK_UPDATE_MAX_EVIDENCE = 20;
+export const TASK_UPDATE_MAX_OUTPUTS = 20;
 
-/** The Coordinator-permitted `update_task` operation: cancelling one of the node's `pending`, `ready`, or `blocked` current Tasks. */
+/**
+ * The closed `update_task` operations (execution-model §5.5.1): cancel one
+ * `pending`, `ready`, or `blocked` current Task; associate Evidence with a
+ * non-terminal Task; associate output Artifacts with a non-terminal Task.
+ * Status transitions other than cancellation are the runtime's alone — a
+ * Task completes through its Invocation's result, never through this tool.
+ */
+export type TaskUpdate =
+  | { kind: "cancel"; reason: string }
+  | { kind: "add_evidence"; evidence: Evidence[] }
+  | { kind: "add_outputs"; artifactIds: ArtifactId[] };
+
 export interface TaskUpdateRequest {
   taskId: TaskId;
-  update: { kind: "cancel"; reason: string };
+  update: TaskUpdate;
 }
+
+export const taskUpdateSchema: z.ZodType<TaskUpdate> = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("cancel"), reason: nonEmptyString.max(TASK_UPDATE_MAX_REASON_LENGTH) }),
+  z.strictObject({ kind: z.literal("add_evidence"), evidence: z.array(evidenceSchema).min(1).max(TASK_UPDATE_MAX_EVIDENCE) }),
+  z.strictObject({ kind: z.literal("add_outputs"), artifactIds: uniqueIds(idSchema("artifact")).min(1).max(TASK_UPDATE_MAX_OUTPUTS) }),
+]);
 
 export const taskUpdateRequestSchema: z.ZodType<TaskUpdateRequest> = z.strictObject({
   taskId: idSchema("task"),
-  update: z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("cancel"), reason: nonEmptyString.max(TASK_UPDATE_MAX_REASON_LENGTH) })]),
+  update: taskUpdateSchema,
+});
+
+// ---------------------------------------------------------------------------
+// propose_requirements (a bounded proposal for the operator)
+// ---------------------------------------------------------------------------
+
+/** The Orchestrator proposes a Requirement tree with its rationale (execution-model §8.1); only the operator's approval creates a revision. */
+export interface ProposeRequirementsInput {
+  requirements: ProposedRequirement[];
+  rationale: string;
+}
+
+export const proposeRequirementsInputSchema: z.ZodType<ProposeRequirementsInput> = z.strictObject({
+  requirements: proposedRequirementTreeSchema,
+  rationale: nonEmptyString.max(REQUIREMENT_PROPOSAL_BOUNDS.rationaleMaxBytes),
+});
+
+// ---------------------------------------------------------------------------
+// revise_execution_plan (the source form, compiled by the runtime)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Orchestrator submits a complete source Execution Plan (execution-model
+ * §4.5); the runtime compiles and validates it through the one plan-revision
+ * path and records the accepted revision or the typed rejection. The source
+ * is validated by the compiler, not here: the call carries it as received.
+ */
+export interface ReviseExecutionPlanInput {
+  source: unknown;
+}
+
+export const reviseExecutionPlanInputSchema: z.ZodType<ReviseExecutionPlanInput> = z.strictObject({
+  source: z.unknown().refine((s) => typeof s === "object" && s !== null && !Array.isArray(s), { message: "the source Execution Plan is an object" }),
 });
 
 // ---------------------------------------------------------------------------
@@ -435,6 +520,41 @@ export const writeArtifactInputSchema: z.ZodType<WriteArtifactInput> = z.strictO
 // ---------------------------------------------------------------------------
 // Calls, results, outcomes
 // ---------------------------------------------------------------------------
+// record_decision (the Orchestrator's own `orchestrator_choice`)
+// ---------------------------------------------------------------------------
+
+export const RECORD_DECISION_MAX_RATIONALE_BYTES = 4_000;
+
+/**
+ * The Orchestrator records a choice it made itself (execution-model §8.2):
+ * the question, the ordered options, the option it chose, why, and what the
+ * choice affects within its scope. The runtime creates the
+ * `orchestrator_choice` Decision requested by the calling Invocation and
+ * resolves it by the Orchestrator in the same transaction; nothing blocks.
+ */
+export interface RecordDecisionInput {
+  question: string;
+  options: RequestedDecisionOption[];
+  chosenOptionKey: string;
+  rationale: string;
+  affects: RequestedDecisionAffects;
+}
+
+export const recordDecisionInputSchema: z.ZodType<RecordDecisionInput> = z
+  .strictObject({
+    question: nonEmptyString.max(REQUEST_DECISION_BOUNDS.questionMaxBytes),
+    options: z
+      .array(requestedDecisionOptionSchema)
+      .min(1)
+      .max(REQUEST_DECISION_BOUNDS.maxOptions)
+      .refine((options) => new Set(options.map((o) => o.key)).size === options.length, { message: "option keys are unique" }),
+    chosenOptionKey: optionKeySchema,
+    rationale: nonEmptyString.max(RECORD_DECISION_MAX_RATIONALE_BYTES),
+    affects: requestedDecisionAffectsSchema,
+  })
+  .refine((input) => input.options.some((o) => o.key === input.chosenOptionKey), { message: "the chosen option is one of the options", path: ["chosenOptionKey"] });
+
+// ---------------------------------------------------------------------------
 
 /** A runtime-tool call as the adapter submits it: a closed union, never a free tool name with unvalidated input. */
 export type RuntimeToolCallRequest =
@@ -443,6 +563,10 @@ export type RuntimeToolCallRequest =
   | { tool: "request_completion"; input: CompletionCallInput }
   | { tool: "request_decision"; input: RequestDecisionInput }
   | { tool: "write_artifact"; input: WriteArtifactInput }
+  | { tool: "create_tasks"; input: CreateTasksInput }
+  | { tool: "record_decision"; input: RecordDecisionInput }
+  | { tool: "propose_requirements"; input: ProposeRequirementsInput }
+  | { tool: "revise_execution_plan"; input: ReviseExecutionPlanInput }
   | { tool: "read_requirements"; input: ReadRequirementsInput }
   | { tool: "read_decisions"; input: ReadDecisionsInput }
   | { tool: "read_tasks"; input: ReadTasksInput }
@@ -456,6 +580,10 @@ export const runtimeToolCallRequestSchema: z.ZodType<RuntimeToolCallRequest> = z
   z.strictObject({ tool: z.literal("request_completion"), input: completionCallInputSchema }),
   z.strictObject({ tool: z.literal("request_decision"), input: requestDecisionInputSchema }),
   z.strictObject({ tool: z.literal("write_artifact"), input: writeArtifactInputSchema }),
+  z.strictObject({ tool: z.literal("create_tasks"), input: createTasksInputSchema }),
+  z.strictObject({ tool: z.literal("record_decision"), input: recordDecisionInputSchema }),
+  z.strictObject({ tool: z.literal("propose_requirements"), input: proposeRequirementsInputSchema }),
+  z.strictObject({ tool: z.literal("revise_execution_plan"), input: reviseExecutionPlanInputSchema }),
   z.strictObject({ tool: z.literal("read_requirements"), input: readRequirementsInputSchema }),
   z.strictObject({ tool: z.literal("read_decisions"), input: readDecisionsInputSchema }),
   z.strictObject({ tool: z.literal("read_tasks"), input: readTasksInputSchema }),
@@ -498,7 +626,15 @@ export type RuntimeToolResult =
   /** The open Decision the call created (or, on replay, found); an accepted request ends the logical turn, so the provider must stop. */
   | { tool: "request_decision"; decisionId: DecisionId; status: "open"; blocksInvocation: true }
   /** The Artifact the call created (or, on replay, found): bounded metadata only, never the content, a storage key, or a path. */
-  | { tool: "write_artifact"; artifactId: ArtifactId; mediaType: string; digest: string; byteSize: number; title: string };
+  | { tool: "write_artifact"; artifactId: ArtifactId; mediaType: string; digest: string; byteSize: number; title: string }
+  /** The Run-level Tasks the call created (or, on replay, found), by proposal key. */
+  | { tool: "create_tasks"; taskIds: TaskId[]; taskIdsByKey: Record<string, TaskId> }
+  /** The resolved `orchestrator_choice` Decision the call recorded and the option id it chose. */
+  | { tool: "record_decision"; decisionId: DecisionId; chosenOptionId: string }
+  /** The proposal the call created, awaiting the operator; its status at commit time is always `proposed`. */
+  | { tool: "propose_requirements"; proposalId: RequirementProposalId; status: "proposed" }
+  /** The compiler's verdict on the submitted source: the accepted revision number, or the typed rejection reasons. */
+  | { tool: "revise_execution_plan"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] };
 
 export const runtimeToolResultSchema: z.ZodType<RuntimeToolResult> = z.discriminatedUnion("tool", [
   z
@@ -508,6 +644,14 @@ export const runtimeToolResultSchema: z.ZodType<RuntimeToolResult> = z.discrimin
   z.strictObject({ tool: z.literal("request_completion"), completionRequestId: idSchema("completionRequest"), status: z.enum(COMPLETION_REQUEST_STATUSES) }),
   z.strictObject({ tool: z.literal("request_decision"), decisionId: idSchema("decision"), status: z.literal("open"), blocksInvocation: z.literal(true) }),
   z.strictObject({ tool: z.literal("write_artifact"), artifactId: idSchema("artifact"), mediaType: mediaTypeSchema, digest: sha256Hex, byteSize: count.max(WRITE_ARTIFACT_BOUNDS.maxContentBytes), title: boundedString(WRITE_ARTIFACT_BOUNDS.titleMaxBytes) }),
+  z
+    .strictObject({ tool: z.literal("create_tasks"), taskIds: uniqueIds(idSchema("task")).min(1), taskIdsByKey: z.record(z.string().regex(TASK_PROPOSAL_KEY_PATTERN), idSchema("task")) })
+    .refine((r) => Object.keys(r.taskIdsByKey).length === r.taskIds.length && Object.values(r.taskIdsByKey).every((id) => r.taskIds.includes(id)), { message: "every key maps to one of the created Tasks", path: ["taskIdsByKey"] }),
+  z.strictObject({ tool: z.literal("record_decision"), decisionId: idSchema("decision"), chosenOptionId: nonEmptyString }),
+  z.strictObject({ tool: z.literal("propose_requirements"), proposalId: idSchema("requirementProposal"), status: z.literal("proposed") }),
+  z
+    .strictObject({ tool: z.literal("revise_execution_plan"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) })
+    .refine((r) => r.accepted === (r.revisionNumber !== null) && (r.accepted ? r.reasons.length === 0 : r.reasons.length > 0), { message: "an accepted revision has a number and no reasons; a rejection has reasons and no number", path: ["revisionNumber"] }),
 ]);
 
 /** Whether an accepted result ends the caller's logical turn: the adapter must stop after it, and the runtime enforces the boundary anyway. */
@@ -537,6 +681,27 @@ export const RUNTIME_TOOL_REJECTION_CODES = [
   "invalid_bounds",
   "allocation_insufficient",
   "task_not_cancellable",
+  // The full `update_task` refusals (execution-model §5.5.1).
+  /** The Task is not visible to the caller in its scope, or is a superseded historical Task. */
+  "task_not_visible",
+  /** The Task ended; a `completed`, `failed`, or `cancelled` Task is immutable. */
+  "task_terminal",
+  /** An Evidence item names a Snapshot, Evaluation, or Artifact outside the Run or the caller's scope, or a kind only the runtime records. */
+  "evidence_out_of_scope",
+  /** An output Artifact belongs to another Run, is not readable by the caller, or was already produced for another Task. */
+  "artifact_provenance_invalid",
+  // The `create_tasks` refusals beyond the shared proposal codes.
+  /** A Plan Node the call names is not a current executable node of the Run. */
+  "plan_node_invalid",
+  // The `record_decision` refusal.
+  /** The chosen option is not one of the recorded options. */
+  "option_invalid",
+  // The `propose_requirements` refusals.
+  /** The proposed tree is structurally invalid or keeps a Requirement that is not the Conversation's live Requirement. */
+  "proposal_invalid",
+  // The `revise_execution_plan` refusal.
+  /** The Run is not in a state whose source plan may be revised now. */
+  "plan_not_revisable",
   // The completion preflight refusals (execution-model §10 `run_completion`), one code per canonical fact.
   ...COMPLETION_PREFLIGHT_CODES,
   // The `request_decision` refusals (execution-model §8.2).

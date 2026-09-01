@@ -47,6 +47,8 @@ import { createPatternRunners, type PatternRunners } from "./patterns/index.ts";
 import { RunScheduler, type SchedulerConfig } from "./scheduler.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
 import { RecoveryService } from "./recovery-service.ts";
+import { OrchestratorInputService } from "./orchestrator-inputs.ts";
+import { RequirementProposalService } from "./requirement-proposals.ts";
 import { RunControlService } from "./run-control.ts";
 import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest, type RunVerificationRequest } from "./run-creation-service.ts";
 import { RunStartService } from "./run-start-service.ts";
@@ -566,6 +568,10 @@ export interface RuntimeHarness extends Harness {
   budgetIncreases: BudgetIncreaseService;
   /** Agent-requested Decisions (execution-model §8.2): the operator resolution boundary and the policy resolution the scheduler drives. */
   decisionRequests: DecisionRequestService;
+  /** The Orchestrator's Requirement proposals and the operator's approval/edit/rejection boundary (execution-model §8.1). */
+  requirementProposals: RequirementProposalService;
+  /** Operator steering: messages queued as typed inputs of the Orchestrator's next turn (execution-model §4.6). */
+  orchestratorInputs: OrchestratorInputService;
   /** The operator signoff boundary (execution-model §10 `operator_signoff`). */
   signoff: RunSignoffService;
   publicationWorkspace: FakePublicationWorkspace;
@@ -631,7 +637,11 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const executionDiagnostics: ExecutionDiagnostic[] = [];
   const diagnostics = (d: ExecutionDiagnostic) => executionDiagnostics.push(d);
   const cleanup = new WorkspaceCleanup(h.ctx, h.stores, executionWorkspace, diagnostics);
-  const executor = new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk), diagnostics);
+  const planRevisions = new PlanRevisionService(h.ctx, h.stores, {
+    defaults: { nodeAllocation: TEST_NODE_ALLOCATION, coordinatorWorkerBounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 } },
+    limits: options.limits ?? DEFAULT_PLAN_LIMITS,
+  });
+  const executor = new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk), diagnostics, { planRevisions });
   const integration = new ChangesetIntegrationService(h.ctx, h.stores, integrationWorkspace);
   const criterionExecution = options.criterionExecution ?? new FakeAcceptanceCriterionExecution();
   criterionExecution.transactionProbe = () => h.ctx.tx.inTransaction;
@@ -652,6 +662,8 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     capacity,
     budgetIncreases: new BudgetIncreaseService({ ctx: h.ctx, stores: h.stores }),
     decisionRequests: runners.decisionRequests,
+    requirementProposals: new RequirementProposalService(h.ctx, h.stores),
+    orchestratorInputs: new OrchestratorInputService(h.ctx, h.stores),
     signoff: new RunSignoffService({ ctx: h.ctx, stores: h.stores, preparation, capacity, finalization: finalizationWorkspace }),
     publicationWorkspace,
     publication: new RunPublicationService({ ctx: h.ctx, stores: h.stores, port: publicationWorkspace, checks, diagnostics }),
@@ -665,10 +677,7 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     continuations,
     governor,
     runCreation: new RunCreationService(h.ctx, h.stores, workspacePreparation, TEST_POLICY),
-    planRevisions: new PlanRevisionService(h.ctx, h.stores, {
-      defaults: { nodeAllocation: TEST_NODE_ALLOCATION, coordinatorWorkerBounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 } },
-      limits: options.limits ?? DEFAULT_PLAN_LIMITS,
-    }),
+    planRevisions,
     preparation,
     executor,
     recovery: new RecoveryService(h.ctx, h.stores, governor, continuations, provider, cleanup, executorConfig),

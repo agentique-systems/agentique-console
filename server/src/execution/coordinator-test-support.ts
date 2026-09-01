@@ -131,7 +131,7 @@ export async function decomposePort(h: RuntimeHarness, s: PlanningSeed, options:
 /** A runtime-tool port bound to an Attempt from its canonical rows, as the executor binds one. */
 export function portFor(h: RuntimeHarness, invocation: Invocation, attempt: Attempt, sink: ExecutionDiagnosticSink = () => {}): RuntimeToolExecutor {
   const manifest = h.stores.invocations.getManifest(invocation.id);
-  return new RuntimeToolExecutor(h.ctx, h.stores, { runId: invocation.runId, planNodeId: invocation.planNodeId, invocationId: invocation.id, attemptId: attempt.id, role: invocation.role, purpose: invocation.purpose, manifestTools: manifest.content.runtimeTools }, {}, sink);
+  return new RuntimeToolExecutor(h.ctx, h.stores, { runId: invocation.runId, planNodeId: invocation.planNodeId, invocationId: invocation.id, attemptId: attempt.id, role: invocation.role, purpose: invocation.purpose, manifestTools: manifest.content.runtimeTools }, {}, sink, { planRevisions: h.planRevisions });
 }
 
 /** Yields to the event loop until `done` holds, never sleeping on a timer. */

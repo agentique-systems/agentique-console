@@ -82,9 +82,11 @@ describe("agent-requested decisions", () => {
       expect(() => h.stores.decisions.request(choice(s, foreign.invocation.id))).toThrow(InvariantViolationError);
       expect(() => h.stores.decisions.request(choice(s, w.invocation.id, { runId: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] } }))).toThrow(InvariantViolationError);
       // The closed kinds with another owner are never requested by an Invocation (the request schema refuses them).
-      for (const kind of ["orchestrator_choice", "signoff", "publish", "budget_increase"] as const) {
+      for (const kind of ["signoff", "publish", "budget_increase"] as const) {
         expect(() => h.stores.decisions.request(choice(s, w.invocation.id, { kind }))).toThrow(ValidationError);
       }
+      // An orchestrator_choice is the Orchestrator's own recorded choice: a Worker Invocation never requests one.
+      expect(() => h.stores.decisions.request(choice(s, w.invocation.id, { kind: "orchestrator_choice" }))).toThrow(InvariantViolationError);
       // The database re-checks the requester: a raw row naming a missing or non-running Invocation is refused.
       const raw = (requestedBy: string, id: string) =>
         h.database.sqlite

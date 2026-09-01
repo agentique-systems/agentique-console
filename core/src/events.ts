@@ -8,6 +8,7 @@ import { conversationMessageSchema, conversationSchema } from "./conversations.t
 import { DECISION_SUPERSESSION_REASONS, decisionResolutionSchema, decisionSchema } from "./decisions.ts";
 import { handoffSchema } from "./handoffs.ts";
 import type { AttemptId, ConversationId, InvocationId, PlanNodeId, RunId, WorkspaceId } from "./ids.ts";
+import { orchestratorInputSchema } from "./orchestrator-inputs.ts";
 import {
   attemptSchema,
   contextManifestSchema,
@@ -34,6 +35,7 @@ import {
   requirementRevisionSchema,
   REQUIREMENT_STATUSES,
   REQUIREMENT_STATUS_ACTORS,
+  requirementProposalSchema,
 } from "./requirements.ts";
 import { runFailureSchema, runSchema, RUN_STATUSES, RUN_WAIT_REASONS, OPERATOR_PAUSE_MODES } from "./runs.ts";
 import { signoffResolutionSchema } from "./signoff.ts";
@@ -162,6 +164,13 @@ export const EVENT_CATALOGUE = {
     decisionId: idSchema("decision").nullable(),
   }),
   "acceptance_criterion.created": acceptanceCriterionSchema,
+  /** A `propose_requirements` call was accepted: the proposal exactly as recorded (execution-model §8.1). */
+  "requirement_proposal.created": requirementProposalSchema,
+  /** The operator approved the proposal (edited or verbatim); the named revision was created in the same transaction. */
+  "requirement_proposal.approved": z.strictObject({ proposalId: idSchema("requirementProposal"), requirementRevisionId: idSchema("requirementRevision"), edited: z.boolean(), rationale: nonEmptyString.nullable() }),
+  "requirement_proposal.rejected": z.strictObject({ proposalId: idSchema("requirementProposal"), rationale: nonEmptyString.nullable() }),
+  /** A later proposal of the same Run replaced this still-open one. */
+  "requirement_proposal.superseded": z.strictObject({ proposalId: idSchema("requirementProposal"), supersededByProposalId: idSchema("requirementProposal") }),
   "decision.requested": decisionSchema,
   "decision.resolved": z.strictObject({ decisionId: idSchema("decision"), kind: nonEmptyString, resolution: decisionResolutionSchema }),
   /** A Decision was superseded: by a later Decision (`superseding_decision`, named), or by the runtime because its waiver subject went stale (`requirement_waiver_stale`, no superseding Decision). */
@@ -176,6 +185,12 @@ export const EVENT_CATALOGUE = {
   "task.completed": z.strictObject({ from: z.enum(TASK_STATUSES), to: z.literal("completed"), outputArtifactIds: z.array(idSchema("artifact")), evidence: z.array(evidenceSchema) }),
   "task.failed": z.strictObject({ from: z.enum(TASK_STATUSES), to: z.literal("failed"), failureReason: z.enum(TASK_FAILURE_REASONS) }),
   "task.cancelled": transition(TASK_STATUSES),
+  /** `update_task` associated Evidence or output Artifacts with a non-terminal Task: exactly the additions (execution-model §5.5.1). */
+  "task.evidence_recorded": z.strictObject({ taskId: idSchema("task"), evidence: z.array(evidenceSchema), outputArtifactIds: uniqueIds(idSchema("artifact")) }),
+  /** A typed root input was queued for the Orchestrator's next turn (execution-model §4.6). */
+  "orchestrator_input.queued": orchestratorInputSchema,
+  /** The queued input was listed in the manifest of the named Orchestrator Invocation. */
+  "orchestrator_input.delivered": z.strictObject({ orchestratorInputId: idSchema("orchestratorInput"), invocationId: idSchema("invocation") }),
   "artifact.created": artifactSchema,
   "handoff.created": handoffSchema,
   "handoff.delivered": z.strictObject({ handoffId: idSchema("handoff") }),

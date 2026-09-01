@@ -9,7 +9,7 @@
  * model can act on. Keeping the shapes total over `ExecutableRuntimeTool`
  * means a new runtime tool without a shape does not compile.
  */
-import { ARTIFACT_CONTENT_ENCODINGS, DECISION_STATUSES, READ_ARTIFACT_BOUNDS, REQUEST_DECISION_BOUNDS, RESULT_MAX_OPEN_ITEMS, RESULT_MAX_SUMMARY_LENGTH, RESULT_STATUSES, RUNTIME_READ_BOUNDS, TASK_PROPOSAL_MAX_TASKS, TASK_RESULT_STATUSES, VERDICTS, WRITE_ARTIFACT_BOUNDS, type ExecutableRuntimeTool } from "@agentique-console/core";
+import { ARTIFACT_CONTENT_ENCODINGS, DECISION_STATUSES, READ_ARTIFACT_BOUNDS, RECORD_DECISION_MAX_RATIONALE_BYTES, REQUEST_DECISION_BOUNDS, REQUIREMENT_COMPOSITIONS, REQUIREMENT_PROPOSAL_BOUNDS, RESULT_MAX_OPEN_ITEMS, RESULT_MAX_SUMMARY_LENGTH, RESULT_STATUSES, RUNTIME_READ_BOUNDS, TASK_PROPOSAL_MAX_TASKS, TASK_RESULT_STATUSES, TASK_UPDATE_MAX_EVIDENCE, TASK_UPDATE_MAX_OUTPUTS, VERDICTS, WRITE_ARTIFACT_BOUNDS, type ExecutableRuntimeTool } from "@agentique-console/core";
 import { z } from "zod";
 
 export type RuntimeToolShape = Record<string, z.ZodType>;
@@ -109,7 +109,44 @@ export const RUNTIME_TOOL_INPUT_SHAPES: Readonly<Record<ExecutableRuntimeTool, R
   },
   update_task: {
     taskId: id("Task"),
-    update: z.object({ kind: z.literal("cancel"), reason: z.string().min(1).max(500) }).describe("the permitted update: cancel with a reason"),
+    update: z
+      .union([
+        z.object({ kind: z.literal("cancel"), reason: z.string().min(1).max(500) }),
+        z.object({ kind: z.literal("add_evidence"), evidence: evidenceList.min(1).max(TASK_UPDATE_MAX_EVIDENCE) }),
+        z.object({ kind: z.literal("add_outputs"), artifactIds: ids("Artifact").min(1).max(TASK_UPDATE_MAX_OUTPUTS) }),
+      ])
+      .describe("cancel an unstarted or blocked Task with a reason; add Evidence to a non-terminal Task; add output Artifacts to a non-terminal Task"),
+  },
+  create_tasks: {
+    tasks: z.array(proposalShape).min(1).max(TASK_PROPOSAL_MAX_TASKS).describe("Run-level Tasks; requirementIds are leaves of the current Requirement revision; dependencies and replacements name current Tasks of the Run"),
+  },
+  record_decision: {
+    question: z.string().min(1).max(REQUEST_DECISION_BOUNDS.questionMaxBytes),
+    options: z.array(z.object({ key: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/), label: z.string().min(1).max(REQUEST_DECISION_BOUNDS.optionLabelMaxBytes), description: z.string().min(1).max(REQUEST_DECISION_BOUNDS.optionDescriptionMaxBytes).optional() })).min(1).max(REQUEST_DECISION_BOUNDS.maxOptions).describe("the options you considered, with unique keys"),
+    chosenOptionKey: z.string().describe("the key of the option you chose"),
+    rationale: z.string().min(1).max(RECORD_DECISION_MAX_RATIONALE_BYTES),
+    affects: z.object({ requirementIds: ids("Requirement"), taskIds: ids("Task"), planNodeIds: ids("Plan Node") }).describe("what the choice affects, within your scope"),
+  },
+  propose_requirements: {
+    requirements: z
+      .array(
+        z.object({
+          key: z.string().regex(REQUIREMENT_PROPOSAL_BOUNDS.keyPattern).describe("a proposal-local key"),
+          parentKey: z.string().nullable().describe("the key of the parent entry, or null for a root"),
+          composition: z.enum(REQUIREMENT_COMPOSITIONS).nullable().describe("all or any for an entry with children; null for a leaf"),
+          statement: z.string().min(1).max(REQUIREMENT_PROPOSAL_BOUNDS.statementMaxBytes),
+          requirementId: id("Requirement").nullable().describe("an existing Requirement this entry keeps; null proposes a new one"),
+          acceptanceCriteria: z
+            .array(z.union([z.object({ kind: z.literal("deterministic"), command: z.string().min(1), expectedExitCode: z.number().int() }), z.object({ kind: z.literal("evaluated"), question: z.string().min(1), rubric: z.string().min(1).nullable() })]))
+            .max(REQUIREMENT_PROPOSAL_BOUNDS.maxCriteriaPerEntry),
+        }),
+      )
+      .min(1)
+      .max(REQUIREMENT_PROPOSAL_BOUNDS.maxEntries),
+    rationale: z.string().min(1).max(REQUIREMENT_PROPOSAL_BOUNDS.rationaleMaxBytes),
+  },
+  revise_execution_plan: {
+    source: z.record(z.string(), z.unknown()).describe("the complete source Execution Plan object ({ version: 1, expressions: { ... } }); the runtime compiles and validates it"),
   },
   request_completion: {},
   request_decision: {

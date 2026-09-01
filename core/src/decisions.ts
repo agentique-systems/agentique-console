@@ -299,7 +299,9 @@ function subjectShape(decision: { kind: DecisionKind; subject: DecisionSubject |
   } else if (decision.subject !== null) {
     ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} Decision has no subject` });
   }
-  if (decision.requestedBy.kind === "invocation" && !isRequestableDecisionKind(decision.kind) && decision.kind !== "side_effect_approval") {
+  // An Invocation requests the requestable kinds, is the subject requester of its intercepted call's approval, and records
+  // its own `orchestrator_choice` (the Orchestrator's recording path); every other kind has another owner.
+  if (decision.requestedBy.kind === "invocation" && !isRequestableDecisionKind(decision.kind) && decision.kind !== "side_effect_approval" && decision.kind !== "orchestrator_choice") {
     ctx.addIssue({ code: "custom", path: ["requestedBy"], message: `an Invocation never requests a ${decision.kind} Decision` });
   }
 }
@@ -586,6 +588,12 @@ export const DECISION_REQUEST_REFUSAL_CODES = [
   "not_due",
   /** The Decision's rows disagree with what a resolution needs (a missing subject, a requester that is not blocked on it). */
   "boundary_inconsistent",
+  /** Only a requested `operator_choice` can be superseded by the operator. */
+  "not_supersedable",
+  /** Only a Decision the runtime resolved by its default policy is superseded by the operator; an operator resolution stands. */
+  "not_policy_resolved",
+  /** A supersession chooses an option other than the one the policy chose. */
+  "option_unchanged",
 ] as const;
 export type DecisionRequestRefusalCode = (typeof DECISION_REQUEST_REFUSAL_CODES)[number];
 

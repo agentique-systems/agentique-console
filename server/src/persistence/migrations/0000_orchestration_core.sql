@@ -381,7 +381,7 @@ CREATE TABLE `decisions` (
 	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" IN ('side_effect_approval', 'signoff', 'publish', 'budget_increase', 'requirement_waiver')) = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = "decisions"."kind" AND "decisions"."run_id" IS NOT NULL)),
 	CONSTRAINT "decisions_signoff_policy" CHECK("decisions"."kind" NOT IN ('signoff', 'publish', 'budget_increase', 'requirement_waiver') OR ("decisions"."resolution_policy" = 'operator_required' AND json_extract("decisions"."subject", '$.runId') = "decisions"."run_id")),
 	CONSTRAINT "decisions_waiver_subject_shape" CHECK("decisions"."kind" <> 'requirement_waiver' OR (json_extract("decisions"."subject", '$.requirementId') GLOB 'req_*' AND json_extract("decisions"."subject", '$.requirementRevisionId') GLOB 'reqr_*' AND json_type("decisions"."subject", '$.evidenceArtifactIds') = 'array' AND json_array_length("decisions"."subject", '$.evidenceArtifactIds') <= 20 AND json_array_length("decisions"."affects", '$.requirementIds') = 1 AND json_extract("decisions"."affects", '$.requirementIds[0]') = json_extract("decisions"."subject", '$.requirementId'))),
-	CONSTRAINT "decisions_requestable_by_invocation" CHECK(json_extract("decisions"."requested_by", '$.kind') <> 'invocation' OR "decisions"."kind" IN ('operator_choice', 'requirement_waiver', 'side_effect_approval')),
+	CONSTRAINT "decisions_requestable_by_invocation" CHECK(json_extract("decisions"."requested_by", '$.kind') <> 'invocation' OR "decisions"."kind" IN ('operator_choice', 'requirement_waiver', 'side_effect_approval', 'orchestrator_choice')),
 	CONSTRAINT "decisions_no_self_supersede" CHECK("decisions"."supersedes_decision_id" IS NULL OR "decisions"."supersedes_decision_id" <> "decisions"."id")
 );
 --> statement-breakpoint
@@ -607,6 +607,23 @@ CREATE INDEX `invocations_gate` ON `invocations` (`gate_id`);--> statement-break
 CREATE UNIQUE INDEX `invocations_active_position` ON `invocations` (`plan_node_id`,`pattern_position_key`) WHERE pattern_position_key IS NOT NULL AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_orchestrator` ON `invocations` (`run_id`) WHERE role = 'orchestrator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_coordinator` ON `invocations` (`plan_node_id`) WHERE role = 'coordinator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
+CREATE TABLE `orchestrator_inputs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`run_id` text NOT NULL,
+	`kind` text NOT NULL,
+	`input` text NOT NULL,
+	`created_at` text NOT NULL,
+	`delivered_by_invocation_id` text,
+	`delivered_at` text,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`delivered_by_invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "orchestrator_inputs_kind" CHECK("orchestrator_inputs"."kind" IN ('operator_message', 'decision_resolution', 'requirement_proposal_resolution')),
+	CONSTRAINT "orchestrator_inputs_input_kind" CHECK(json_extract("orchestrator_inputs"."input", '$.kind') = "orchestrator_inputs"."kind"),
+	CONSTRAINT "orchestrator_inputs_delivery" CHECK(("orchestrator_inputs"."delivered_by_invocation_id" IS NULL) = ("orchestrator_inputs"."delivered_at" IS NULL))
+);
+--> statement-breakpoint
+CREATE INDEX `orchestrator_inputs_run` ON `orchestrator_inputs` (`run_id`,`created_at`,`id`);--> statement-breakpoint
+CREATE INDEX `orchestrator_inputs_delivery` ON `orchestrator_inputs` (`delivered_by_invocation_id`);--> statement-breakpoint
 CREATE TABLE `plan_edges` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -768,6 +785,38 @@ CREATE INDEX `publications_status` ON `publications` (`status`);--> statement-br
 CREATE UNIQUE INDEX `publications_decision` ON `publications` (`decision_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `publications_active_run` ON `publications` (`run_id`) WHERE status NOT IN ('succeeded', 'failed');--> statement-breakpoint
 CREATE UNIQUE INDEX `publications_succeeded_run` ON `publications` (`run_id`) WHERE status = 'succeeded';--> statement-breakpoint
+CREATE TABLE `requirement_proposals` (
+	`id` text PRIMARY KEY NOT NULL,
+	`conversation_id` text NOT NULL,
+	`run_id` text NOT NULL,
+	`invocation_id` text NOT NULL,
+	`status` text NOT NULL,
+	`entries` text NOT NULL,
+	`rationale` text NOT NULL,
+	`resolution_status` text,
+	`requirement_revision_id` text,
+	`resolution_edited` integer,
+	`resolution_rationale` text,
+	`resolved_at` text,
+	`superseded_by_proposal_id` text,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`conversation_id`) REFERENCES `conversations`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`requirement_revision_id`) REFERENCES `requirement_revisions`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "requirement_proposals_status" CHECK("requirement_proposals"."status" IN ('proposed', 'approved', 'rejected', 'superseded')),
+	CONSTRAINT "requirement_proposals_resolution_status" CHECK("requirement_proposals"."resolution_status" IS NULL OR "requirement_proposals"."resolution_status" IN ('approved', 'rejected')),
+	CONSTRAINT "requirement_proposals_resolved" CHECK(("requirement_proposals"."status" IN ('approved', 'rejected')) = ("requirement_proposals"."resolution_status" IS NOT NULL AND "requirement_proposals"."resolved_at" IS NOT NULL AND "requirement_proposals"."resolution_edited" IS NOT NULL) AND ("requirement_proposals"."resolution_status" IS NULL OR "requirement_proposals"."resolution_status" = "requirement_proposals"."status")),
+	CONSTRAINT "requirement_proposals_approval_revision" CHECK(("requirement_proposals"."status" = 'approved') = ("requirement_proposals"."requirement_revision_id" IS NOT NULL)),
+	CONSTRAINT "requirement_proposals_edited_only_approved" CHECK("requirement_proposals"."resolution_edited" IS NULL OR "requirement_proposals"."resolution_edited" = 0 OR "requirement_proposals"."status" = 'approved'),
+	CONSTRAINT "requirement_proposals_superseded" CHECK(("requirement_proposals"."status" = 'superseded') = ("requirement_proposals"."superseded_by_proposal_id" IS NOT NULL)),
+	CONSTRAINT "requirement_proposals_no_self_supersede" CHECK("requirement_proposals"."superseded_by_proposal_id" IS NULL OR "requirement_proposals"."superseded_by_proposal_id" <> "requirement_proposals"."id")
+);
+--> statement-breakpoint
+CREATE INDEX `requirement_proposals_run` ON `requirement_proposals` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `requirement_proposals_invocation` ON `requirement_proposals` (`invocation_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `requirement_proposals_one_open_per_run` ON `requirement_proposals` (`run_id`) WHERE status = 'proposed';--> statement-breakpoint
+CREATE UNIQUE INDEX `requirement_proposals_revision` ON `requirement_proposals` (`requirement_revision_id`) WHERE requirement_revision_id IS NOT NULL;--> statement-breakpoint
 CREATE TABLE `requirement_revisions` (
 	`id` text PRIMARY KEY NOT NULL,
 	`conversation_id` text NOT NULL,
@@ -888,7 +937,7 @@ CREATE TABLE `runtime_tool_calls` (
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`attempt_id`) REFERENCES `attempts`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "runtime_tool_calls_tool" CHECK("runtime_tool_calls"."tool" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision', 'write_artifact')),
+	CONSTRAINT "runtime_tool_calls_tool" CHECK("runtime_tool_calls"."tool" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision', 'write_artifact', 'create_tasks', 'record_decision', 'propose_requirements', 'revise_execution_plan')),
 	CONSTRAINT "runtime_tool_calls_digest_shape" CHECK(length("runtime_tool_calls"."call_digest") = 64),
 	CONSTRAINT "runtime_tool_calls_result_tool" CHECK(json_extract("runtime_tool_calls"."result", '$.tool') = "runtime_tool_calls"."tool")
 );
@@ -1026,7 +1075,7 @@ CREATE TABLE `usage` (
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`attempt_id`) REFERENCES `attempts`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "usage_effort" CHECK("usage"."effort" IS NULL OR "usage"."effort" IN ('low', 'medium', 'high', 'max')),
+	CONSTRAINT "usage_effort" CHECK("usage"."effort" IS NULL OR "usage"."effort" IN ('low', 'medium', 'high', 'xhigh', 'max')),
 	CONSTRAINT "usage_non_negative" CHECK("usage"."input_tokens_uncached" >= 0 AND "usage"."cache_creation_tokens" >= 0 AND "usage"."cache_read_tokens" >= 0 AND "usage"."output_tokens" >= 0 AND "usage"."cost_usd" >= 0 AND "usage"."wall_clock_ms" >= 0)
 );
 --> statement-breakpoint

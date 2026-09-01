@@ -84,7 +84,14 @@ export { CAPACITY_ADMISSIBLE_STATUSES, PlanNodeCapacity } from "./plan-node-capa
 export type { CapacityAdmission, CapacityIneligibility, CapacityOutcome } from "./plan-node-capacity.ts";
 export { BudgetIncreaseService } from "./budget-increases.ts";
 export { DecisionRequestService, blockingRequestOf } from "./decision-requests.ts";
-export type { DecisionResolutionOutcome, DecisionResolveInput } from "./decision-requests.ts";
+export type { DecisionResolutionOutcome, DecisionResolveInput, DecisionSupersedeInput, DecisionSupersessionOutcome } from "./decision-requests.ts";
+export { DecisionRecordService } from "./decision-records.ts";
+export { TaskAuthoringService } from "./task-authoring.ts";
+export { RequirementProposalService, RequirementProposalRefusedError, REQUIREMENT_PROPOSAL_REFUSAL_CODES } from "./requirement-proposals.ts";
+export type { RequirementProposalApproveInput, RequirementProposalRejectInput, RequirementProposalResolutionOutcome, RequirementProposalRefusalCode } from "./requirement-proposals.ts";
+export { OrchestratorInputService, OrchestratorInputRefusedError, ORCHESTRATOR_INPUT_REFUSAL_CODES, OPERATOR_MESSAGE_MAX_BYTES } from "./orchestrator-inputs.ts";
+export type { OperatorMessageInput, OrchestratorInputRefusalCode } from "./orchestrator-inputs.ts";
+export type { RuntimeToolServices } from "./runtime-tools.ts";
 export type { BudgetIncreaseProjection, BudgetIncreaseRequestInput, BudgetIncreaseResolutionOutcome, BudgetIncreaseResolveInput, BudgetIncreaseServiceDependencies } from "./budget-increases.ts";
 export type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
 export { RUN_FINALIZATION_FAILURES } from "./ports/run-finalization-workspace.ts";

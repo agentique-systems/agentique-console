@@ -92,7 +92,7 @@ import type { CollectedChangeset, ExecutionWorkspacePort } from "./ports/executi
 import { InvocationResultValidator, type ResultValidation } from "./result-validator.ts";
 import { classifyAttempt, decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicyConfig, type RuntimeInterruption } from "./retry-policy.ts";
 import { settleCancelledRunWork } from "./run-cancellation.ts";
-import { RuntimeToolExecutor } from "./runtime-tools.ts";
+import { RuntimeToolExecutor, type RuntimeToolServices } from "./runtime-tools.ts";
 import { canonicalizeToolCall, ToolCallAuthorizer } from "./tool-call-authorization.ts";
 import { WorkspaceCleanup, type ExecutionDiagnosticSink, type WorkspaceReleaseOutcome } from "./workspace-cleanup.ts";
 
@@ -176,6 +176,8 @@ export class AttemptExecutor {
     private readonly config: AttemptExecutorConfig = DEFAULT_EXECUTOR_CONFIG,
     private readonly output: TransientOutputSink = () => {},
     diagnostics: ExecutionDiagnosticSink = () => {},
+    /** The configured services the runtime-tool port binds beyond the stores (the plan-revision service for `revise_execution_plan`). */
+    private readonly runtimeToolServices: RuntimeToolServices = {},
   ) {
     this.validator = new InvocationResultValidator(stores);
     this.cleanup = new WorkspaceCleanup(ctx, stores, workspace, diagnostics);
@@ -436,6 +438,7 @@ export class AttemptExecutor {
         { runId: invocation.runId, planNodeId: invocation.planNodeId, invocationId: invocation.id, attemptId: attempt.id, role: invocation.role, purpose: invocation.purpose, manifestTools: manifest.content.runtimeTools },
         options,
         this.diagnostics,
+        this.runtimeToolServices,
       ),
       workingDirectory: manifest.content.worktreePath,
       deadlineAt: flight.deadlineAt,

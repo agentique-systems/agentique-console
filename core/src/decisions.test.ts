@@ -63,10 +63,13 @@ describe("decision kinds and policies", () => {
     expect(isOperatorOnlyDecisionKind("operator_choice")).toBe(false);
     // Exactly two kinds are requestable by an agent; every other kind has its own owner and an Invocation never requests it.
     expect(REQUESTABLE_DECISION_KINDS).toEqual(["operator_choice", "requirement_waiver"]);
-    for (const kind of ["orchestrator_choice", "signoff", "publish", "budget_increase"] as const) {
+    for (const kind of ["signoff", "publish", "budget_increase"] as const) {
       expect(isRequestableDecisionKind(kind)).toBe(false);
       expect(decisionRequestSchema.safeParse(request({ kind, requestedBy: { kind: "invocation", invocationId: newId("invocation") }, subject: null })).success).toBe(false);
     }
+    // An orchestrator_choice is not requestable through request_decision, but the Orchestrator's own Invocation records it (record_decision).
+    expect(isRequestableDecisionKind("orchestrator_choice")).toBe(false);
+    expect(decisionRequestSchema.safeParse(request({ kind: "orchestrator_choice", requestedBy: { kind: "invocation", invocationId: newId("invocation") }, subject: null })).success).toBe(true);
     expect(isAgentRequestedDecision({ kind: "operator_choice", requestedBy: { kind: "invocation", invocationId: newId("invocation") } })).toBe(true);
     expect(isAgentRequestedDecision({ kind: "operator_choice", requestedBy: { kind: "operator" } })).toBe(false);
     expect(isAgentRequestedDecision({ kind: "side_effect_approval", requestedBy: { kind: "invocation", invocationId: newId("invocation") } })).toBe(false);

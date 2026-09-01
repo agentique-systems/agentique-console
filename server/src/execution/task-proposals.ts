@@ -51,14 +51,14 @@ export interface RuntimeToolCaller {
  */
 export type HandlerOutcome = { kind: "applied"; result: RuntimeToolResult; then?: (call: RuntimeToolCall) => void } | { kind: "rejected"; reasons: RuntimeToolRejection[] };
 
-class Rejected extends Error {
+export class Rejected extends Error {
   constructor(readonly reasons: RuntimeToolRejection[]) {
     super(reasons.map((r) => r.message).join("; "));
     this.name = "Rejected";
   }
 }
 
-function reject(code: RuntimeToolRejection["code"], message: string, path: string | null = null): never {
+export function reject(code: RuntimeToolRejection["code"], message: string, path: string | null = null): never {
   throw new Rejected([{ code, message, path }]);
 }
 
@@ -281,7 +281,7 @@ export class TaskProposalService {
   }
 
   /** Cancels a pending, ready, or blocked Task and releases its active Task reservation. */
-  private cancelTask(task: Task, options: WriteOptions): Task {
+  cancelTask(task: Task, options: WriteOptions): Task {
     const cancelled = this.stores.tasks.transition(task.id, { to: "cancelled" }, options);
     const reservation = this.stores.reservations.activeForChild({ type: "task", id: task.id });
     if (reservation) this.stores.reservations.release(reservation.id, "task_cancelled", { costUsd: 0, tokens: 0, attempts: 0 }, options);
@@ -301,7 +301,7 @@ interface ProposalPlan {
 }
 
 /** A node on a cycle of the directed edges (`from → to`), or `null` when acyclic. */
-function findCycle(edges: readonly [string, string][]): string | null {
+export function findCycle(edges: readonly [string, string][]): string | null {
   const adjacency = new Map<string, string[]>();
   for (const [from, to] of edges) {
     const list = adjacency.get(from) ?? [];

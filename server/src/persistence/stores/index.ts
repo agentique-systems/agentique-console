@@ -13,8 +13,10 @@ import { ConversationStore } from "./conversations.ts";
 import { DecisionStore } from "./decisions.ts";
 import { HandoffStore } from "./handoffs.ts";
 import { InvocationStore } from "./invocations.ts";
+import { OrchestratorInputStore } from "./orchestrator-inputs.ts";
 import { ExecutionPlanStore } from "./plans.ts";
 import { PublicationStore } from "./publications.ts";
+import { RequirementProposalStore } from "./requirement-proposals.ts";
 import { RequirementStore } from "./requirements.ts";
 import { RunStore } from "./runs.ts";
 import { RuntimeToolCallStore } from "./runtime-tool-calls.ts";
@@ -31,6 +33,8 @@ export interface Stores {
   runs: RunStore;
   plans: ExecutionPlanStore;
   requirements: RequirementStore;
+  /** The Orchestrator's Requirement proposals awaiting or resolved by the operator (execution-model §8.1). */
+  requirementProposals: RequirementProposalStore;
   decisions: DecisionStore;
   tasks: TaskStore;
   artifacts: ArtifactStore;
@@ -39,6 +43,8 @@ export interface Stores {
   invocations: InvocationStore;
   approvedToolCallUses: ApprovedToolCallUseStore;
   runtimeToolCalls: RuntimeToolCallStore;
+  /** The queued typed inputs of the Orchestrator's next logical turn (execution-model §4.6). */
+  orchestratorInputs: OrchestratorInputStore;
   continuations: ProviderContinuationStore;
   evaluations: EvaluationStore;
   gates: GateStore;
@@ -73,6 +79,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
     runs: new RunStore(ctx, conversations),
     plans,
     requirements: new RequirementStore(ctx),
+    requirementProposals: new RequirementProposalStore(ctx),
     decisions: new DecisionStore(ctx),
     tasks: new TaskStore(ctx, plans),
     artifacts: new ArtifactStore(ctx),
@@ -81,6 +88,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
     invocations: new InvocationStore(ctx, reservations, usage),
     approvedToolCallUses: new ApprovedToolCallUseStore(ctx),
     runtimeToolCalls: new RuntimeToolCallStore(ctx),
+    orchestratorInputs: new OrchestratorInputStore(ctx),
     continuations: new ProviderContinuationStore(ctx),
     evaluations: new EvaluationStore(ctx),
     gates: new GateStore(ctx),

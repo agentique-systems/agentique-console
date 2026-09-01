@@ -37,7 +37,7 @@ describe("runtime tools", () => {
     expect(runtimeToolsFor("coordinator", "synthesize")).toEqual(RUNTIME_TOOLS_BY_ROLE.coordinator.filter((t) => t !== "propose_tasks" && t !== "update_task"));
     expect(runtimeToolsFor("worker", "task")).toEqual(RUNTIME_TOOLS_BY_ROLE.worker);
     expect(runtimeToolsFor("orchestrator", "operator_input")).toEqual(RUNTIME_TOOLS_BY_ROLE.orchestrator);
-    expect(RUNTIME_TOOL_CALL_TOOLS).toEqual(["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact"]);
+    expect(RUNTIME_TOOL_CALL_TOOLS).toEqual(["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact", "create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"]);
     expect(RUNTIME_TOOL_READ_TOOLS).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions"]);
     expect(EXECUTABLE_RUNTIME_TOOLS).toEqual([...RUNTIME_TOOL_READ_TOOLS, ...RUNTIME_TOOL_CALL_TOOLS]);
     expect(RUNTIME_TOOL_HANDLER_BINDINGS.propose_tasks).toEqual([{ role: "coordinator", purposes: ["decompose", "replan"] }]);
@@ -45,8 +45,8 @@ describe("runtime tools", () => {
     // Effective = manifest ∩ handlers ∩ role/purpose validity: a permitted tool without a handler is never callable.
     expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "decompose"), "coordinator", "decompose")).toEqual([...READS, "propose_tasks", "update_task", "request_decision", "write_artifact"]);
     expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "synthesize"), "coordinator", "synthesize")).toEqual([...READS, "request_decision", "write_artifact"]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "task"), "worker", "task")).toEqual([...READS, "request_decision", "write_artifact"]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual([...READS, "request_completion", "request_decision", "write_artifact"]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "task"), "worker", "task")).toEqual([...READS, "update_task", "request_decision", "write_artifact"]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual([...READS, "update_task", "request_completion", "request_decision", "write_artifact", "create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"]);
     // The read-only final synthesis may use every bounded read tool but no mutating runtime tool at all.
     expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "final_synthesis"), "orchestrator", "final_synthesis")).toEqual(READS);
     expect(runtimeToolsFor("orchestrator", "final_synthesis")).not.toContain("request_completion");
