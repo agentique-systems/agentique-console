@@ -24,8 +24,12 @@
  * Operator control survives the restart (execution-model §14): an Attempt
  * of a cancelled Run is marked `cancelled` with a refused retry, its
  * Invocation cancelled, and the Run's remaining work converged in the same
- * transaction; an Attempt of a paused Run is interrupted like any other and
- * left retry-eligible, but the pause stays and nothing resumes it.
+ * transaction — unless the Attempt had committed a blocking Decision, in
+ * which case the Attempt ends interrupted, the Invocation stays `blocked`
+ * on that Decision (the boundary is history), and the Run's remaining work
+ * converges just the same; an Attempt of a paused Run is interrupted like
+ * any other and left retry-eligible, but the pause stays and nothing
+ * resumes it.
  *
  * Recovery is idempotent: a second run finds no non-terminal Attempt, no
  * active lease, and no pending entry, and writes nothing.
@@ -135,6 +139,9 @@ export class RecoveryService {
           if (lease.status === "active") report.releasedLeaseIds.push(this.governor.release(lease.id, options).id);
         }
         const settlement = settleInvocation(this.stores, { invocation, attempt: interrupted, decision, result: null, blocked, meta: options });
+        // A cancelled Run whose dead Attempt had committed a blocking Decision keeps that boundary — the Attempt ends interrupted and the
+        // Invocation blocked — but the Run's remaining work, held back only by this Attempt, converges below all the same.
+        if (blocked !== null && this.stores.runs.get(invocation.runId).status === "cancelled") cancelledRuns.add(invocation.runId);
         if (settlement.kind === "settled") {
           if (settlement.invocation.status === "failed") report.failedInvocationIds.push(settlement.invocation.id);
           continue;

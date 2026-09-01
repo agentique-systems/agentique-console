@@ -12,11 +12,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AttemptId, InvocationId, PlanNodeId } from "@agentique-console/core";
+import type { AttemptId, DecisionId, InvocationId, PlanNodeId } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
+import { choice } from "./decision-test-support.ts";
 import { competitor, newWorld, withProcess, type World } from "./recovery-test-support.ts";
 import { settleCancelledRunWork } from "./run-cancellation.ts";
-import { attemptsOf, chain, delayed, executing, planned, single, until } from "./run-control-test-support.ts";
+import { activeCapacity, attemptsOf, chain, delayed, executing, planned, single, until } from "./run-control-test-support.ts";
 import { COMPLETED_RESULT } from "./test-support.ts";
 
 function world(): World {
@@ -255,6 +256,62 @@ describe("Run control across restarts", () => {
         } finally {
           b.close();
         }
+      }, { recover: false });
+    } finally {
+      fs.rmSync(w.dir, { recursive: true, force: true });
+    }
+  });
+  it("(6) a cancellation committed after the dead Attempt had requested a blocking Decision: recovery keeps the Decision boundary (Attempt interrupted, Invocation blocked, Decision open) and converges the Run's remaining work; repeated recovery mutates nothing and creates no continuation", async () => {
+    const w = world();
+    try {
+      let invocationId!: InvocationId;
+      let attemptId!: AttemptId;
+      let decisionId!: DecisionId;
+      await withProcess(w, async (h) => {
+        const { runId, nodes } = await planned(h, (s) => [chain(s, ["step 1", "step 2"])]);
+        w.runId = runId;
+        w.nodeId = nodes[0]!.id;
+        // The step commits a blocking operator_choice through the runtime-tool port and then keeps executing: a provider that does not stop on its own.
+        h.provider.script({ kind: "derived", step: (request) => ({ kind: "runtime_tool_calls", calls: [choice({ affects: { requirementIds: [], taskIds: [], planNodeIds: [h.stores.invocations.get(request.invocationId).planNodeId] } })], ignoreStop: true, then: { kind: "hang" } }) });
+        const pass = h.scheduler.advanceRun(runId);
+        void pass.catch(() => undefined);
+        await until(() => h.stores.decisions.listByRun(runId).some((d) => d.kind === "operator_choice"));
+        decisionId = h.stores.decisions.listByRun(runId).find((d) => d.kind === "operator_choice")!.id;
+        attemptId = h.executor.inFlightOf(runId)[0]!;
+        invocationId = h.stores.invocations.listByPlanNode(w.nodeId)[0]!.id;
+        expect(h.stores.invocations.getAttempt(attemptId).invocationId).toBe(invocationId);
+        // The operator's cancellation commits (the Run row and the convergence of the non-executing work); the process dies before the
+        // interruption is delivered and before the Attempt finalizes.
+        h.ctx.tx.write(() => {
+          h.stores.runs.transition(runId, { to: "cancelled" });
+          expect(settleCancelledRunWork(h.stores, runId, {})).toMatchObject({ cancelledNodeIds: [h.stores.plans.rootNode(runId).id], executingInvocationIds: [invocationId] });
+        });
+        expect(h.stores.plans.getNode(w.nodeId).status).toBe("running");
+      }, { recover: false });
+      await withProcess(w, async (h) => {
+        const seq = h.ctx.journal.lastSeq();
+        const report = h.recovery.recover();
+        expect(report).toMatchObject({ interruptedAttemptIds: [attemptId], cancelledAttemptIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: expect.arrayContaining([invocationId]), workspaceReleaseFailedInvocationIds: [] });
+        expect(report.releasedLeaseIds).toHaveLength(1);
+        // The Decision boundary is intact: the Attempt ended interrupted with its refused retry; the Invocation is blocked on the open Decision.
+        expect(h.stores.invocations.getAttempt(attemptId)).toMatchObject({ status: "interrupted", failureDetail: { cancelled: false }, retryDecision: { permitted: false, reason: "decision_requested", notBefore: null } });
+        expect(h.stores.invocations.get(invocationId)).toMatchObject({ status: "blocked", blockedByDecisionId: decisionId, workspaceCleanup: "released" });
+        expect(h.stores.decisions.get(decisionId).status).toBe("open");
+        // The cancelled Run's remaining work converged: the chain node is cancelled, its second step never prepared, nothing reserved or leased.
+        expect(h.stores.plans.getNode(w.nodeId).status).toBe("cancelled");
+        expect(h.stores.invocations.listByPlanNode(w.nodeId)).toHaveLength(1);
+        expect(activeCapacity(h, w.runId)).toEqual({ reservations: [], leases: [] });
+        expect(h.stores.runs.get(w.runId).status).toBe("cancelled");
+        expect(h.runners.decisionRequests.pendingContinuations(w.runId)).toEqual([]);
+        expect(await h.scheduler.advanceRun(w.runId)).toMatchObject({ stop: "run_terminal", actions: [] });
+        expect(await h.executor.prepareNextAttempt(invocationId)).toMatchObject({ kind: "not_permitted", reason: "invocation_terminal" });
+        expect(h.provider.requests).toEqual([]);
+        // Repeated recovery performs no further mutation and creates no continuation.
+        const after = h.ctx.journal.lastSeq();
+        expect(after).toBeGreaterThan(seq);
+        expect(h.recovery.recover()).toMatchObject({ interruptedAttemptIds: [], cancelledAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: [] });
+        expect(h.ctx.journal.lastSeq()).toBe(after);
+        expect(h.stores.invocations.listByRun(w.runId).filter((i) => i.continuedFromInvocationId === invocationId)).toEqual([]);
       }, { recover: false });
     } finally {
       fs.rmSync(w.dir, { recursive: true, force: true });

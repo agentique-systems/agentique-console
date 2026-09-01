@@ -52,7 +52,11 @@ export type FakeStep = FakeStepCommon &
     | { kind: "derived"; step: (request: AttemptExecutionRequest) => FakeStep }
     | { kind: "hang" }
     | { kind: "throw"; error: Error }
-    | { kind: "delay"; key: string; then: FakeStep }
+    /**
+     * Completes only when the test releases `key` — or, unless `holdThroughAbort`, when the runtime aborts the Attempt. A held step
+     * that was aborted before its release returns the interruption once released: a provider that notices the abort late.
+     */
+    | { kind: "delay"; key: string; then: FakeStep; holdThroughAbort?: boolean }
   );
 
 /** One authorization the fake requested and the outcome it received. */
@@ -189,7 +193,7 @@ export class ScriptedProvider implements ProviderAdapter {
       await new Promise<void>((resolve) => {
         const finish = () => resolve();
         this.#released.set(step.key, finish);
-        request.signal.addEventListener("abort", finish, { once: true });
+        if (step.holdThroughAbort !== true) request.signal.addEventListener("abort", finish, { once: true });
       });
       this.#released.delete(step.key);
       if (request.signal.aborted) return this.#interrupted(step, request, recorded);

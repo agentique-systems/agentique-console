@@ -474,7 +474,10 @@ export class AttemptExecutor {
       const meta: WriteOptions = { ...options };
       // The Run row decides late (execution-model §14): a cancellation or hard pause committed while the provider ran interrupts the
       // Attempt from rows — whatever the provider reported, and even when the abort signal reached nothing. A soft pause changes nothing.
-      const interruption: RuntimeInterruption = flight.runtimeInterruption ?? runExecutionInterruptionOf(run);
+      // A cancellation committed after an earlier delivered interruption (a hard pause, a deadline) takes precedence over the cause held
+      // in memory: the Attempt ends cancelled with its retry refused, never interrupted with a retry the cancelled Run could not use.
+      const committed = runExecutionInterruptionOf(run);
+      const interruption: RuntimeInterruption = committed === "cancelled" ? "cancelled" : (flight.runtimeInterruption ?? committed);
 
       // 1. The diagnostic transcript Artifact; nothing below reads it.
       const transcriptArtifactId =

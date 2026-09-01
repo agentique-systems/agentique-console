@@ -8,9 +8,11 @@
  * each.
  */
 import { describe, expect, it } from "vitest";
+import type { FakeStep } from "../provider/fake.ts";
 import { completionGatesOf, requestingStep, synthesisStep } from "./completion-test-support.ts";
+import { choice } from "./decision-test-support.ts";
 import { scriptByRole } from "./gate-test-support.ts";
-import { attemptsOf, delayed, eventsAfter, executing, invocationOf, planned, single, until, work } from "./run-control-test-support.ts";
+import { activeCapacity, attemptsOf, chain, delayed, eventsAfter, executing, invocationOf, planned, single, until, work } from "./run-control-test-support.ts";
 import { awaitSignoff } from "./signoff-test-support.ts";
 import { COMPLETED_RESULT, openRuntimeHarness, seedPlanningRuntime } from "./test-support.ts";
 
@@ -223,6 +225,96 @@ describe("Run control races", () => {
       expect(() => g.runControl.resume({ runId })).toThrow(expect.objectContaining({ refusal: "run_terminal" }));
     } finally {
       g.close();
+    }
+  });
+  it("cancel after a committed request_decision: the delivered cancellation keeps the Decision boundary — the Attempt ends decision_requested, the Invocation blocked on the open Decision — and the Run's remaining work converges without a continuation", async () => {
+    const h = openRuntimeHarness();
+    try {
+      const { runId, nodes } = await planned(h, (s) => [chain(s, ["step 1", "step 2"])]);
+      const node = nodes[0]!;
+      h.provider.script({ kind: "derived", step: (request) => ({ kind: "runtime_tool_calls", calls: [choice({ affects: { requirementIds: [], taskIds: [], planNodeIds: [h.stores.invocations.get(request.invocationId).planNodeId] } })], ignoreStop: true, then: delayed("a") }) });
+      const { pass } = await executing(h, runId, ["a"]);
+      const invocation = invocationOf(h, node);
+      const decision = h.stores.decisions.listByRun(runId).find((d) => d.kind === "operator_choice")!;
+      expect(h.runControl.cancel({ runId }).interruptedAttemptIds).toHaveLength(1);
+      expect((await pass).stop).toBe("run_terminal");
+      const [attempt] = h.stores.invocations.listAttempts(invocation.id);
+      expect(attempt).toMatchObject({ status: "failed", failureClass: "decision_requested", failureDetail: { cancelled: false }, retryDecision: { permitted: false, reason: "decision_requested", notBefore: null } });
+      expect(h.stores.invocations.get(invocation.id)).toMatchObject({ status: "blocked", blockedByDecisionId: decision.id });
+      expect(h.stores.decisions.get(decision.id).status).toBe("open");
+      // The cancelled Run converged around the preserved boundary: the chain node is cancelled, its second step never prepared.
+      expect(h.stores.plans.getNode(node.id).status).toBe("cancelled");
+      expect(h.stores.invocations.listByPlanNode(node.id)).toHaveLength(1);
+      expect(h.stores.runs.get(runId).status).toBe("cancelled");
+      expect(activeCapacity(h, runId)).toEqual({ reservations: [], leases: [] });
+      expect(h.stores.usage.listByAttempt(attempt!.id)).toHaveLength(1);
+      expect(h.runners.decisionRequests.pendingContinuations(runId)).toEqual([]);
+      expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "run_terminal", actions: [] });
+      // A replayed cancellation writes nothing more.
+      const seq = h.ctx.journal.lastSeq();
+      expect(h.runControl.cancel({ runId })).toMatchObject({ kind: "cancelled", replayed: true, interruptedAttemptIds: [], executingAttemptIds: [] });
+      expect(h.ctx.journal.lastSeq()).toBe(seq);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("hard pause delivered, then cancellation committed before finalization: the Attempt ends cancelled with its retry refused (or keeps its committed Decision boundary), Usage once, no Changeset, and the returned settlement agrees with the rows", async () => {
+    for (const boundary of ["none", "decision"] as const) {
+      const h = openRuntimeHarness();
+      try {
+        const { runId, nodes, revisionNumber } = await planned(h, (s) => [single(s, "A")]);
+        const a = nodes[0]!;
+        const rootTurn = h.stores.invocations.listByPlanNode(h.stores.plans.rootNode(runId).id)[0]!;
+        // The provider is held at its barrier through the abort: it notices the interruption only when the test releases it.
+        const held: FakeStep = { kind: "delay", key: "a", then: { kind: "succeed", result: COMPLETED_RESULT }, holdThroughAbort: true };
+        h.provider.script(boundary === "none" ? held : { kind: "derived", step: (request) => ({ kind: "runtime_tool_calls", calls: [choice({ affects: { requirementIds: [], taskIds: [], planNodeIds: [h.stores.invocations.get(request.invocationId).planNodeId] } })], ignoreStop: true, then: held }) });
+        h.stores.plans.transitionNode(a.id, { to: "ready" });
+        const started = h.runners.single.start(a.id, revisionNumber);
+        if (started.kind !== "started") throw new Error(started.kind);
+        const prepared = await h.executor.prepareNextAttempt(started.invocationId);
+        if (prepared.kind !== "prepared") throw new Error(prepared.kind);
+        const execution = h.executor.executePreparedAttempt(prepared.attempt.id);
+        await until(() => h.provider.delayedKeys.includes("a"));
+        const decision = h.stores.decisions.listByRun(runId).find((d) => d.kind === "operator_choice") ?? null;
+        expect(decision === null, boundary).toBe(boundary === "none");
+        // The hard pause is accepted and delivered while the provider holds.
+        expect(h.runControl.pause({ runId, mode: "hard" }), boundary).toMatchObject({ kind: "paused", interruptedAttemptIds: [prepared.attempt.id] });
+        // The cancellation commits before finalization; the one interruption was already delivered and is never rewritten.
+        expect(h.runControl.cancel({ runId }), boundary).toMatchObject({ kind: "cancelled", replayed: false, interruptedAttemptIds: [], executingAttemptIds: [prepared.attempt.id] });
+        h.provider.release("a");
+        const outcome = await execution;
+        if (outcome.kind !== "finalized" && outcome.kind !== "decision_requested") throw new Error(outcome.kind);
+        const attempt = h.stores.invocations.getAttempt(prepared.attempt.id);
+        const invocation = h.stores.invocations.get(started.invocationId);
+        if (boundary === "none") {
+          expect(outcome.kind, boundary).toBe("finalized");
+          expect(attempt, boundary).toMatchObject({ status: "cancelled", failureClass: null, failureDetail: { cancelled: true }, retryDecision: { permitted: false, reason: "cancelled", notBefore: null } });
+          expect(invocation.status, boundary).toBe("cancelled");
+        } else {
+          expect(outcome.kind, boundary).toBe("decision_requested");
+          expect(attempt, boundary).toMatchObject({ status: "failed", failureClass: "decision_requested", retryDecision: { permitted: false, reason: "decision_requested", notBefore: null } });
+          expect(invocation, boundary).toMatchObject({ status: "blocked", blockedByDecisionId: decision!.id });
+          expect(h.stores.decisions.get(decision!.id).status, boundary).toBe("open");
+        }
+        // The returned settlement is the persisted state; only the external worktree release, which follows the commit, is newer than it.
+        expect(outcome.attempt, boundary).toEqual(attempt);
+        const settled = ({ workspaceCleanup: _c, workspaceReleasedAt: _r, ...canonical }: typeof invocation) => canonical;
+        expect(outcome.settlement.kind, boundary).toBe("settled");
+        expect(settled(outcome.settlement.invocation), boundary).toEqual(settled(invocation));
+        expect(invocation.workspaceCleanup, boundary).toBe("released");
+        expect(h.stores.usage.listByAttempt(attempt.id), boundary).toHaveLength(1);
+        expect(h.stores.changesets.listByRun(runId).filter((c) => c.invocationId === started.invocationId), boundary).toEqual([]);
+        expect(await h.executor.prepareNextAttempt(started.invocationId), boundary).toMatchObject({ kind: "not_permitted", reason: "invocation_terminal" });
+        // Terminal history is preserved and the cancelled Run's work converged.
+        expect(h.stores.invocations.get(rootTurn.id).status, boundary).toBe("succeeded");
+        expect(h.stores.plans.getNode(a.id).status, boundary).toBe("cancelled");
+        expect(h.stores.runs.get(runId).status, boundary).toBe("cancelled");
+        expect(activeCapacity(h, runId), boundary).toEqual({ reservations: [], leases: [] });
+        expect(await h.scheduler.advanceRun(runId), boundary).toMatchObject({ stop: "run_terminal", actions: [] });
+      } finally {
+        h.close();
+      }
     }
   });
 });
