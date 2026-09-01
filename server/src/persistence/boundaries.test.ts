@@ -116,7 +116,8 @@ describe("import boundaries", () => {
     const files = listFiles("server/src/execution", isCode);
     expect(files.length).toBeGreaterThan(3);
     for (const file of files) {
-      const isTest = file.endsWith(".test.ts");
+      // Test files and test fixtures (`*test-support.ts`, including the crash suite's child process) may use vitest and Node built-ins.
+      const isTest = file.endsWith(".test.ts") || file.endsWith("test-support.ts");
       for (const specifier of importsOf(file)) {
         if (isTest && (specifier === "vitest" || specifier.startsWith("node:"))) continue;
         const allowed =
@@ -600,6 +601,27 @@ describe("import boundaries", () => {
     // 9. Raw Artifact content stays out of the safe result, the record, and the read rejections by shape: the result union's
     //    write_artifact member carries metadata fields only.
     expect(core).toMatch(/\{ tool: "write_artifact"; artifactId: ArtifactId; mediaType: string; digest: string; byteSize: number; title: string \}/);
+    // 10. Bounded retrieval: the read service pages through the stores' keyset and batch APIs and never materializes a
+    //     Conversation's Decision history, a Run's Task ledger, every Agent Definition or revision, or the whole graph for a page.
+    expect(reads).not.toMatch(/decisions\.(listByConversation|listByRun|listOpen)\(|tasks\.(listByRun|listByPlanNode|dependencies)\(|agents\.(listDefinitions|listRevisions)\(|plans\.(currentGraph|listEdges|listNodes|graph)\(|\.all\(\)/);
+    for (const api of ["decisions.page(", "decisions.contains(", "tasks.page(", "tasks.contains(", "tasks.visibleAmong(", "tasks.dependencyIdsOf(", "tasks.replacementsOf(", "agents.pageExecutable(", "agents.containsExecutable(", "agents.getDefinitions(", "plans.pageMembers(", "plans.pageEdges(", "plans.edgeKey(", "plans.memberPosition(", "plans.membersAmong(", "requirements.getMany(", "requirements.getAcceptanceCriteria(", "requirements.latestWaiverDecisionOf("]) {
+      expect(reads, api).toContain(api);
+    }
+    // The one whole-value read is a Requirement revision's tree, bounded in core; the current revision is one row.
+    expect(fs.readFileSync(path.join(repoRoot, "core/src/requirements.ts"), "utf8")).toMatch(/export const REQUIREMENT_TREE_MAX_ENTRIES = 1_000;/);
+    expect(strip(fs.readFileSync(path.join(repoRoot, "server/src/persistence/stores/requirements.ts"), "utf8"))).toMatch(/currentRevision\(conversationId: ConversationId\)[\s\S]*?\.orderBy\(desc\(requirementRevisions\.number\)\)[\s\S]*?\.limit\(1\)[\s\S]*?\.get\(\)/);
+    // 11. Every read result leaves the service through the serialized-ceiling check, and read_artifact measures its envelope exactly.
+    expect(reads).toMatch(/return bounded\(this\.readArtifact\(/);
+    expect(reads).toMatch(/artifactEnvelopeBytes\(artifact, offset, encoding\)/);
+    expect(reads).toMatch(/readOutcomeBytes\(candidate\) > ceiling/);
+    // 12. Infrastructure failures of a call carry the closed failure kind, never the thrown text.
+    expect(executor).toMatch(/failureKindOf\(error\)/);
+    expect(executor).not.toMatch(/error\.message|String\(error\)/);
+    expect(strip(fs.readFileSync(path.join(repoRoot, "server/src/persistence/stores/artifacts.ts"), "utf8"))).toMatch(/blob removal failed: \$\{failureKindOf\(cleanupError\)\}/);
+    // 13. No Artifact of a runtime component (a transcript, a captured call, a diff, an index) is ever readable through the producer route:
+    //     the route requires an Invocation producer, and no runtime producer name appears in the read service.
+    expect(reads).toMatch(/artifact\.producer\.kind === "invocation" && artifact\.producer\.invocationId === caller\.invocation\.id/);
+    expect(reads).not.toMatch(/component:|"tool_call"|"changeset"|"final_report"|TOOL_CALL_MEDIA_TYPE/);
   });
 
   it("legacy code imports neither core nor the new persistence boundary", () => {
