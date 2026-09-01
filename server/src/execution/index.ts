@@ -56,6 +56,7 @@ export { WorkspaceCleanup } from "./workspace-cleanup.ts";
 export type { ExecutionDiagnostic, ExecutionDiagnosticSink, WorkspaceReleaseOutcome } from "./workspace-cleanup.ts";
 export { RecoveryService } from "./recovery-service.ts";
 export type { RecoveryConfig, RecoveryReport } from "./recovery-service.ts";
+export type { PendingBlobFailure, PendingBlobFailureKind, PendingBlobReconciliation } from "../persistence/stores/artifacts.ts";
 export { RunStartService } from "./run-start-service.ts";
 export type { RunStartRequest, StartedRun } from "./run-start-service.ts";
 export { evaluateReadiness, decideReadiness, edgeActivation, predecessorEdges, successorEdges, schedulingOrder, ReadinessFactError } from "./readiness.ts";

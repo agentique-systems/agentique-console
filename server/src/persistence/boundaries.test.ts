@@ -624,6 +624,85 @@ describe("import boundaries", () => {
     expect(reads).not.toMatch(/component:|"tool_call"|"changeset"|"final_report"|TOOL_CALL_MEDIA_TYPE/);
   });
 
+  it("the pending-write marker protocol is storage housekeeping: one owner in the persistence boundary, one reconciliation call at the clean-break recovery boundary, no timer, sweep, fsync knob, recursive delete, or legacy bootstrap wiring (execution-model §2.1)", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    const read = (f: string) => strip(fs.readFileSync(path.join(repoRoot, f), "utf8"));
+    const production = ["server/src/persistence", "server/src/execution", "server/src/provider"].flatMap((dir) => listFiles(dir, (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts")));
+    const namers = (pattern: RegExp) => production.filter((f) => pattern.test(read(rel(f)))).map(rel).sort();
+    const blobStore = read("server/src/persistence/blob-store.ts");
+    const store = read("server/src/persistence/stores/artifacts.ts");
+    const recovery = read("server/src/execution/recovery-service.ts");
+    // 1. Markers, temporaries, and the pending area are the blob store's; the Artifact Store is the only writer of blobs and the only
+    //    caller of the protocol's primitives, so every Artifact producer participates through `ArtifactStore.create` alone.
+    expect(namers(/\b(markPending|clearPending|listPending|removeTemporary)\(/)).toEqual(["server/src/persistence/blob-store.ts", "server/src/persistence/stores/artifacts.ts"]);
+    expect(namers(/blobs\.put\(/)).toEqual(["server/src/persistence/stores/artifacts.ts"]);
+    expect(namers(/\.pending\/|"\.pending"|PENDING_DIRECTORY/)).toEqual(["server/src/persistence/blob-store.ts"]);
+    expect(blobStore).toMatch(/const PENDING_DIRECTORY = "\.pending";/);
+    // 2. One reconciliation, defined by the Artifact Store outside every transaction and invoked once by the clean-break
+    //    RecoveryService after its canonical transaction and the worktree releases — no second recovery owner anywhere.
+    expect(namers(/reconcilePendingBlobs\(/)).toEqual(["server/src/execution/recovery-service.ts", "server/src/persistence/stores/artifacts.ts"]);
+    expect(recovery).toMatch(/const report = this\.reconcile\(options\);\s*const releases = this\.cleanup\.releaseOutstanding\(options\);\s*const blobs = this\.stores\.artifacts\.reconcilePendingBlobs\(\);/);
+    expect(store).toMatch(/reconcilePendingBlobs\(\): PendingBlobReconciliation \{\s*if \(this\.ctx\.tx\.inTransaction\) throw/);
+    // 3. Compensation and completion are registered before the marker or the blob can exist, and only the Artifact Store registers
+    //    a commit hook; the marker is removed last on the rollback path (blob first) and never before its obligation is resolved.
+    expect(store.indexOf("this.ctx.tx.afterRollback(")).toBeGreaterThan(-1);
+    expect(store.indexOf("this.ctx.tx.afterRollback(")).toBeLessThan(store.indexOf("this.ctx.blobs.put(bytes)"));
+    expect(store.indexOf("this.ctx.tx.afterCommit(")).toBeLessThan(store.indexOf("this.ctx.blobs.put(bytes)"));
+    expect(namers(/\.afterCommit\(/)).toEqual(["server/src/persistence/stores/artifacts.ts"]);
+    const compensate = store.slice(store.indexOf("private compensate("), store.indexOf("private settleMarker("));
+    expect(compensate.indexOf("this.ctx.blobs.remove(digest)")).toBeLessThan(compensate.indexOf("this.ctx.blobs.clearPending(digest)"));
+    expect(compensate).toMatch(/pending\.written && !this\.referenced\(digest\)/);
+    const reconcile = store.slice(store.indexOf("reconcilePendingBlobs(): PendingBlobReconciliation {"));
+    expect(reconcile.indexOf("this.referenced(entry.digest)")).toBeLessThan(reconcile.indexOf("this.ctx.blobs.remove(entry.digest)"));
+    expect(reconcile.indexOf("this.ctx.blobs.remove(entry.digest)")).toBeLessThan(reconcile.indexOf("this.ctx.blobs.clearPending(entry.digest)"));
+    // 4. No timer, polling, loop, second scheduler, sweep, lease or lock subsystem, fsync barrier, durability knob, transcript, or
+    //    messaging on the protocol's paths; the proposal's `durableBarriers` option is absent from the whole new source.
+    for (const f of ["server/src/persistence/blob-store.ts", "server/src/persistence/stores/artifacts.ts", "server/src/persistence/transactions.ts", "server/src/execution/recovery-service.ts"]) {
+      const text = read(f);
+      expect(text, f).not.toMatch(/setTimeout|setInterval|setImmediate|process\.nextTick|\bpoll\w*\(|class \w*(Scheduler|Loop|Poller|Timer|Lease|Lock|Collector)\b/);
+      expect(text, f).not.toMatch(/fsync|fdatasync|durableBarriers|synchronous|journal_mode|garbage|sweep/i);
+      expect(text, f).not.toMatch(/sendMessage|mailbox|inbox|agent_message/i);
+      expect(text, f).not.toMatch(/\b(legacy|compat\w*|fallback\b|shim|deprecated|feature.?flag|v2)\b/i);
+    }
+    for (const f of ["server/src/persistence/blob-store.ts", "server/src/persistence/stores/artifacts.ts", "server/src/persistence/transactions.ts"]) {
+      expect(read(f), f).not.toMatch(/transcript|TRANSCRIPT_MEDIA_TYPE/i);
+    }
+    for (const file of newFiles.filter((f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      expect(fs.readFileSync(file, "utf8"), rel(file)).not.toMatch(/durableBarriers/);
+    }
+    // 5. Bounded, non-destructive enumeration: the blob store reads exactly one directory (the pending area) and never walks the
+    //    tree; every removal is an lstat-guarded unlink of a regular file at a validated path; the only `rmSync` is the
+    //    temporary file's own cleanup with `force` and never `recursive`; markers are created exclusively (`wx`); nothing is
+    //    recognized by a `.tmp` suffix alone.
+    expect(blobStore.match(/readdirSync\(/g)).toHaveLength(1);
+    expect(blobStore).toMatch(/readdirSync\(this\.pendingDir, \{ withFileTypes: true \}\)/);
+    expect(blobStore.match(/\bunlinkSync\(/g)).toHaveLength(1);
+    expect(blobStore).toMatch(/if \(!existing\.isFile\(\)\) throw new BlobUnsafeEntryError\(role, entry\);\s*fs\.unlinkSync\(target\);/);
+    expect(blobStore.match(/\brmSync\(/g)).toHaveLength(1);
+    expect(blobStore).toMatch(/rmSync\(temp, \{ force: true \}\)/);
+    expect(blobStore).not.toMatch(/rmSync\([^)]*recursive|rmdirSync|\bstatSync\(|realpathSync|readlinkSync/);
+    expect(blobStore).toMatch(/fs\.openSync\(marker, "wx"\)/);
+    expect(blobStore).not.toMatch(/endsWith\("\.tmp"\)/);
+    expect(blobStore).toMatch(/const TEMPORARY = \/\^\(\[0-9a-f\]\{64\}\)/);
+    // 6. Diagnostics and reports carry closed kinds, digests, and safe entry identifiers only — never thrown text or a path.
+    expect(store).toMatch(/blob removal failed: \$\{failureKindOf\(cleanupError\)\}/);
+    expect(store).toMatch(/marker removal failed: \$\{failureKindOf\(cleanupError\)\}/);
+    expect(store).toMatch(/failureKind: failureKindOf\(error\)/);
+    expect(store).not.toMatch(/cleanupError\.message|error\.message|String\(error\)|\.stack\b/);
+    expect(blobStore).toMatch(/readonly failureKind: FailureKind = "storage:unsafe_entry";/);
+    // 7. The transactor's commit hooks run after its bookkeeping is settled, in registration order, and a throwing hook or sink
+    //    never reaches the caller.
+    const transactor = read("server/src/persistence/transactions.ts");
+    expect(transactor).toMatch(/const committed = this\.#commitHooks;\s*this\.#reset\(\);\s*this\.#runCommitHooks\(committed\);\s*return result as T;/);
+    expect(transactor.slice(transactor.indexOf("#runCommitHooks(hooks"), transactor.indexOf("#runRollbackHooks(hooks"))).not.toMatch(/\.reverse\(\)/);
+    // 8. The clean-break recovery boundary is invoked by no production code yet: the replacement runtime is not wired into the
+    //    legacy bootstrap (`main.ts`, `boot.ts`, `app.ts`), whose rewrite is the application cutover of the roadmap.
+    expect(namers(/\.recover\(/)).toEqual([]);
+    for (const f of ["server/src/main.ts", "server/src/boot.ts", "server/src/app.ts"]) {
+      expect(read(f), f).not.toMatch(/RecoveryService|reconcilePendingBlobs|src\/persistence|src\/execution/);
+    }
+  });
+
   it("legacy code imports neither core nor the new persistence boundary", () => {
     for (const file of legacyFiles) {
       for (const specifier of importsOf(file)) {

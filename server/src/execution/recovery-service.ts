@@ -12,11 +12,21 @@
  * a transcript or a provider message, and nothing executes: recoverable
  * work is returned for an explicit execution call.
  *
- * Recovery is idempotent: a second run finds no non-terminal Attempt and no
- * active lease, and writes nothing.
+ * After the canonical transaction and the worktree releases, the pending
+ * Artifact blobs of the previous process are reconciled through the
+ * Artifact Store (execution-model §2.1): every marker a death left is
+ * resolved by the committed references, unreferenced protocol-published
+ * blobs and temporaries are removed, and the report states whether every
+ * obligation was resolved. Recovery runs under the exclusive ownership of
+ * the database and blob store; the caller admits new work only when the
+ * blob reconciliation is `complete`.
+ *
+ * Recovery is idempotent: a second run finds no non-terminal Attempt, no
+ * active lease, and no pending entry, and writes nothing.
  */
 import { invocationDeadlineAt, type AttemptId, type CapacityLeaseId, type InvocationId, type Timestamp } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
+import type { PendingBlobReconciliation } from "../persistence/stores/artifacts.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { ProviderAdapter } from "../provider/adapter.ts";
@@ -42,6 +52,8 @@ export interface RecoveryReport {
   /** Outstanding worktree cleanup obligations of terminal Invocations that this recovery released, and those whose release failed again. */
   workspaceReleasedInvocationIds: InvocationId[];
   workspaceReleaseFailedInvocationIds: InvocationId[];
+  /** The pending-blob reconciliation; `blobs.complete` is false when an obligation stayed unresolved and the store is not ready for new writes. */
+  blobs: PendingBlobReconciliation;
 }
 
 export class RecoveryService {
@@ -57,19 +69,21 @@ export class RecoveryService {
 
   /**
    * The canonical reconciliation runs in one transaction; the external
-   * worktree releases follow outside it, so a crash between the two leaves
-   * only pending obligations that the next recovery retries.
+   * worktree releases and the pending-blob reconciliation follow outside
+   * it, so a crash between them leaves only pending obligations that the
+   * next recovery retries.
    */
   recover(options: WriteOptions = {}): RecoveryReport {
     const report = this.reconcile(options);
     const releases = this.cleanup.releaseOutstanding(options);
-    return { ...report, workspaceReleasedInvocationIds: releases.releasedInvocationIds, workspaceReleaseFailedInvocationIds: releases.failedInvocationIds };
+    const blobs = this.stores.artifacts.reconcilePendingBlobs();
+    return { ...report, workspaceReleasedInvocationIds: releases.releasedInvocationIds, workspaceReleaseFailedInvocationIds: releases.failedInvocationIds, blobs };
   }
 
-  private reconcile(options: WriteOptions): Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds"> {
+  private reconcile(options: WriteOptions): Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds" | "blobs"> {
     return this.ctx.tx.write(() => {
       const now = this.ctx.clock();
-      const report: Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds"> = { interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [] };
+      const report: Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds" | "blobs"> = { interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [] };
       for (const attempt of this.stores.invocations.activeAttempts()) {
         const invocation = this.stores.invocations.get(attempt.invocationId);
         const manifest = this.stores.invocations.getManifest(invocation.id);

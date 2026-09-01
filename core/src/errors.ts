@@ -34,6 +34,7 @@ export const FAILURE_KINDS = [
   "domain:immutable",
   "storage:content_missing",
   "storage:content_corrupt",
+  "storage:unsafe_entry",
   "sqlite:busy",
   "sqlite:locked",
   "sqlite:constraint",

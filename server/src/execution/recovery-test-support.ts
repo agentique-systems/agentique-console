@@ -9,6 +9,7 @@ import type { PlanNodeId, RunId } from "@agentique-console/core";
 import { sha256Hex, type MemoryBlobStore } from "../persistence/blob-store.ts";
 import { openHarness, type TestClock } from "../persistence/test-support.ts";
 import { WIDE_GOVERNOR } from "./coordinator-test-support.ts";
+import type { RecoveryReport } from "./recovery-service.ts";
 import { FakeAcceptanceCriterionExecution, FakeIntegrationWorkspace, FakeRunFinalizationWorkspace, openRuntimeHarness, type RuntimeHarness } from "./test-support.ts";
 
 export interface World {
@@ -40,11 +41,15 @@ export function openProcess(w: World): RuntimeHarness {
   return h;
 }
 
-/** Runs `body` in a fresh process over the same database: recovery runs first, exactly as at startup, `after` (a suite's mock restore) runs, and the file is always closed. */
-export async function withProcess<T>(w: World, body: (h: RuntimeHarness) => Promise<T> | T, options: { recover?: boolean; after?: () => void } = {}): Promise<T> {
+/**
+ * Runs `body` in a fresh process over the same database: recovery runs first, exactly as at startup, `after` (a suite's mock restore)
+ * runs, and the file is always closed. As the startup boundary must, the process admits no work after a recovery whose pending-blob
+ * reconciliation is incomplete (`recoveredIncomplete`), unless the suite opts in to inspect that state (`allowIncompleteRecovery`).
+ */
+export async function withProcess<T>(w: World, body: (h: RuntimeHarness) => Promise<T> | T, options: { recover?: boolean; after?: () => void; allowIncompleteRecovery?: boolean } = {}): Promise<T> {
   const h = openProcess(w);
   try {
-    if (options.recover !== false) h.recovery.recover();
+    if (options.recover !== false) recoverOrRefuse(h, options.allowIncompleteRecovery === true);
     return await body(h);
   } finally {
     options.after?.();
@@ -54,6 +59,21 @@ export async function withProcess<T>(w: World, body: (h: RuntimeHarness) => Prom
       // A process that "died" closed its own handle already.
     }
   }
+}
+
+/** Thrown by the test processes when startup recovery left a pending-blob obligation unresolved: the store is not ready for new work. */
+export class RecoveredIncompleteError extends Error {
+  constructor(readonly report: RecoveryReport) {
+    super(`recovery left ${report.blobs.failureCount} pending-blob obligation(s) unresolved: ${report.blobs.failures.map((f) => f.kind).join(", ")}`);
+    this.name = "RecoveredIncompleteError";
+  }
+}
+
+/** The startup boundary of the test processes: recovery, then either work or a typed refusal. */
+export function recoverOrRefuse(h: RuntimeHarness, allowIncomplete = false): RecoveryReport {
+  const report = h.recovery.recover();
+  if (!report.blobs.complete && !allowIncomplete) throw new RecoveredIncompleteError(report);
+  return report;
 }
 
 /** A second connection to the same database, as another process would hold; it never waits for the write lock. */

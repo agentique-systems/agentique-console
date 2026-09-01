@@ -13,6 +13,10 @@ import { Transactor } from "./transactions.ts";
  */
 export type PersistenceDiagnostic =
   | { kind: "blob_cleanup_failed"; digest: string; message: string }
+  /** A committed Artifact's pending marker could not be removed; the next recovery resolves it (digest and closed kind only). */
+  | { kind: "blob_marker_cleanup_failed"; digest: string; message: string }
+  /** One obligation of the pending-blob reconciliation stayed unresolved (closed reconciliation kind, digest where one exists, closed failure kind). */
+  | { kind: "blob_reconciliation_failed"; failure: string; digest: string | null; message: string }
   | { kind: "rollback_hook_failed"; index: number; message: string }
   | { kind: "commit_hook_failed"; index: number; message: string };
 
@@ -45,7 +49,11 @@ export interface PersistenceContextOptions {
 const defaultDiagnostics: DiagnosticSink = (diagnostic) => {
   switch (diagnostic.kind) {
     case "blob_cleanup_failed":
+    case "blob_marker_cleanup_failed":
       console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.message} (digest ${diagnostic.digest})`);
+      return;
+    case "blob_reconciliation_failed":
+      console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.failure}: ${diagnostic.message}${diagnostic.digest === null ? "" : ` (digest ${diagnostic.digest})`}`);
       return;
     case "rollback_hook_failed":
     case "commit_hook_failed":
