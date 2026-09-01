@@ -1811,8 +1811,14 @@ runtime-tool executor (`server/src/execution/runtime-tools.ts`) performs
 each mutating call in its own short root transaction, outside provider
 execution and never nested: it re-checks that the caller's Attempt and
 Invocation are `running`, replays an identical call already committed
-by the same **logical turn** (the Invocation plus its approval
-predecessors) by digest, otherwise runs the handler and appends one
+by the same **logical turn** — the Invocation plus its approval
+predecessors: each link revalidated from rows as the successor a runner
+prepared for a predecessor `blocked` on a resolved
+`side_effect_approval` whose subject names it (the same Run, node, role,
+and position; the same purpose, or the root's `decision_resolution` for
+an ordinary Orchestrator turn while a `gate_result` turn continues as
+itself; the resolution carried in the successor's immutable manifest) —
+by digest, otherwise runs the handler and appends one
 `runtime_tool_calls` row — id (`rtc_`), Run, Plan Node, Invocation, the
 first committing Attempt, tool, digest, the safe result, and the commit
 time — with one `runtime_tool_call.committed` Event. The row set is

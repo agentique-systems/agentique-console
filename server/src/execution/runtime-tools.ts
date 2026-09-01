@@ -38,6 +38,8 @@ import {
   effectiveRuntimeTools,
   INVOCATION_MACHINE,
   isRuntimeToolReadTool,
+  NotFoundError,
+  patternPositionKey,
   runtimeToolCallMaxBytes,
   runtimeToolCallRequestSchema,
   type AttemptId,
@@ -81,25 +83,69 @@ export interface RuntimeToolBinding {
 
 /**
  * The Invocations of one logical turn: the Invocation and every approval
- * predecessor it continues from (a predecessor at the same position that
- * ended `blocked` on a `side_effect_approval`). An accepted call of any of
- * them belongs to the turn, so an approval successor never duplicates its
- * predecessor's accepted proposal and a repeated call replays across the
- * boundary. A predecessor blocked on a Decision it requested itself ended
- * its own logical turn (execution-model §8.2): the successor is a new turn
- * and replays nothing of it.
+ * predecessor it continues from (`continuesApprovalTurn`). An accepted call
+ * of any of them belongs to the turn, so an approval successor never
+ * duplicates its predecessor's accepted proposal, request, or Artifact, a
+ * repeated call replays across the boundary, and the turn's write quotas
+ * count every link. A predecessor blocked on a Decision it requested itself
+ * ended its own logical turn (execution-model §8.2): the successor is a new
+ * turn and replays nothing of it. This is replay identity only — never
+ * Artifact-content authorization (`RuntimeReadService`).
  */
 export function logicalTurnInvocationIds(stores: Stores, invocation: Invocation): InvocationId[] {
   const ids: InvocationId[] = [invocation.id];
   let current = invocation;
   while (current.continuedFromInvocationId !== null) {
     const previous = stores.invocations.get(current.continuedFromInvocationId);
-    if (previous.status !== "blocked" || previous.planNodeId !== current.planNodeId || previous.purpose !== current.purpose) break;
-    if (previous.blockedByDecisionId === null || stores.decisions.get(previous.blockedByDecisionId).kind !== "side_effect_approval") break;
+    if (!continuesApprovalTurn(stores, previous, current)) break;
     ids.push(previous.id);
     current = previous;
   }
   return ids;
+}
+
+/**
+ * Whether `current` is the approval continuation of `previous` — the
+ * successor a Pattern runner or the root support prepared once the
+ * `side_effect_approval` Decision that blocked `previous` was resolved —
+ * revalidated from persisted facts alone (execution-model §6.4): the
+ * direct continuation link; the same Run, Plan Node, and role; the same
+ * Pattern position (a Gate Evaluator has none and never continues); the
+ * canonical purpose transition (the same purpose, or — for the root
+ * Orchestrator's ordinary turns — `decision_resolution`, exactly as
+ * `RootNodeSupport.successorInputs` continues them; a `gate_result` turn
+ * continues as itself); the predecessor `blocked` on a resolved
+ * `side_effect_approval` whose subject names that predecessor, its Run and
+ * node, and one of its Attempts; and the successor's immutable manifest
+ * carrying the resolution of exactly that Decision for exactly that
+ * predecessor. A completed, failed, or cancelled predecessor, one blocked on
+ * an agent-requested Decision, or a link the manifest does not corroborate
+ * continues nothing.
+ */
+export function continuesApprovalTurn(stores: Stores, previous: Invocation, current: Invocation): boolean {
+  if (current.continuedFromInvocationId !== previous.id) return false;
+  if (previous.status !== "blocked" || previous.blockedByDecisionId === null) return false;
+  if (previous.runId !== current.runId || previous.planNodeId !== current.planNodeId || previous.role !== current.role) return false;
+  if (previous.patternPosition === null || current.patternPosition === null || patternPositionKey(previous.patternPosition) !== patternPositionKey(current.patternPosition)) return false;
+  if (!approvalContinuationPurpose(previous.role, previous.purpose, current.purpose)) return false;
+  const decision = stores.decisions.get(previous.blockedByDecisionId);
+  if (decision.kind !== "side_effect_approval" || decision.status !== "resolved" || decision.subject === null || decision.subject.kind !== "side_effect_approval") return false;
+  const subject = decision.subject;
+  if (subject.runId !== previous.runId || subject.planNodeId !== previous.planNodeId || subject.invocationId !== previous.id) return false;
+  try {
+    if (stores.invocations.getAttempt(subject.attemptId).invocationId !== previous.id) return false;
+  } catch (error) {
+    if (error instanceof NotFoundError) return false;
+    throw error;
+  }
+  return stores.invocations.getManifest(current.id).content.inputs.some((input) => input.kind === "side_effect_approval_resolution" && input.decisionId === decision.id && input.blockedInvocationId === previous.id);
+}
+
+/** The purpose an approval continuation may carry: its predecessor's, or the root's `decision_resolution` for an ordinary Orchestrator turn. */
+function approvalContinuationPurpose(role: InvocationRole, from: InvocationPurpose, to: InvocationPurpose): boolean {
+  if (from === "final_synthesis") return false;
+  if (from === to) return true;
+  return role === "orchestrator" && to === "decision_resolution" && from !== "gate_result";
 }
 
 export class RuntimeToolExecutor implements RuntimeToolCallPort {
