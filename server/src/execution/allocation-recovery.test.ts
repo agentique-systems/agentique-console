@@ -227,7 +227,8 @@ describe("allocation extension recovery", () => {
       });
       const accepted = await portFor(a, prepared.invocation, prepared.attempt).call(batch);
       expect(accepted.kind).toBe("accepted");
-      expect(await racing!).toMatchObject({ kind: "failed", message: expect.stringMatching(/SQLITE_BUSY|database is locked/) });
+      // The loser reports the closed failure kind of the lock contention, never the thrown text.
+      expect(await racing!).toMatchObject({ kind: "failed", message: expect.stringMatching(/ failed: sqlite:(busy|locked)$/) });
       vi.restoreAllMocks();
       // The node held exactly its decompose turn, so the batch needed the whole Worker sum — one aggregate extension.
       expect(a.stores.allocationExtensions.listByPlanNode(node.id)).toMatchObject([{ trigger: "task_batch", added: { costUsd: 6, tokens: 60_000, attempts: 6 } }]);
