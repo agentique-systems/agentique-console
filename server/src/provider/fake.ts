@@ -112,7 +112,7 @@ export interface ScriptedProviderOptions {
 
 function causeOf(signal: AbortSignal): InterruptionCause {
   const reason = signal.reason as unknown;
-  return reason === "cancelled" || reason === "deadline" ? reason : "provider";
+  return reason === "cancelled" || reason === "operator_pause" || reason === "deadline" ? reason : "provider";
 }
 
 export class ScriptedProvider implements ProviderAdapter {
@@ -238,6 +238,9 @@ export class ScriptedProvider implements ProviderAdapter {
             return { ...this.#base(step, request), completion: { kind: "tool_failure", tool: authorization.tool ?? "unknown", message: authorization.message }, result: null };
           case "failed":
             return { ...this.#base(step, request), completion: { kind: "tool_failure", tool: authorization.tool, message: `authorization failed: ${authorization.message}` }, result: null };
+          case "interrupted":
+            // The Run no longer admits execution: like every conforming adapter, the fake stops at the boundary with the same cause.
+            return { ...this.#base(step, request), completion: { kind: "interrupted", cause: authorization.cause, message: `aborted: ${authorization.cause}` }, result: null };
         }
       }
       return this.#run({ ...step.then, usage: step.then.usage ?? step.usage, transcript: step.then.transcript ?? step.transcript, continuation: step.then.continuation ?? step.continuation }, request, recorded);

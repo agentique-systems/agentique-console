@@ -27,7 +27,7 @@ export type { RootAdvice, RootOutcome } from "./root.ts";
 export { RoutePatternRunner } from "./route.ts";
 export { SinglePatternRunner } from "./single.ts";
 export { PatternNodeSupport, SequentialStepEngine, activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf } from "./support.ts";
-export type { IntegrationStep, NodeAdvice, PatternRunnerDependencies, PatternRunnerOutcome, PreparationRequest, WaitContext } from "./support.ts";
+export type { IntegrationStep, NodeAdvice, NotAdmittedOutcome, PatternRunnerDependencies, PatternRunnerOutcome, PreparationRequest, WaitContext } from "./support.ts";
 
 /** What every Pattern runner exposes to the scheduler. */
 export interface PatternRunner {

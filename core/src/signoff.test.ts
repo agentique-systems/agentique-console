@@ -44,6 +44,7 @@ const run = (overrides: Partial<Run> = {}): Run => ({
   kind: "code",
   status: "awaiting_signoff",
   waitReason: null,
+  operatorPause: null,
   target: { kind: "branch", branch: "main" },
   budget: { maxCostUsd: 10, maxTokens: 1000, maxAttempts: 10, maxWallClockMs: null, maxConcurrency: null },
   finalReserve: { costUsd: 1, tokens: 100, attempts: 1 },
@@ -84,7 +85,7 @@ const gate = (overrides: Partial<Gate> = {}): Gate => ({
 describe("Signoff Resolution", () => {
   it("has exactly the signoff Decision's two outcomes and a closed refusal set", () => {
     expect(SIGNOFF_RESOLUTION_OUTCOMES).toEqual(["accept", "request_changes"]);
-    expect(SIGNOFF_REFUSAL_CODES).toEqual(["run_not_awaiting_signoff", "gate_mismatch", "decision_mismatch", "boundary_inconsistent", "conflicting_resolution", "active_state", "workspace_drifted", "finalization_failed", "operator_message_invalid", "ordinary_capacity_insufficient"]);
+    expect(SIGNOFF_REFUSAL_CODES).toEqual(["run_not_awaiting_signoff", "run_paused", "gate_mismatch", "decision_mismatch", "boundary_inconsistent", "conflicting_resolution", "active_state", "workspace_drifted", "finalization_failed", "operator_message_invalid", "ordinary_capacity_insufficient"]);
     const error = new SignoffRefusedError("workspace_drifted", "drifted", { gateId: "gate_x" });
     expect(error).toMatchObject({ code: "conflict", refusal: "workspace_drifted", details: { refusal: "workspace_drifted", gateId: "gate_x" } });
   });

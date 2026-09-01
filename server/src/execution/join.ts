@@ -19,7 +19,7 @@
  * transaction as the terminal transition, a repeated pass or a restart
  * never creates a second index or a second Handoff.
  */
-import { canonicalJoinIndex, indexArtifactTitle, InvariantViolationError, JOIN_INDEX_MEDIA_TYPE, PLAN_NODE_MACHINE, type JoinIndex, type JoinIndexEntry, type JoinPlanNode, type PlanNodeId } from "@agentique-console/core";
+import { canonicalJoinIndex, indexArtifactTitle, InvariantViolationError, JOIN_INDEX_MEDIA_TYPE, PLAN_NODE_MACHINE, runAdmitsNewWork, type JoinIndex, type JoinIndexEntry, type JoinPlanNode, type OperatorPauseMode, type PlanNodeId, type RunStatus } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
@@ -28,6 +28,8 @@ import { currentReadinessInput } from "./readiness-facts.ts";
 import { decideReadiness, predecessorEdges } from "./readiness.ts";
 
 export type JoinOutcome =
+  /** The Run admits no new work (ended, or paused by the operator); nothing was written (execution-model §14). */
+  | { kind: "not_admitted"; status: RunStatus; operatorPause: OperatorPauseMode | null }
   | { kind: "succeeded"; outputArtifactIds: string[]; handoffIds: string[] }
   | { kind: "failed"; reason: "join_fan_in_failed"; indexArtifactId: string }
   | { kind: "skipped" }
@@ -49,6 +51,8 @@ export class JoinNodeSettler {
     return this.ctx.tx.write((): JoinOutcome => {
       const node = this.stores.plans.getNode(nodeId);
       if (node.kind !== "join") throw new InvariantViolationError(`PlanNode ${nodeId} is a ${node.kind} node, not a join`);
+      const run = this.stores.runs.get(node.runId);
+      if (!runAdmitsNewWork(run)) return { kind: "not_admitted", status: run.status, operatorPause: run.operatorPause };
       const current = this.stores.plans.latestRevisionNumber(node.runId);
       if (current !== expectedRevisionNumber) return { kind: "stale", expectedRevisionNumber, currentRevisionNumber: current };
       if (PLAN_NODE_MACHINE.isTerminal(node.status)) return { kind: "no_change" };

@@ -21,10 +21,16 @@
  * the database and blob store; the caller admits new work only when the
  * blob reconciliation is `complete`.
  *
+ * Operator control survives the restart (execution-model §14): an Attempt
+ * of a cancelled Run is marked `cancelled` with a refused retry, its
+ * Invocation cancelled, and the Run's remaining work converged in the same
+ * transaction; an Attempt of a paused Run is interrupted like any other and
+ * left retry-eligible, but the pause stays and nothing resumes it.
+ *
  * Recovery is idempotent: a second run finds no non-terminal Attempt, no
  * active lease, and no pending entry, and writes nothing.
  */
-import { invocationDeadlineAt, type AttemptId, type CapacityLeaseId, type InvocationId, type Timestamp } from "@agentique-console/core";
+import { invocationDeadlineAt, type AttemptId, type CapacityLeaseId, type InvocationId, type RetryDecision, type RunId, type Timestamp } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { PendingBlobReconciliation } from "../persistence/stores/artifacts.ts";
 import type { Stores } from "../persistence/stores/index.ts";
@@ -36,6 +42,7 @@ import { blockingRequestOf } from "./decision-requests.ts";
 import type { ResourceGovernor } from "./governor.ts";
 import { settleInvocation } from "./invocation-lifecycle.ts";
 import { decideRetry, type RetryPolicyConfig } from "./retry-policy.ts";
+import { settleCancelledRunWork } from "./run-cancellation.ts";
 import type { WorkspaceCleanup } from "./workspace-cleanup.ts";
 
 export interface RecoveryConfig {
@@ -45,6 +52,8 @@ export interface RecoveryConfig {
 
 export interface RecoveryReport {
   interruptedAttemptIds: AttemptId[];
+  /** Attempts of cancelled Runs the previous process left active: ended `cancelled` with a refused retry, their Runs' work converged. */
+  cancelledAttemptIds: AttemptId[];
   releasedLeaseIds: CapacityLeaseId[];
   failedInvocationIds: InvocationId[];
   /** Invocations that may create another Attempt, with the earliest time and the Attempt a resumed start may continue from. */
@@ -83,7 +92,8 @@ export class RecoveryService {
   private reconcile(options: WriteOptions): Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds" | "blobs"> {
     return this.ctx.tx.write(() => {
       const now = this.ctx.clock();
-      const report: Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds" | "blobs"> = { interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [] };
+      const report: Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds" | "blobs"> = { interruptedAttemptIds: [], cancelledAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [] };
+      const cancelledRuns = new Set<RunId>();
       for (const attempt of this.stores.invocations.activeAttempts()) {
         const invocation = this.stores.invocations.get(attempt.invocationId);
         const manifest = this.stores.invocations.getManifest(invocation.id);
@@ -91,6 +101,20 @@ export class RecoveryService {
         // A blocking Decision the Attempt durably requested ends the logical turn: the Invocation converges to `blocked`, never retried.
         const blocking = blockingRequestOf(this.stores, invocation);
         const blocked = blocking !== null && blocking.result.tool === "request_decision" ? { decisionId: blocking.result.decisionId } : null;
+        if (blocked === null && this.stores.runs.get(invocation.runId).status === "cancelled") {
+          // The Run was cancelled before the process died: the Attempt ends cancelled (no retry), the Invocation with it, and the Run's
+          // work — held back only by this Attempt — converges below, exactly as the executor's finalization would have.
+          const refused: RetryDecision = { permitted: false, reason: "cancelled", notBefore: null };
+          const cancelled = this.stores.invocations.transitionAttempt(attempt.id, { to: "cancelled", transcriptArtifactId: null, failureDetail: { message: "cancelled by the runtime after a restart", violations: [], tool: null, cancelled: true }, retryDecision: refused }, options);
+          report.cancelledAttemptIds.push(cancelled.id);
+          if (cancelled.capacityLeaseId !== null) {
+            const lease = this.stores.leases.get(cancelled.capacityLeaseId);
+            if (lease.status === "active") report.releasedLeaseIds.push(this.governor.release(lease.id, options).id);
+          }
+          settleInvocation(this.stores, { invocation, attempt: cancelled, decision: refused, result: null, blocked: null, meta: options });
+          cancelledRuns.add(invocation.runId);
+          continue;
+        }
         const detail = { message: blocked === null ? "interrupted by a runtime restart" : `interrupted by a runtime restart after requesting Decision ${blocked.decisionId}`, violations: [], tool: null, cancelled: false };
         // The same Invocation-wide deadline the previous process enforced, derived from persisted facts alone.
         const decision = decideRetry({
@@ -118,6 +142,7 @@ export class RecoveryService {
         const candidate = continuationCandidate(this.stores, this.continuations, this.provider, this.config.continuation, invocation, manifest, now);
         report.retryEligible.push({ invocationId: invocation.id, notBefore: settlement.decision.notBefore, resumeCandidateAttemptId: candidate?.attemptId ?? null });
       }
+      for (const runId of [...cancelledRuns].sort()) settleCancelledRunWork(this.stores, runId, options);
       // Every lease still active belonged to the previous process; the governor forgets provider availability too.
       report.releasedLeaseIds.push(...this.governor.restoreAfterRestart(options).releasedLeaseIds);
       return report;

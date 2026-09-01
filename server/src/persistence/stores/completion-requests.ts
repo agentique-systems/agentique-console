@@ -14,9 +14,10 @@ import {
   type InvocationId,
   type RunId,
   type RuntimeToolCallId,
+  runIsRunningOrDraining,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, completionRequests, gates, invocations, runtimeToolCalls } from "../schema.ts";
+import { artifacts, completionRequests, gates, invocations, runs, runtimeToolCalls } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
 type Row = typeof completionRequests.$inferSelect;
@@ -47,7 +48,9 @@ export class CompletionRequestStore {
     const valid = parseOrThrow(completionRequestInputSchema, input, "CompletionRequest input");
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, valid.runId);
-      if (run.status !== "running") throw new ConflictError(`Run ${run.id} is ${run.status}; completion is requested from a running Run`, { runId: run.id, status: run.status });
+      const pause = requireRow(this.ctx.db.select({ operatorPause: runs.operatorPause }).from(runs).where(eq(runs.id, run.id)).get(), "Run", run.id).operatorPause;
+      // A running Run, or one draining its admitted turn under a soft operator pause (execution-model §14).
+      if (!runIsRunningOrDraining({ status: run.status, operatorPause: pause as never })) throw new ConflictError(`Run ${run.id} is ${run.status}${pause === null ? "" : ` and paused (${pause})`}; completion is requested from a running Run`, { runId: run.id, status: run.status });
       const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId, role: invocations.role, purpose: invocations.purpose, status: invocations.status }).from(invocations).where(eq(invocations.id, valid.invocationId)).get(), "Invocation", valid.invocationId);
       assertSameRun("Invocation", valid.invocationId, invocation.runId, run.id);
       if (invocation.role !== "orchestrator" || invocation.purpose === "final_synthesis") throw new InvariantViolationError(`Invocation ${valid.invocationId} (${invocation.role}/${invocation.purpose}) cannot request completion`, { invocationId: valid.invocationId });

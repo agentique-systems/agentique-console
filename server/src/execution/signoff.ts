@@ -62,6 +62,7 @@ import {
   type Gate,
   type GateId,
   type InvocationId,
+  type OperatorPauseMode,
   type PlanNodeId,
   type PlanNodeStatus,
   type RequirementId,
@@ -99,6 +100,8 @@ export interface SignoffArtifactFacts {
 
 /** Why the open boundary cannot be resolved right now: unexpected active state, from rows alone (ids and closed facts). */
 export type SignoffBlocker =
+  /** The operator paused the Run: signoff is resolved only once it is resumed (execution-model §14). */
+  | { kind: "run_paused"; mode: OperatorPauseMode }
   | { kind: "invocation_active"; invocationId: InvocationId }
   | { kind: "attempt_active"; attemptId: string }
   | { kind: "lease_active"; leaseId: string }
@@ -307,6 +310,7 @@ export class RunSignoffService {
   private blockersOf(boundary: SignoffBoundary): SignoffBlocker[] {
     const { run, gate, decision, completionGate } = boundary;
     const blockers: SignoffBlocker[] = [];
+    if (run.operatorPause !== null) blockers.push({ kind: "run_paused", mode: run.operatorPause });
     for (const invocation of this.stores.invocations.listActive(run.id)) blockers.push({ kind: "invocation_active", invocationId: invocation.id });
     for (const attempt of this.stores.invocations.activeAttempts()) if (attempt.runId === run.id) blockers.push({ kind: "attempt_active", attemptId: attempt.id });
     for (const lease of this.stores.leases.listByRun(run.id)) if (lease.status === "active") blockers.push({ kind: "lease_active", leaseId: lease.id });
@@ -349,6 +353,7 @@ export class RunSignoffService {
 
   private assertOpenAndQuiescent(boundary: SignoffBoundary): void {
     if (boundary.run.status !== "awaiting_signoff") throw new SignoffRefusedError("run_not_awaiting_signoff", `Run ${boundary.run.id} is ${boundary.run.status}`, { runId: boundary.run.id, status: boundary.run.status });
+    if (boundary.run.operatorPause !== null) throw new SignoffRefusedError("run_paused", `Run ${boundary.run.id} is paused by the operator (${boundary.run.operatorPause}); resume it before resolving its signoff`, { runId: boundary.run.id, operatorPause: boundary.run.operatorPause });
     if (boundary.run.baseSnapshotId === null) throw new SignoffRefusedError("boundary_inconsistent", `Run ${boundary.run.id} has no base Snapshot`, { runId: boundary.run.id });
     const blockers = this.blockersOf(boundary);
     if (blockers.length > 0) throw new SignoffRefusedError("active_state", `Run ${boundary.run.id} holds unexpected active state: ${blockers.map((b) => b.kind).join(", ")}`, { runId: boundary.run.id, blockers });

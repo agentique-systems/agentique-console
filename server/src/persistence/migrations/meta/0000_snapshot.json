@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "04756fac-21a3-414b-ad7c-c1661ca53da5",
+  "id": "be3920ad-a7cb-428d-b4db-197445936cb2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -5809,6 +5809,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "operator_pause": {
+          "name": "operator_pause",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "target": {
           "name": "target",
           "type": "text",
@@ -6058,6 +6065,18 @@
         "runs_waiting_has_reason": {
           "name": "runs_waiting_has_reason",
           "value": "(\"runs\".\"status\" = 'waiting') = (\"runs\".\"wait_reason\" IS NOT NULL)"
+        },
+        "runs_operator_pause": {
+          "name": "runs_operator_pause",
+          "value": "\"runs\".\"operator_pause\" IS NULL OR \"runs\".\"operator_pause\" IN ('soft', 'hard')"
+        },
+        "runs_operator_pause_status": {
+          "name": "runs_operator_pause_status",
+          "value": "\"runs\".\"operator_pause\" IS NULL OR \"runs\".\"status\" IN ('waiting', 'verifying', 'awaiting_signoff')"
+        },
+        "runs_operator_wait_is_pause": {
+          "name": "runs_operator_wait_is_pause",
+          "value": "(\"runs\".\"wait_reason\" IS 'operator') = (\"runs\".\"status\" = 'waiting' AND \"runs\".\"operator_pause\" IS NOT NULL)"
         },
         "runs_failed_has_failure": {
           "name": "runs_failed_has_failure",

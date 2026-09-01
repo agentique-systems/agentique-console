@@ -186,6 +186,7 @@ export class RoutePatternRunner {
     const branch = this.state(node).branch;
     if (branch !== null && branch.status === "succeeded" && branch.result?.status === "completed") {
       const step = await this.support.integrate(branch, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind === "conflict") return this.support.markWaiting(nodeId, expectedRevisionNumber, "integration_conflict", options);
       if (step.kind === "conflict_unresolved") return this.support.fail(nodeId, expectedRevisionNumber, "integration_conflict", options);
     }
@@ -206,9 +207,10 @@ export class RoutePatternRunner {
     const branch = this.state(node).branch;
     if (branch !== null && branch.status === "succeeded" && branch.result?.status === "completed") {
       const step = await this.support.integrate(branch, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind !== "integrated") return { kind: "no_change" };
     }
-    return ctx.tx.write((): PatternRunnerOutcome => this.apply(this.support.node(nodeId), options, false));
+    return ctx.tx.write((): PatternRunnerOutcome => this.support.admission(node.runId) ?? this.apply(this.support.node(nodeId), options, false));
   }
 
   /** Inside a transaction: the consequence of the node's current canonical state. */

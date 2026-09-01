@@ -82,7 +82,7 @@ describe("event journal", () => {
       expect(() =>
         h.ctx.tx.write(() => {
           h.stores.conversations.postMessage({ conversationId: s.conversation.id, author: "operator", content: "hi", runId: s.run.id, invocationId: null });
-          h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "operator" });
+          h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "budget" });
           throw new Error("boom");
         }),
       ).toThrow("boom");

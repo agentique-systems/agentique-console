@@ -81,6 +81,8 @@ import {
   RUN_KINDS,
   RUN_STATUSES,
   RUN_WAIT_REASONS,
+  OPERATOR_PAUSE_MODES,
+  OPERATOR_PAUSE_HELD_STATUSES,
   SIGNOFF_RESOLUTION_OUTCOMES,
   SNAPSHOT_REASONS,
   TASK_FAILURE_REASONS,
@@ -216,6 +218,8 @@ export const runs = sqliteTable(
     kind: text("kind").notNull(),
     status: text("status").notNull(),
     waitReason: text("wait_reason"),
+    /** The operator's durable pause (core `OperatorPauseMode`), held only by a waiting, verifying, or awaiting_signoff Run; a waiting Run is paused exactly when its wait reason is `operator` (execution-model §14). */
+    operatorPause: text("operator_pause"),
     target: text("target", { mode: "json" }).$type<RunTarget>().notNull(),
     maxCostUsd: real("max_cost_usd").notNull(),
     maxTokens: integer("max_tokens").notNull(),
@@ -245,6 +249,10 @@ export const runs = sqliteTable(
     check("runs_status", sql`${t.status} IN (${inList(RUN_STATUSES)})`),
     check("runs_wait_reason", sql`${t.waitReason} IS NULL OR ${t.waitReason} IN (${inList(RUN_WAIT_REASONS)})`),
     check("runs_waiting_has_reason", sql`(${t.status} = 'waiting') = (${t.waitReason} IS NOT NULL)`),
+    check("runs_operator_pause", sql`${t.operatorPause} IS NULL OR ${t.operatorPause} IN (${inList(OPERATOR_PAUSE_MODES)})`),
+    // An operator pause is held only where admitted or admissible work can be withheld; a Run waits on `operator` exactly when it is paused.
+    check("runs_operator_pause_status", sql`${t.operatorPause} IS NULL OR ${t.status} IN (${inList(OPERATOR_PAUSE_HELD_STATUSES)})`),
+    check("runs_operator_wait_is_pause", sql`(${t.waitReason} IS 'operator') = (${t.status} = 'waiting' AND ${t.operatorPause} IS NOT NULL)`),
     check("runs_failed_has_failure", sql`(${t.status} = 'failed') = (${t.failure} IS NOT NULL)`),
     check(
       "runs_terminal_has_ended_at",

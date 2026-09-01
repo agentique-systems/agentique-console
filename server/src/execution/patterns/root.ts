@@ -37,6 +37,7 @@ import {
   PLAN_NODE_MACHINE,
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
+  runAdmitsNewWork,
   type Allocation,
   type Decision,
   type DecisionId,
@@ -58,7 +59,7 @@ import {
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import type { RunCompletionEngine } from "../completion.ts";
 import { NodeExitGates } from "../gates.ts";
-import { blockingDecisionOf, outstandingChangesetOf, PatternNodeSupport, type PatternRunnerDependencies } from "./support.ts";
+import { blockingDecisionOf, outstandingChangesetOf, PatternNodeSupport, type NotAdmittedOutcome, type PatternRunnerDependencies } from "./support.ts";
 
 export type RootAdvice =
   /** No turn exists, or the latest turn is fully settled. */
@@ -77,6 +78,7 @@ export type RootAdvice =
   | { kind: "run_terminal" };
 
 export type RootOutcome =
+  | NotAdmittedOutcome
   | { kind: "integrated"; changesetId: string }
   | { kind: "run_failed" }
   | { kind: "successor_prepared"; invocationId: InvocationId; decisionId: DecisionId }
@@ -116,6 +118,12 @@ export class RootNodeSupport {
   /** The latest Orchestrator turn from the persisted `orchestrator` position. */
   latestTurn(runId: RunId): Invocation | null {
     return this.deps.stores.invocations.latestAtPosition(this.rootOf(runId).id, "orchestrator");
+  }
+
+  /** `null` while the Run admits new work (execution-model §14); the typed `not_admitted` outcome for an ended or operator-paused Run. */
+  private admission(runId: RunId): NotAdmittedOutcome | null {
+    const run = this.deps.stores.runs.get(runId);
+    return runAdmitsNewWork(run) ? null : { kind: "not_admitted", status: run.status, operatorPause: run.operatorPause };
   }
 
   inspect(runId: RunId, now: Timestamp = this.deps.ctx.clock()): RootAdvice {
@@ -233,6 +241,8 @@ export class RootNodeSupport {
   async settle(runId: RunId, options: WriteOptions = {}): Promise<RootOutcome> {
     const { ctx, stores, integration, preparation } = this.deps;
     if (ctx.tx.inTransaction) throw new Error("the root settles outside any transaction; integration is external");
+    const admission = this.admission(runId);
+    if (admission) return admission;
     const latest = this.latestTurn(runId);
     if (latest === null || !INVOCATION_MACHINE.isTerminal(latest.status)) return { kind: "no_change" };
     if (latest.status === "succeeded") {
@@ -246,10 +256,11 @@ export class RootNodeSupport {
       if (latest.purpose !== "gate_result") return { kind: "no_change" };
     }
     return ctx.tx.write((): RootOutcome => {
+      const readmission = this.admission(runId);
+      if (readmission) return readmission;
       const root = this.rootOf(runId);
       const run = stores.runs.get(runId);
       const turn = stores.invocations.get(latest.id);
-      if (RUN_MACHINE.isTerminal(run.status)) return { kind: "no_change" };
       if (turn.purpose === "gate_result") return this.settleRemediationTurn(run.id, turn, options);
       if (turn.status === "failed") {
         if (root.status === "failed") return { kind: "no_change" };
@@ -390,8 +401,8 @@ export class RootNodeSupport {
   prepareRemediation(runId: RunId, options: WriteOptions = {}): RootOutcome {
     const { ctx, stores, preparation } = this.deps;
     return ctx.tx.write((): RootOutcome => {
-      const run = stores.runs.get(runId);
-      if (RUN_MACHINE.isTerminal(run.status)) return { kind: "no_change" };
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const root = this.rootOf(runId);
       if (root.status !== "running" || PLAN_NODE_MACHINE.isTerminal(root.status)) return { kind: "no_change" };
       const advice = this.inspect(runId);

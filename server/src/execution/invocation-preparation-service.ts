@@ -182,6 +182,8 @@ export class InvocationPreparationService {
     return this.ctx.tx.write(() => {
       const run = this.stores.runs.get(valid.runId);
       if (RUN_MACHINE.isTerminal(run.status)) throw new ConflictError(`Run ${run.id} is ${run.status}; no Invocation can be prepared`);
+      // The operator's pause withholds every new Invocation until the Run is resumed (§14).
+      if (run.operatorPause !== null) throw new ConflictError(`Run ${run.id} is paused by the operator (${run.operatorPause}); no Invocation can be prepared`, { runId: run.id, operatorPause: run.operatorPause });
       // A Run awaiting signoff performs nothing; a verifying Run performs only its completion work, funded from the final reserve (§10).
       if (run.status === "awaiting_signoff") throw new ConflictError(`Run ${run.id} is awaiting signoff; no Invocation can be prepared`);
       if (run.status === "verifying" && valid.funding?.source !== "run_final_reserve") throw new ConflictError(`Run ${run.id} is verifying; only its completion Invocations can be prepared`);

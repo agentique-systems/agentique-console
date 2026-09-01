@@ -37,7 +37,7 @@ describe("Transactor", () => {
         h.ctx.tx.write(() => {
           h.stores.conversations.postMessage({ conversationId: s.conversation.id, author: "operator", content: "first", runId: s.run.id, invocationId: null });
           h.ctx.tx.write(() => {
-            h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "operator" });
+            h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "budget" });
             throw new Error("nested failure");
           });
         }),
@@ -62,7 +62,7 @@ describe("Transactor", () => {
           h.stores.conversations.postMessage({ conversationId: s.conversation.id, author: "operator", content: "before", runId: s.run.id, invocationId: null });
           try {
             h.ctx.tx.write(() => {
-              h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "operator" });
+              h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "budget" });
               throw original;
             });
           } catch {

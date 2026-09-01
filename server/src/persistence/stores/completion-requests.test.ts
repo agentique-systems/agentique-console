@@ -82,7 +82,7 @@ describe("CompletionRequestStore", () => {
       const worker = seedInvocation(h, s, { role: "worker", purpose: "step", planNodeId: seedWorkerNode(h, s).id });
       expect(() => h.stores.completionRequests.create({ runId: s.run.id, invocationId: worker.id, runtimeToolCallId: call.id })).toThrow(/cannot request completion/);
       expect(() => h.stores.completionRequests.create({ runId: s.run.id, invocationId: invocation.id, runtimeToolCallId: call.id })).toThrow(/is succeeded/);
-      h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "operator" });
+      h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "budget" });
       expect(() => seedCompletionRequest(h, s)).toThrow(/is waiting/);
     } finally {
       h.close();

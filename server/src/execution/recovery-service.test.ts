@@ -64,7 +64,7 @@ describe("RecoveryService", () => {
           expect(h.stores.leases.get(crashed.leaseId).status).toBe("active");
           const seq = h.ctx.journal.lastSeq();
           const report = h.recovery.recover();
-          expect(report).toEqual({ interruptedAttemptIds: [crashed.attemptId], releasedLeaseIds: [crashed.leaseId], failedInvocationIds: [], retryEligible: [{ invocationId: crashed.invocationId, notBefore: null, resumeCandidateAttemptId: null }], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
+          expect(report).toEqual({ interruptedAttemptIds: [crashed.attemptId], cancelledAttemptIds: [], releasedLeaseIds: [crashed.leaseId], failedInvocationIds: [], retryEligible: [{ invocationId: crashed.invocationId, notBefore: null, resumeCandidateAttemptId: null }], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
           // A retry-eligible Invocation keeps its worktree: nothing is released.
           expect(h.executionWorkspace.released).toEqual([]);
           const attempt = h.stores.invocations.getAttempt(crashed.attemptId);
@@ -80,7 +80,7 @@ describe("RecoveryService", () => {
           const events = h.ctx.journal.read({ runId: crashed.runId, afterSeq: seq }).map((e) => e.type);
           expect(events).toEqual(["attempt.interrupted", "capacity_lease.released"]);
           // Idempotent: a second recovery changes nothing.
-          expect(h.recovery.recover()).toEqual({ interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
+          expect(h.recovery.recover()).toEqual({ interruptedAttemptIds: [], cancelledAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
           expect(h.ctx.journal.lastSeq()).toBe(seq + 2);
           // The recovered work runs on an explicit call, as a fresh retry that consumes the second Attempt.
           h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
@@ -104,11 +104,11 @@ describe("RecoveryService", () => {
       try {
         const report = e.recovery.recover();
         // The failed Invocation's worktree is released by the same recovery, after its settlement committed.
-        expect(report).toEqual({ interruptedAttemptIds: [exhausted.attemptId], releasedLeaseIds: [exhausted.leaseId], failedInvocationIds: [exhausted.invocationId], retryEligible: [], workspaceReleasedInvocationIds: [exhausted.invocationId], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
+        expect(report).toEqual({ interruptedAttemptIds: [exhausted.attemptId], cancelledAttemptIds: [], releasedLeaseIds: [exhausted.leaseId], failedInvocationIds: [exhausted.invocationId], retryEligible: [], workspaceReleasedInvocationIds: [exhausted.invocationId], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
         expect(e.stores.invocations.getAttempt(exhausted.attemptId).retryDecision).toEqual({ permitted: false, reason: "attempts_exhausted", notBefore: null });
         expect(e.stores.invocations.get(exhausted.invocationId)).toMatchObject({ status: "failed", failureReason: "allocation_exhausted", workspaceCleanup: "released" });
         expect(e.stores.reservations.listByChild({ type: "invocation", id: exhausted.invocationId })[0]).toMatchObject({ status: "released", consumed: { attempts: 2 } });
-        expect(e.recovery.recover()).toEqual({ interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
+        expect(e.recovery.recover()).toEqual({ interruptedAttemptIds: [], cancelledAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
       } finally {
         e.close();
       }
@@ -178,7 +178,7 @@ describe("RecoveryService", () => {
       }
       const second = reopen(crashed);
       try {
-        expect(second.recovery.recover()).toEqual({ interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
+        expect(second.recovery.recover()).toEqual({ interruptedAttemptIds: [], cancelledAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [], workspaceReleasedInvocationIds: [], workspaceReleaseFailedInvocationIds: [], blobs: emptyPendingBlobReconciliation() });
         expect({ attempt: second.stores.invocations.getAttempt(crashed.attemptId), inspection: second.executor.inspectInvocation(crashed.invocationId) }).toEqual(decision);
       } finally {
         second.close();

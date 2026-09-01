@@ -67,6 +67,13 @@ export function classifyAttempt(input: ClassificationInput): ClassifiedAttempt {
     return { status: "timed_out", failureClass: "interrupted", detail: detail("wall-clock limit reached"), result: null };
   }
   const exhausted = !allocationFits(input.consumed, { ...input.allocation, attempts: Number.MAX_SAFE_INTEGER });
+  if (input.runtimeInterruption === "operator_pause") {
+    // A hard operator pause (execution-model §14): the Attempt is consumed and its Usage recorded; whatever the provider then reported —
+    // a late result included — is not a result. The classification is the ordinary `interrupted` one, so the retry policy permits the
+    // resumed Run to retry from the durable rows; an allocation the Attempt exhausted keeps its consequence.
+    if (exhausted) return { status: "failed", failureClass: "allocation_exhausted", detail: detail("interrupted by an operator pause (allocation exhausted)"), result: null };
+    return { status: "interrupted", failureClass: "interrupted", detail: detail("interrupted by an operator pause"), result: null };
+  }
   switch (completion.kind) {
     case "completed":
       if (input.validation.ok) return { status: "succeeded", failureClass: null, detail: null, result: input.validation.result };
@@ -93,6 +100,7 @@ export function classifyAttempt(input: ClassificationInput): ClassifiedAttempt {
     case "interrupted":
       if (completion.cause === "cancelled") return { status: "cancelled", failureClass: null, detail: detail(completion.message, { cancelled: true }), result: null };
       if (completion.cause === "deadline") return { status: "timed_out", failureClass: "interrupted", detail: detail(completion.message), result: null };
+      // An adapter-reported operator_pause without the runtime's own flag is an ordinary interruption: retried unless exhausted.
       if (exhausted) return { status: "failed", failureClass: "allocation_exhausted", detail: detail(`${completion.message} (allocation exhausted)`), result: null };
       return { status: "interrupted", failureClass: "interrupted", detail: detail(completion.message), result: null };
   }

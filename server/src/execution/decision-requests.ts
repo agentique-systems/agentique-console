@@ -43,6 +43,7 @@ import {
   REQUIREMENT_WAIVER_OPTIONS,
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
+  runIsRunningOrDraining,
   runtimeToolHandlerBound,
   waiverSubjectOf,
   type ActivationCondition,
@@ -138,7 +139,8 @@ export class DecisionRequestService {
     if (!runtimeToolHandlerBound("request_decision", invocation.role, invocation.purpose)) return reject("caller_not_permitted", `a ${invocation.role} Invocation with purpose ${invocation.purpose} never requests a Decision`);
     // A Gate Evaluator, a run_completion Evaluator, and the final synthesis are Gate-owned; none of them requests a Decision.
     if (invocation.gateId !== null || invocation.role === "evaluator") return reject("caller_not_permitted", `Invocation ${invocation.id} is Gate-owned; a Gate or Run completion evaluation never requests a Decision`);
-    if (run.status !== "running") return reject("caller_not_permitted", `Run ${run.id} is ${run.status}; a Decision is requested from a running Run`);
+    // A soft-paused Run still accepts the request of a draining turn (execution-model §14); a hard-paused, verifying, or ended one does not.
+    if (!runIsRunningOrDraining(run)) return reject("caller_not_permitted", `Run ${run.id} is ${run.status}${run.operatorPause === null ? "" : ` and paused (${run.operatorPause})`}; a Decision is requested from a running Run`);
     if (node.status !== "running" || invocation.status !== "running") return reject("caller_not_permitted", `PlanNode ${node.id} is ${node.status} and Invocation ${invocation.id} is ${invocation.status}; a Decision is requested from running executable work`);
     if (!isRequestableDecisionKind(input.kind)) return reject("decision_kind_not_permitted", `a ${String((input as { kind: string }).kind)} Decision is never requested by an agent`, "kind");
     const manifest = this.stores.invocations.getManifest(invocation.id);

@@ -14,7 +14,7 @@
  * be claimed twice. This is at-most-once authorization: a crash between
  * the claim and the external call conservatively consumes the approval.
  */
-import { boundedFailureMessage, canonicalToolCall, proposedToolCallSchema, TOOL_CALL_MAX_BYTES, type ApprovedToolCall, type AttemptId, type InvocationId, type PlanNodeId, type ProposedToolCall, type RunId, type ToolPolicy } from "@agentique-console/core";
+import { boundedFailureMessage, canonicalToolCall, proposedToolCallSchema, runExecutionInterruptionOf, TOOL_CALL_MAX_BYTES, type ApprovedToolCall, type AttemptId, type InvocationId, type PlanNodeId, type ProposedToolCall, type RunId, type ToolPolicy } from "@agentique-console/core";
 import { sha256Hex } from "../persistence/blob-store.ts";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
@@ -63,6 +63,9 @@ export class ToolCallAuthorizer implements ToolCallAuthorizationPort {
     const canonical = canonicalizeToolCall(proposed);
     if (canonical.kind === "invalid") return { kind: "invalid", tool: canonical.tool, message: canonical.message };
     const { tool } = canonical.call;
+    // The Run row is read before every call (execution-model §14): a cancelled or hard-paused Run authorizes no further capability execution.
+    const interruption = runExecutionInterruptionOf(this.stores.runs.get(this.binding.runId));
+    if (interruption !== null) return { kind: "interrupted", tool, cause: interruption };
     const disposition = this.binding.toolPolicy[tool] ?? "denied";
     if (disposition === "allowed") return { kind: "allowed", tool };
     if (disposition === "denied") return { kind: "denied", tool };

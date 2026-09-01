@@ -35,7 +35,7 @@ import {
   REQUIREMENT_STATUSES,
   REQUIREMENT_STATUS_ACTORS,
 } from "./requirements.ts";
-import { runFailureSchema, runSchema, RUN_STATUSES, RUN_WAIT_REASONS } from "./runs.ts";
+import { runFailureSchema, runSchema, RUN_STATUSES, RUN_WAIT_REASONS, OPERATOR_PAUSE_MODES } from "./runs.ts";
 import { signoffResolutionSchema } from "./signoff.ts";
 import { taskBlockReasonSchema, taskDependencySchema, taskSchema, TASK_FAILURE_REASONS, TASK_STATUSES } from "./tasks.ts";
 import { runtimeToolCallSchema } from "./runtime-tools.ts";
@@ -111,6 +111,10 @@ export const EVENT_CATALOGUE = {
   "run.completed": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("completed"), finalSnapshotId: idSchema("snapshot"), finalChangesetId: idSchema("changeset") }),
   "run.failed": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("failed"), failure: runFailureSchema }),
   "run.cancelled": transition(RUN_STATUSES),
+  /** The operator paused the Run (execution-model §14): the mode now in force, the Run's status after the pause, the wait reason the pause superseded, and whether a soft pause was escalated. */
+  "run.paused": z.strictObject({ runId: idSchema("run"), mode: z.enum(OPERATOR_PAUSE_MODES), status: z.enum(RUN_STATUSES), previousWaitReason: z.enum(RUN_WAIT_REASONS).nullable(), escalated: z.boolean() }),
+  /** The operator resumed the Run: the mode that was cleared and the Run's status after the resume; readiness is recomputed by the next pass, never restored. */
+  "run.resumed": z.strictObject({ runId: idSchema("run"), mode: z.enum(OPERATOR_PAUSE_MODES), status: z.enum(RUN_STATUSES) }),
   /** A Changeset was integrated into the Run's Integration Workspace and the Run's integration Snapshot advanced. */
   "run.integrated": z.strictObject({ runId: idSchema("run"), changesetId: idSchema("changeset"), integrationSnapshotId: idSchema("snapshot") }),
   /** The Run-scoped terminal Publication facts: the Publication row (ids, status, strategies, Snapshot references, closed failure), never diff bytes, receipts, paths, or output. */

@@ -62,7 +62,9 @@ export type ToolCallAuthorization =
   /** The call is malformed or exceeds the canonical bound; nothing is recorded and the call never executes. */
   | { kind: "invalid"; tool: string | null; message: string }
   /** The claim could not be recorded (a persistence failure); nothing persisted, nothing authorized; a retry may claim again. */
-  | { kind: "failed"; tool: string; message: string };
+  | { kind: "failed"; tool: string; message: string }
+  /** The Run no longer admits execution (cancelled, or hard-paused by the operator): the call never executes and the adapter ends with the `interrupted` completion of the same cause (execution-model §14). */
+  | { kind: "interrupted"; tool: string; cause: Exclude<InterruptionCause, "provider"> };
 
 /**
  * The runtime-owned authorization boundary the adapter consults before
@@ -120,14 +122,20 @@ export interface AttemptExecutionRequest {
   workingDirectory: string | null;
   /** The wall-clock deadline the runtime enforces; the adapter may also stop itself at it. */
   deadlineAt: Timestamp | null;
-  /** Aborted by the runtime on cancellation or deadline; the reason is an `InterruptionCause`. */
+  /** Aborted by the runtime on cancellation, a hard operator pause, or the deadline; the reason is an `InterruptionCause`. */
   signal: AbortSignal;
   /** A verified opaque continuation payload for a `resumed` start, or `null` for a `fresh` start. */
   continuation: Uint8Array | null;
   output: TransientOutputSink;
 }
 
-export const INTERRUPTION_CAUSES = ["cancelled", "deadline", "provider"] as const;
+/**
+ * Why an execution was interrupted: `cancelled` (the Run was cancelled; no
+ * retry), `operator_pause` (the operator hard-paused the Run; the Attempt is
+ * retried once the Run resumes), `deadline` (the Invocation-wide wall-clock
+ * limit), or `provider` (the provider ended the stream itself).
+ */
+export const INTERRUPTION_CAUSES = ["cancelled", "operator_pause", "deadline", "provider"] as const;
 export type InterruptionCause = (typeof INTERRUPTION_CAUSES)[number];
 
 /** How the provider execution ended, as the runtime's classification input (execution-model §7.2). */

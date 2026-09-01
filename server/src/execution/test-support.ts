@@ -47,6 +47,7 @@ import { createPatternRunners, type PatternRunners } from "./patterns/index.ts";
 import { RunScheduler, type SchedulerConfig } from "./scheduler.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
 import { RecoveryService } from "./recovery-service.ts";
+import { RunControlService } from "./run-control.ts";
 import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest, type RunVerificationRequest } from "./run-creation-service.ts";
 import { RunStartService } from "./run-start-service.ts";
 import { WorkspaceCleanup, type ExecutionDiagnostic } from "./workspace-cleanup.ts";
@@ -584,6 +585,8 @@ export interface RuntimeHarness extends Harness {
   preparation: InvocationPreparationService;
   executor: AttemptExecutor;
   recovery: RecoveryService;
+  /** The operator Run-control boundary (execution-model §14): `cancel`, `pause`, `resume`. */
+  runControl: RunControlService;
   runStart: RunStartService;
   cleanup: WorkspaceCleanup;
   /** Every transient output chunk the executor forwarded. */
@@ -669,6 +672,7 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     preparation,
     executor,
     recovery: new RecoveryService(h.ctx, h.stores, governor, continuations, provider, cleanup, executorConfig),
+    runControl: new RunControlService({ ctx: h.ctx, stores: h.stores, executor }),
     runStart: new RunStartService(h.ctx, h.stores, preparation),
     cleanup,
     transient,

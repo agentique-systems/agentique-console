@@ -48,6 +48,7 @@ import {
   InvariantViolationError,
   operationAt,
   ROOT_SOURCE_PATH,
+  runAdmitsNewWork,
   SIGNOFF_OPTIONS,
   TASK_MACHINE,
   type AcceptanceCriterion,
@@ -78,7 +79,7 @@ import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { AcceptanceCriterionExecutionFailure } from "./ports/acceptance-criterion-execution.ts";
 import { CompletionFacts, type CompletionCriteria } from "./completion-requests.ts";
 import { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf } from "./invocation-facts.ts";
-import type { PatternRunnerDependencies } from "./patterns/support.ts";
+import type { NotAdmittedOutcome, PatternRunnerDependencies } from "./patterns/support.ts";
 import { deriveRequirementStatuses, type DerivedStatusChange } from "./requirement-derivation.ts";
 
 /** Where a Run's completion stands, from rows alone. */
@@ -125,6 +126,7 @@ export type CompletionAdvice =
 type CompletionGateFailure = Exclude<GateFailure, { kind: "changes_requested" }>;
 
 export type CompletionOutcome =
+  | NotAdmittedOutcome
   | { kind: "completion_begun"; completionRequestId: CompletionRequest["id"]; gateId: Gate["id"]; ordinal: number; snapshotId: string }
   | { kind: "completion_cancelled"; completionRequestId: CompletionRequest["id"]; outcome: CompletionRequestOutcome }
   | { kind: "completion_verified"; gateId: Gate["id"]; verdict: "pass" | "fail"; evaluationIds: Evaluation["id"][] }
@@ -157,6 +159,12 @@ export class RunCompletionEngine {
 
   private root(run: Run): PatternPlanNode {
     return this.facts.root(run);
+  }
+
+  /** `null` while the Run admits new work (execution-model §14); the typed `not_admitted` outcome for an ended or operator-paused Run. */
+  private admission(runId: RunId): NotAdmittedOutcome | null {
+    const run = this.stores.runs.get(runId);
+    return runAdmitsNewWork(run) ? null : { kind: "not_admitted", status: run.status, operatorPause: run.operatorPause };
   }
 
   /** The Gate's criteria by kind, in canonical id order. */
@@ -345,6 +353,8 @@ export class RunCompletionEngine {
    */
   begin(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       if (phase.kind === "cancel") return this.cancel(phase.request, phase.outcome, options);
       if (phase.kind !== "ready_to_begin") return { kind: "no_change" };
@@ -373,6 +383,8 @@ export class RunCompletionEngine {
   /** Cancels the active `requested` request whose requesting turn ended without completing (called by the root support before it fails the Run). */
   cancelEndedRequest(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       return phase.kind === "cancel" ? this.cancel(phase.request, phase.outcome, options) : { kind: "no_change" };
     });
@@ -391,6 +403,8 @@ export class RunCompletionEngine {
   async verify(runId: RunId, options: WriteOptions = {}): Promise<CompletionOutcome> {
     const { ctx, checks } = this.deps;
     if (ctx.tx.inTransaction) throw new Error("completion checks run outside any transaction; command execution is external");
+    const admission = this.admission(runId);
+    if (admission) return admission;
     const phase = this.phaseOf(runId);
     if (phase.kind !== "checks_pending") return { kind: "no_change" };
     const gate = phase.gate;
@@ -412,6 +426,8 @@ export class RunCompletionEngine {
   /** In one root transaction: the Gate's one read-only Evaluator, funded directly from the Run's final reserve; an unfundable one fails the request. */
   prepareEvaluator(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       if (phase.kind !== "evaluator_pending") return { kind: "no_change" };
       const run = this.stores.runs.get(runId);
@@ -447,6 +463,8 @@ export class RunCompletionEngine {
   /** In one root transaction: the Evaluator's verdicts as Evaluations, a failed Gate on any failure, or the successor of a blocked Evaluator. */
   settleEvaluator(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       const run = this.stores.runs.get(runId);
       if (phase.kind === "evaluator_blocked") {
@@ -502,6 +520,8 @@ export class RunCompletionEngine {
   /** In one root transaction: every derived status change, each referencing the Gate and its Evaluation Evidence; nothing for an unchanged status. */
   derive(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       if (phase.kind !== "derive_pending") return { kind: "no_change" };
       const { gate, changes } = phase;
@@ -558,6 +578,8 @@ export class RunCompletionEngine {
   /** In one root transaction: the one read-only final-synthesis turn, funded directly from the final reserve; an unfundable one fails the request. */
   prepareSynthesis(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       if (phase.kind !== "synthesis_pending") return { kind: "no_change" };
       const run = this.stores.runs.get(runId);
@@ -595,6 +617,8 @@ export class RunCompletionEngine {
    */
   settleSynthesis(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       const run = this.stores.runs.get(runId);
       if (phase.kind === "synthesis_blocked") {
@@ -656,6 +680,8 @@ export class RunCompletionEngine {
   /** In one root transaction: the consequence of a cancelled request, failed checks, failed verdicts, or unmet conditions. */
   complete(runId: RunId, options: WriteOptions = {}): CompletionOutcome {
     return this.deps.ctx.tx.write((): CompletionOutcome => {
+      const admission = this.admission(runId);
+      if (admission) return admission;
       const phase = this.phaseOf(runId);
       const run = this.stores.runs.get(runId);
       switch (phase.kind) {

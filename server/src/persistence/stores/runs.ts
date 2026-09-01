@@ -5,11 +5,13 @@ import {
   ORCHESTRATOR_DEFINITION_NAME,
   parseOrThrow,
   RUN_MACHINE,
+  RunControlRefusedError,
   runInputSchema,
   runSchema,
   runTransitionEventType,
   ValidationError,
   type ConversationId,
+  type OperatorPauseMode,
   type Run,
   type RunId,
   type RunInput,
@@ -34,6 +36,7 @@ function toDomain(row: Row): Run {
       kind: row.kind,
       status: row.status,
       waitReason: row.waitReason,
+      operatorPause: row.operatorPause,
       target: row.target,
       budget: {
         maxCostUsd: row.maxCostUsd,
@@ -105,6 +108,7 @@ export class RunStore {
         kind: valid.kind,
         status: "created",
         waitReason: null,
+        operatorPause: null,
         target: valid.target,
         budget: valid.budget,
         finalReserve: valid.finalReserve,
@@ -150,14 +154,24 @@ export class RunStore {
    * `completed` records the final Snapshot and the Run's one `final`
    * Changeset, which must agree (the Changeset ends at that Snapshot and
    * starts at the Run's base Snapshot; execution-model §9.3), and clears the
-   * Conversation's active-Run reference when it still names this Run.
+   * Conversation's active-Run reference when it still names this Run. An
+   * operator pause has precedence over every automatic transition: a paused
+   * Run moves only to `cancelled` (which clears the pause) until the
+   * operator resumes it, and the `operator` wait reason is never cleared
+   * by a `running` transition — only by `resume`.
    */
   transition(id: RunId, transition: RunTransition, options?: WriteOptions): Run {
     return this.ctx.tx.write(() => {
       const current = this.get(id);
       RUN_MACHINE.assertTransition(current.status, transition.to, { runId: id });
+      if (current.operatorPause !== null && transition.to !== "cancelled") {
+        throw new ConflictError(`Run ${id} is paused by the operator (${current.operatorPause}); it moves to ${transition.to} only once resumed`, { runId: id, operatorPause: current.operatorPause, to: transition.to });
+      }
+      if (transition.to === "running" && transition.clearedWaitReason === "operator") {
+        throw new ValidationError(`Run ${id}: the operator wait reason is cleared by resume, never by a running transition`, { runId: id, clearedWaitReason: "operator" });
+      }
       const now = this.ctx.clock();
-      const next: Run = { ...current, status: transition.to, waitReason: null, updatedAt: now };
+      const next: Run = { ...current, status: transition.to, waitReason: null, operatorPause: null, updatedAt: now };
       let payload: unknown;
       switch (transition.to) {
         case "running":
@@ -223,6 +237,7 @@ export class RunStore {
         .set({
           status: next.status,
           waitReason: next.waitReason,
+          operatorPause: next.operatorPause,
           finalSnapshotId: next.finalSnapshotId,
           finalChangesetId: next.finalChangesetId,
           failure: next.failure,
@@ -236,6 +251,108 @@ export class RunStore {
         this.conversations.setActiveRun(current.conversationId, null, options);
       }
       return next;
+    });
+  }
+
+  /**
+   * Records the operator's pause (execution-model §14) in one write: a
+   * `running` Run becomes `waiting` with reason `operator`; a `waiting` Run
+   * keeps its status and its wait reason becomes `operator` (the superseded
+   * reason is journaled, never restored); a `verifying` or
+   * `awaiting_signoff` Run keeps its status and holds the pause beside it.
+   * A repeated pause of the same or a weaker mode changes nothing; a `hard`
+   * pause of a soft-paused Run escalates it. A `created` Run has nothing to
+   * withhold (`not_started`); an ended Run is never paused (`run_terminal`).
+   */
+  pause(id: RunId, mode: OperatorPauseMode, options?: WriteOptions): { run: Run; change: "paused" | "escalated" | "unchanged" } {
+    return this.ctx.tx.write(() => {
+      const current = this.get(id);
+      if (RUN_MACHINE.isTerminal(current.status)) throw new RunControlRefusedError("run_terminal", `Run ${id} is ${current.status}; an ended Run is never paused`, { runId: id, status: current.status });
+      if (current.status === "created") throw new RunControlRefusedError("not_started", `Run ${id} has not started; there is no admitted work to withhold`, { runId: id, status: current.status });
+      const now = this.ctx.clock();
+      if (current.operatorPause !== null) {
+        if (current.operatorPause === "hard" || mode === "soft") return { run: current, change: "unchanged" };
+        const escalated: Run = { ...current, operatorPause: "hard", updatedAt: now };
+        parseOrThrow(runSchema, escalated, "Run");
+        this.ctx.journal.append({
+          type: "run.paused",
+          scope: runScope(current),
+          subjectType: "run",
+          subjectId: id,
+          payload: { runId: id, mode: "hard", status: escalated.status, previousWaitReason: null, escalated: true },
+          ...writeMeta(options),
+        });
+        this.ctx.db.update(runs).set({ operatorPause: escalated.operatorPause, updatedAt: escalated.updatedAt }).where(eq(runs.id, id)).run();
+        return { run: escalated, change: "escalated" };
+      }
+      const next: Run = { ...current, operatorPause: mode, updatedAt: now };
+      if (current.status === "running" || current.status === "waiting") {
+        next.status = "waiting";
+        next.waitReason = "operator";
+      }
+      parseOrThrow(runSchema, next, "Run");
+      this.ctx.journal.append({
+        type: "run.paused",
+        scope: runScope(current),
+        subjectType: "run",
+        subjectId: id,
+        payload: { runId: id, mode, status: next.status, previousWaitReason: current.waitReason, escalated: false },
+        ...writeMeta(options),
+      });
+      if (current.status === "running") {
+        this.ctx.journal.append({
+          type: "run.waiting",
+          scope: runScope(current),
+          subjectType: "run",
+          subjectId: id,
+          payload: { from: "running", to: "waiting", waitReason: "operator" },
+          ...writeMeta(options),
+        });
+      }
+      this.ctx.db.update(runs).set({ status: next.status, waitReason: next.waitReason, operatorPause: next.operatorPause, updatedAt: next.updatedAt }).where(eq(runs.id, id)).run();
+      return { run: next, change: "paused" };
+    });
+  }
+
+  /**
+   * Clears the operator's pause and nothing else (execution-model §14): a
+   * `waiting` Run returns to `running` (the pre-pause wait reason is not
+   * restored; the next pass recomputes readiness from rows); a `verifying`
+   * or `awaiting_signoff` Run keeps its status. A Run that is not paused is
+   * left as it is (`not_paused`); an ended Run is never resumed.
+   */
+  resume(id: RunId, options?: WriteOptions): { run: Run; change: "resumed" | "not_paused"; cleared: OperatorPauseMode | null } {
+    return this.ctx.tx.write(() => {
+      const current = this.get(id);
+      if (RUN_MACHINE.isTerminal(current.status)) throw new RunControlRefusedError("run_terminal", `Run ${id} is ${current.status}; an ended Run is never resumed`, { runId: id, status: current.status });
+      if (current.operatorPause === null) return { run: current, change: "not_paused", cleared: null };
+      const now = this.ctx.clock();
+      const next: Run = { ...current, operatorPause: null, updatedAt: now };
+      if (current.status === "waiting") {
+        next.status = "running";
+        next.waitReason = null;
+      }
+      parseOrThrow(runSchema, next, "Run");
+      this.ctx.journal.append({
+        type: "run.resumed",
+        scope: runScope(current),
+        subjectType: "run",
+        subjectId: id,
+        payload: { runId: id, mode: current.operatorPause, status: next.status },
+        ...writeMeta(options),
+      });
+      if (current.status === "waiting") {
+        this.ctx.journal.append({
+          type: "run.wait_cleared",
+          scope: runScope(current),
+          subjectType: "run",
+          subjectId: id,
+          payload: { from: "waiting", to: "running", clearedWaitReason: "operator" },
+          ...writeMeta(options),
+        });
+      }
+      this.ctx.db.update(runs).set({ status: next.status, waitReason: next.waitReason, operatorPause: next.operatorPause, updatedAt: next.updatedAt }).where(eq(runs.id, id)).run();
+      return { run: next, change: "resumed", cleared: current.operatorPause };
     });
   }
 
@@ -324,6 +441,7 @@ export class RunStore {
       kind: run.kind,
       status: run.status,
       waitReason: run.waitReason,
+      operatorPause: run.operatorPause,
       target: run.target,
       maxCostUsd: run.budget.maxCostUsd,
       maxTokens: run.budget.maxTokens,

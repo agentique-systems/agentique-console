@@ -309,6 +309,7 @@ export class CoordinatorWorkerPatternRunner {
     // A Coordinator turn writes in its own worktree: its Changeset is integrated before anything the turn decided proceeds.
     if (turn !== null && turn.status === "succeeded" && turn.result?.status === "completed" && outstandingChangesetOf(stores, turn) !== null) {
       const step = await this.support.integrate(turn, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind !== "integrated") {
         if (!current) return { kind: "no_change" };
         return step.kind === "conflict" ? this.support.markWaiting(nodeId, expectedRevisionNumber!, "integration_conflict", options) : this.support.fail(nodeId, expectedRevisionNumber!, "integration_conflict", options);
@@ -318,16 +319,15 @@ export class CoordinatorWorkerPatternRunner {
       const integrable = this.nextIntegrable(state);
       if (integrable !== null) {
         const step = await this.support.integrate(integrable.invocation!, options);
+        if (step.kind === "not_admitted") return step.outcome;
         if (step.kind === "integrated") return { kind: "integrated", invocationId: integrable.invocation!.id };
         if (step.kind === "conflict") return { kind: "conflicted", invocationId: integrable.invocation!.id };
         return current ? this.support.fail(nodeId, expectedRevisionNumber!, "integration_conflict", options) : { kind: "no_change" };
       }
     }
     return ctx.tx.write((): PatternRunnerOutcome => {
-      if (current) {
-        const stale = this.support.staleness(nodeId, expectedRevisionNumber!);
-        if (stale) return stale;
-      }
+      const stale = current ? this.support.staleness(nodeId, expectedRevisionNumber!) : this.support.admission(node.runId);
+      if (stale) return stale;
       return this.apply(this.support.node(nodeId), options, current);
     });
   }

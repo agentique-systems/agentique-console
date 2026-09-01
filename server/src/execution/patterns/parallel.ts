@@ -251,6 +251,7 @@ export class ParallelPatternRunner {
     const integrable = this.nextIntegrable(state);
     if (integrable !== null) {
       const step = await this.support.integrate(integrable, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind === "integrated") return { kind: "integrated", invocationId: integrable.id };
       if (!current) return { kind: "no_change" };
       if (step.kind === "conflict") return this.support.markWaiting(nodeId, expectedRevisionNumber!, "integration_conflict", options);
@@ -259,16 +260,15 @@ export class ParallelPatternRunner {
     const aggregation = state.aggregation;
     if (state.items.every((s) => s.kind === "done") && aggregation !== null && aggregation.status === "succeeded" && aggregation.result?.status === "completed") {
       const step = await this.support.integrate(aggregation, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind !== "integrated") {
         if (!current) return { kind: "no_change" };
         return step.kind === "conflict" ? this.support.markWaiting(nodeId, expectedRevisionNumber!, "integration_conflict", options) : this.support.fail(nodeId, expectedRevisionNumber!, "integration_conflict", options);
       }
     }
     return ctx.tx.write((): PatternRunnerOutcome => {
-      if (current) {
-        const stale = this.support.staleness(nodeId, expectedRevisionNumber!);
-        if (stale) return stale;
-      }
+      const stale = current ? this.support.staleness(nodeId, expectedRevisionNumber!) : this.support.admission(node.runId);
+      if (stale) return stale;
       return this.apply(this.support.node(nodeId), options, current);
     });
   }

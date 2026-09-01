@@ -9,6 +9,7 @@ import {
   type BudgetLimits,
 } from "./budgets.ts";
 import type { AcceptanceCriterionId, AgentDefinitionRevisionId, ChangesetId, ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
+import { DomainError } from "./errors.ts";
 import { defineStateMachine } from "./transitions.ts";
 import { idSchema, nonEmptyString, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
@@ -70,6 +71,23 @@ export const RUN_WAIT_REASONS = ["decision", "budget", "provider_capacity", "int
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
 /**
+ * The operator's durable pause of one Run (execution-model §14 "Operator
+ * pauses a Run"): `soft` stops admitting new work while every admitted
+ * Attempt finishes; `hard` additionally interrupts the executing Attempts,
+ * which retry once the Run is resumed. The mode is persisted on the Run,
+ * never derived from process memory; a hard pause is never weakened to a
+ * soft one, and only an explicit resume clears either.
+ */
+export const OPERATOR_PAUSE_MODES = ["soft", "hard"] as const;
+export type OperatorPauseMode = (typeof OPERATOR_PAUSE_MODES)[number];
+
+/** The Run statuses the operator may pause: the ones with admitted or admissible work that a pause withholds. */
+export const OPERATOR_PAUSABLE_STATUSES = ["running", "waiting", "verifying", "awaiting_signoff"] as const satisfies readonly RunStatus[];
+
+/** The Run statuses that hold a recorded pause: a paused `running` Run is `waiting` with reason `operator`; the other two keep their status. */
+export const OPERATOR_PAUSE_HELD_STATUSES = ["waiting", "verifying", "awaiting_signoff"] as const satisfies readonly RunStatus[];
+
+/**
  * The only terminal failure transitions (execution-model §3): the root Plan
  * Node failed, or the Orchestrator declared the Run infeasible with Evidence.
  */
@@ -109,6 +127,14 @@ export interface Run {
   kind: RunKind;
   status: RunStatus;
   waitReason: RunWaitReason | null;
+  /**
+   * The operator's pause, or `null`. Set only on a `waiting`, `verifying`, or
+   * `awaiting_signoff` Run; a `waiting` Run is paused exactly when its wait
+   * reason is `operator`. A `running` Run that is paused becomes `waiting`
+   * with reason `operator`; a `verifying` or `awaiting_signoff` Run keeps its
+   * status and holds the pause beside it (execution-model §3, §14).
+   */
+  operatorPause: OperatorPauseMode | null;
   target: RunTarget;
   /**
    * The immutable base Run Budget: the global cap and allocation pool as
@@ -156,6 +182,96 @@ export function budgetIncreasePermitted(status: RunStatus, partition: BudgetIncr
   return BUDGET_INCREASE_PERMITTED_STATUSES[partition].includes(status);
 }
 
+/** The Run facts the admission rules read. */
+export type RunAdmissionFacts = Pick<Run, "status" | "operatorPause">;
+
+/**
+ * The one admission rule for new work (execution-model §7.1, §14): a Run
+ * admits the preparation of an Invocation or Attempt, the dispatch of a
+ * prepared Attempt, a retry or continuation, a Gate or completion step, an
+ * integration, or a readiness transition only while it has not ended and
+ * the operator has not paused it. Every mutation boundary revalidates this
+ * from the Run row inside its own transaction.
+ */
+export function runAdmitsNewWork(run: RunAdmissionFacts): boolean {
+  return !RUN_MACHINE.isTerminal(run.status) && run.operatorPause === null;
+}
+
+/**
+ * Whether an already admitted, executing Attempt of the Run may keep
+ * executing — calling capabilities, making runtime-tool calls, and
+ * settling with its legitimate result: the Run is not cancelled and not
+ * hard-paused. A soft pause lets admitted work drain; a hard pause and a
+ * cancellation interrupt it at the next durable boundary.
+ */
+export function runAdmitsExecution(run: RunAdmissionFacts): boolean {
+  return run.status !== "cancelled" && run.operatorPause !== "hard";
+}
+
+/**
+ * The interruption a Run imposes on its executing Attempts, or `null` while
+ * they may run to completion: `cancelled` for a cancelled Run (no retry),
+ * `operator_pause` for a hard-paused one (retried after resume).
+ */
+export type RunExecutionInterruption = "cancelled" | "operator_pause";
+
+export function runExecutionInterruptionOf(run: RunAdmissionFacts): RunExecutionInterruption | null {
+  if (run.status === "cancelled") return "cancelled";
+  if (run.operatorPause === "hard") return "operator_pause";
+  return null;
+}
+
+/**
+ * Whether an executing turn of the Run may still commit ordinary turn work
+ * (a Decision request, a Completion Request): the Run is `running`, or
+ * `waiting` only because a soft operator pause is draining its admitted
+ * Attempts. A hard-paused, verifying, signoff-awaiting, or ended Run
+ * accepts none.
+ */
+export function runIsRunningOrDraining(run: RunAdmissionFacts): boolean {
+  return run.status === "running" || (run.status === "waiting" && run.operatorPause === "soft");
+}
+
+/**
+ * Why a Run-control operation (cancel, pause, resume; execution-model §14)
+ * refuses before writing anything. Every code names a canonical fact.
+ */
+export const RUN_CONTROL_REFUSAL_CODES = [
+  /** The Run is `completed` or `failed` (a cancelled Run replays its cancellation; a terminal Run is never paused or resumed). */
+  "run_terminal",
+  /** The Run is `created`: it has not started, so there is no admitted work to withhold. */
+  "not_started",
+] as const;
+export type RunControlRefusalCode = (typeof RUN_CONTROL_REFUSAL_CODES)[number];
+
+/** A refused Run-control operation: the closed code and bounded details (ids and closed facts only). */
+export class RunControlRefusedError extends DomainError {
+  readonly refusal: RunControlRefusalCode;
+
+  constructor(refusal: RunControlRefusalCode, message: string, details: Record<string, unknown> = {}) {
+    super("conflict", message, { refusal, ...details });
+    this.refusal = refusal;
+  }
+}
+
+/** The strict inputs of the three Run-control operations. */
+export interface RunCancelRequest {
+  runId: RunId;
+}
+
+export interface RunPauseRequest {
+  runId: RunId;
+  mode: OperatorPauseMode;
+}
+
+export interface RunResumeRequest {
+  runId: RunId;
+}
+
+export const runCancelRequestSchema: z.ZodType<RunCancelRequest> = z.strictObject({ runId: idSchema("run") });
+export const runPauseRequestSchema: z.ZodType<RunPauseRequest> = z.strictObject({ runId: idSchema("run"), mode: z.enum(OPERATOR_PAUSE_MODES) });
+export const runResumeRequestSchema: z.ZodType<RunResumeRequest> = z.strictObject({ runId: idSchema("run") });
+
 export const RUN_MACHINE = defineStateMachine<RunStatus>("Run", RUN_STATUSES, {
   created: ["running", "cancelled"],
   running: ["verifying", "waiting", "failed", "cancelled"],
@@ -175,6 +291,7 @@ export const runSchema: z.ZodType<Run> = z
     kind: z.enum(RUN_KINDS),
     status: z.enum(RUN_STATUSES),
     waitReason: z.enum(RUN_WAIT_REASONS).nullable(),
+    operatorPause: z.enum(OPERATOR_PAUSE_MODES).nullable(),
     target: runTargetSchema,
     budget: budgetLimitsSchema,
     finalReserve: allocationSchema,
@@ -195,6 +312,14 @@ export const runSchema: z.ZodType<Run> = z
   })
   .refine((run) => (run.status === "waiting") === (run.waitReason !== null), {
     message: "waitReason is set exactly when the Run is waiting",
+    path: ["waitReason"],
+  })
+  .refine((run) => run.operatorPause === null || (OPERATOR_PAUSE_HELD_STATUSES as readonly RunStatus[]).includes(run.status), {
+    message: "an operator pause is held only by a waiting, verifying, or awaiting_signoff Run",
+    path: ["operatorPause"],
+  })
+  .refine((run) => (run.waitReason === "operator") === (run.status === "waiting" && run.operatorPause !== null), {
+    message: "a Run waits with reason operator exactly when the operator paused it",
     path: ["waitReason"],
   })
   .refine((run) => (run.status === "failed") === (run.failure !== null), {

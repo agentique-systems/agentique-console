@@ -273,6 +273,7 @@ export class EvaluatorOptimizerPatternRunner {
     const producer = this.state(node).current.producer;
     if (producer !== null && producer.status === "succeeded" && producer.result?.status === "completed" && outstandingChangesetOf(stores, producer) !== null) {
       const step = await this.support.integrate(producer, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind !== "integrated") {
         if (!current) return { kind: "no_change" };
         return step.kind === "conflict" ? this.support.markWaiting(nodeId, expectedRevisionNumber!, "integration_conflict", options) : this.support.fail(nodeId, expectedRevisionNumber!, "integration_conflict", options);
@@ -280,10 +281,8 @@ export class EvaluatorOptimizerPatternRunner {
       return { kind: "integrated", invocationId: producer.id };
     }
     return ctx.tx.write((): PatternRunnerOutcome => {
-      if (current) {
-        const stale = this.support.staleness(nodeId, expectedRevisionNumber!);
-        if (stale) return stale;
-      }
+      const stale = current ? this.support.staleness(nodeId, expectedRevisionNumber!) : this.support.admission(node.runId);
+      if (stale) return stale;
       return this.apply(this.support.node(nodeId), options, current);
     });
   }

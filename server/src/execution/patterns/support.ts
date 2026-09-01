@@ -30,6 +30,7 @@ import {
   operationAt,
   patternPositionKey,
   ROOT_SOURCE_PATH,
+  runAdmitsNewWork,
   TASK_MACHINE,
   type AcceptanceCriterionId,
   type Allocation,
@@ -46,6 +47,7 @@ import {
   type InvocationId,
   type InvocationPurpose,
   type ManifestInput,
+  type OperatorPauseMode,
   type Pattern,
   type PatternPlanNode,
   type PatternPosition,
@@ -55,6 +57,7 @@ import {
   type PlanNodeId,
   type PlanNodeWaitReason,
   type RunId,
+  type RunStatus,
   type SnapshotId,
   type Task,
   type TaskId,
@@ -114,8 +117,16 @@ export type NodeAdvice =
   /** The node is not a member of the current revision: its own started work may finish (`settle` says a settlement is due), nothing new starts. */
   | { kind: "not_current"; invocationId: InvocationId | null; settle: boolean };
 
+/** The Run admits no new work — it ended, or the operator paused it — so nothing was written (execution-model §14). */
+export interface NotAdmittedOutcome {
+  kind: "not_admitted";
+  status: RunStatus;
+  operatorPause: OperatorPauseMode | null;
+}
+
 /** The closed outcome of one canonical runner action. */
 export type PatternRunnerOutcome =
+  | NotAdmittedOutcome
   | { kind: "started"; invocationId: InvocationId; position: PatternPosition }
   /** An evaluate-only evaluator_optimizer node started its round over its incoming candidate; no Invocation exists until its checks pass. */
   | { kind: "round_opened"; round: number }
@@ -179,8 +190,8 @@ export interface PatternRunnerDependencies {
 
 export { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf } from "../invocation-facts.ts";
 
-/** The outcome of integrating an Invocation's outstanding Changeset, reduced to what a runner acts on. */
-export type IntegrationStep = { kind: "integrated" } | { kind: "conflict" } | { kind: "conflict_unresolved" };
+/** The outcome of integrating an Invocation's outstanding Changeset, reduced to what a runner acts on; `not_admitted` when the Run admits no integration now. */
+export type IntegrationStep = { kind: "integrated" } | { kind: "conflict" } | { kind: "conflict_unresolved" } | { kind: "not_admitted"; outcome: NotAdmittedOutcome };
 
 export interface PreparationRequest {
   continuedFromInvocationId: InvocationId | null;
@@ -229,9 +240,17 @@ export class PatternNodeSupport {
     return node;
   }
 
-  /** `null` when the current revision is the expected one and the node is a member; a `stale` outcome otherwise. */
+  /** `null` while the Run admits new work (execution-model §14); the typed `not_admitted` outcome for an ended or operator-paused Run. */
+  admission(runId: RunId): NotAdmittedOutcome | null {
+    const run = this.deps.stores.runs.get(runId);
+    return runAdmitsNewWork(run) ? null : { kind: "not_admitted", status: run.status, operatorPause: run.operatorPause };
+  }
+
+  /** `null` when the Run admits work, the current revision is the expected one, and the node is a member; a `not_admitted` or `stale` outcome otherwise. */
   staleness(nodeId: PlanNodeId, expectedRevisionNumber: number): PatternRunnerOutcome | null {
     const node = this.deps.stores.plans.getNode(nodeId);
+    const admission = this.admission(node.runId);
+    if (admission) return admission;
     const current = this.deps.stores.plans.latestRevisionNumber(node.runId);
     if (current !== expectedRevisionNumber) return { kind: "stale", expectedRevisionNumber, currentRevisionNumber: current };
     const member = this.deps.stores.plans.listMembership(node.runId, current).some((m) => m.planNodeId === nodeId);
@@ -532,10 +551,12 @@ export class PatternNodeSupport {
     return { kind: "succeeded", outputArtifactIds: outputs, handoffIds: ensured.map((h) => h.handoff.id) };
   }
 
-  /** Integrates an Invocation's outstanding Changeset outside any transaction; `integrated` when none is outstanding. */
+  /** Integrates an Invocation's outstanding Changeset outside any transaction; `integrated` when none is outstanding; nothing starts for a Run that admits no work. */
   async integrate(invocation: Invocation, options: WriteOptions): Promise<IntegrationStep> {
     const { ctx, stores, integration } = this.deps;
     if (ctx.tx.inTransaction) throw new Error("a Pattern runner integrates outside any transaction; integration is external");
+    const admission = this.admission(invocation.runId);
+    if (admission) return { kind: "not_admitted", outcome: admission };
     const changeset = outstandingChangesetOf(stores, invocation);
     if (changeset === null) return { kind: "integrated" };
     const outcome = await integration.integrate(changeset.id, options);
@@ -685,6 +706,7 @@ export class SequentialStepEngine {
     if (PLAN_NODE_MACHINE.isTerminal(node.status)) return { kind: "no_change" };
     if (latest.status === "succeeded" && latest.result !== null && latest.result.status === "completed") {
       const step = await this.support.integrate(latest, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind === "conflict") return this.support.markWaiting(nodeId, expectedRevisionNumber, "integration_conflict", options);
       if (step.kind === "conflict_unresolved") return this.support.fail(nodeId, expectedRevisionNumber, "integration_conflict", options);
       return ctx.tx.write((): PatternRunnerOutcome => this.complete(nodeId, expectedRevisionNumber, latest.id, options));
@@ -735,9 +757,12 @@ export class SequentialStepEngine {
     if (latest === null || !INVOCATION_MACHINE.isTerminal(latest.status)) return { kind: "no_change" };
     if (latest.status === "succeeded" && latest.result?.status === "completed") {
       const step = await this.support.integrate(latest, options);
+      if (step.kind === "not_admitted") return step.outcome;
       if (step.kind !== "integrated") return { kind: "no_change" };
     }
     return ctx.tx.write((): PatternRunnerOutcome => {
+      const admission = this.support.admission(node.runId);
+      if (admission) return admission;
       const current = this.node(nodeId);
       const invocation = stores.invocations.get(latest.id);
       if (PLAN_NODE_MACHINE.isTerminal(current.status)) return { kind: "no_change" };

@@ -37,6 +37,17 @@
  * between the commit and finalization) converges to the same state on its
  * next preparation without another provider call.
  *
+ * Operator control (execution-model §14) is revalidated from the Run row at
+ * every boundary: preparation refuses under a pause or an ended Run
+ * (`run_paused`, `run_terminal`); a prepared Attempt is dispatched to the
+ * provider only if the Run still admits work — otherwise it ends
+ * interrupted without a provider call — and finalization reads the Run row
+ * again, so a cancellation (`cancelled`, no retry) or a hard pause
+ * (`operator_pause`, retried after resume) committed while the provider
+ * ran ends the Attempt from rows even when the abort signal reached
+ * nothing; a late provider result is then not a result. A soft pause lets
+ * the admitted Attempt finish with its Usage and legitimate result.
+ *
  * Every operation is safe to call repeatedly: a finalized Attempt is never
  * finalized twice, a refusal creates nothing, and an in-flight Attempt is
  * reported rather than duplicated. Nothing here reads a transcript.
@@ -49,6 +60,9 @@ import {
   grantsWriteCapability,
   INVOCATION_MACHINE,
   invocationDeadlineAt,
+  RUN_MACHINE,
+  runAdmitsNewWork,
+  runExecutionInterruptionOf,
   TOOL_CALL_MEDIA_TYPE,
   TRANSCRIPT_MEDIA_TYPE,
   type Attempt,
@@ -61,6 +75,7 @@ import {
   type InvocationId,
   type RetryDecision,
   type Run,
+  type RunId,
   type Timestamp,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
@@ -76,6 +91,7 @@ import { renderManifest, type RetryAppendix } from "./manifest/renderer.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort } from "./ports/execution-workspace.ts";
 import { InvocationResultValidator, type ResultValidation } from "./result-validator.ts";
 import { classifyAttempt, decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicyConfig, type RuntimeInterruption } from "./retry-policy.ts";
+import { settleCancelledRunWork } from "./run-cancellation.ts";
 import { RuntimeToolExecutor } from "./runtime-tools.ts";
 import { canonicalizeToolCall, ToolCallAuthorizer } from "./tool-call-authorization.ts";
 import { WorkspaceCleanup, type ExecutionDiagnosticSink, type WorkspaceReleaseOutcome } from "./workspace-cleanup.ts";
@@ -90,7 +106,7 @@ export const DEFAULT_EXECUTOR_CONFIG: Readonly<AttemptExecutorConfig> = Object.f
   continuation: { contextWindowTokens: 200_000 },
 });
 
-export type NotPermittedReason = "invocation_terminal" | "invocation_waiting" | "attempt_active" | "retry_refused" | "retry_not_yet" | "allocation_exhausted" | "decision_requested";
+export type NotPermittedReason = "invocation_terminal" | "invocation_waiting" | "attempt_active" | "run_terminal" | "run_paused" | "retry_refused" | "retry_not_yet" | "allocation_exhausted" | "decision_requested";
 
 export type PrepareOutcome =
   | { kind: "prepared"; attempt: Attempt; lease: CapacityLease; invocation: Invocation }
@@ -133,6 +149,7 @@ interface PreparedFacts {
 interface InFlight {
   attemptId: AttemptId;
   invocationId: InvocationId;
+  runId: RunId;
   controller: AbortController;
   deadlineAt: Timestamp | null;
   runtimeInterruption: RuntimeInterruption;
@@ -190,6 +207,11 @@ export class AttemptExecutor {
     return [...this.#inFlight.keys()].sort();
   }
 
+  /** The Attempts of one Run this process is executing, in Attempt id order. */
+  inFlightOf(runId: RunId): AttemptId[] {
+    return [...this.#inFlight.values()].filter((f) => f.runId === runId).map((f) => f.attemptId).sort();
+  }
+
   private manifestOf(invocation: Invocation): ContextManifest | null {
     try {
       return this.stores.invocations.getManifest(invocation.id);
@@ -203,6 +225,10 @@ export class AttemptExecutor {
     if (invocation.status === "waiting") return { permitted: false, reason: "invocation_waiting", notBefore: null };
     if (manifest === null) return { permitted: false, reason: "invocation_terminal", notBefore: null };
     if (attempts.some((a) => !ATTEMPT_MACHINE.isTerminal(a.status))) return { permitted: false, reason: "attempt_active", notBefore: null };
+    // The Run row is the admission barrier (execution-model §14): an ended Run acquires no work, a paused Run admits none until resumed.
+    const run = this.stores.runs.get(invocation.runId);
+    if (RUN_MACHINE.isTerminal(run.status)) return { permitted: false, reason: "run_terminal", notBefore: null };
+    if (run.operatorPause !== null) return { permitted: false, reason: "run_paused", notBefore: null };
     // A durably requested blocking Decision ended the logical turn: the Invocation settles blocked, never re-executes (execution-model §8.2).
     if (blockingRequestOf(this.stores, invocation) !== null) return { permitted: false, reason: "decision_requested", notBefore: null };
     // No Attempt may be created once the Invocation-wide deadline has been reached.
@@ -264,6 +290,7 @@ export class AttemptExecutor {
     this.#inFlight.set(facts.attempt.id, {
       attemptId: facts.attempt.id,
       invocationId: facts.invocation.id,
+      runId: facts.invocation.runId,
       controller: new AbortController(),
       deadlineAt: facts.deadlineAt,
       runtimeInterruption: null,
@@ -343,10 +370,12 @@ export class AttemptExecutor {
   }
 
   private async run(flight: InFlight, options: WriteOptions): Promise<ExecutionOutcome> {
-    if (flight.outcome === null) flight.outcome = await this.callProvider(flight, options);
+    if (flight.outcome === null) flight.outcome = await this.dispatch(flight, options);
     const invocation = this.stores.invocations.get(flight.invocationId);
     const workspace = this.cleanup.workspaceOf(invocation);
-    if (workspace.request.writes && flight.outcome.completion.kind === "completed" && flight.changeset === null) {
+    // An interrupted Attempt's worktree state is never collected: a late success creates no Changeset (execution-model §14).
+    const interrupted = flight.runtimeInterruption !== null || runExecutionInterruptionOf(this.stores.runs.get(invocation.runId)) !== null;
+    if (!interrupted && workspace.request.writes && flight.outcome.completion.kind === "completed" && flight.changeset === null) {
       flight.changeset = await this.workspace.collectChangeset(workspace.request, workspace.prepared);
     }
     if (flight.outcome.continuation !== null && this.provider.supportsContinuation && !flight.continuationStored) {
@@ -354,6 +383,23 @@ export class AttemptExecutor {
       flight.continuationStored = true;
     }
     return this.finalize(flight, options);
+  }
+
+  /**
+   * The dispatch boundary: a prepared Attempt reaches the provider only while
+   * the Run still admits work and nothing interrupted it meanwhile; otherwise
+   * it ends interrupted here — no provider call, no Usage — with the cause the
+   * Run row implies (`cancelled` for an ended Run, `operator_pause` for a
+   * paused one), and finalization records it like any other interruption.
+   */
+  private async dispatch(flight: InFlight, options: WriteOptions): Promise<AttemptExecutionOutcome> {
+    const run = this.stores.runs.get(flight.runId);
+    if (flight.runtimeInterruption === null && runAdmitsNewWork(run)) return this.callProvider(flight, options);
+    const cause = flight.runtimeInterruption ?? (RUN_MACHINE.isTerminal(run.status) ? "cancelled" : "operator_pause");
+    flight.runtimeInterruption = cause;
+    if (!flight.controller.signal.aborted) flight.controller.abort(cause);
+    const now = this.ctx.clock();
+    return { completion: { kind: "interrupted", cause, message: `not dispatched: ${cause}` }, result: null, usage: [], transcript: null, continuation: null, timing: { startedAt: now, endedAt: now, providerMs: null }, diagnostics: { dispatched: "false" } };
   }
 
   private async callProvider(flight: InFlight, options: WriteOptions): Promise<AttemptExecutionOutcome> {
@@ -426,6 +472,9 @@ export class AttemptExecutor {
       const run = this.stores.runs.get(invocation.runId);
       const writes = grantsWriteCapability(manifest.content);
       const meta: WriteOptions = { ...options };
+      // The Run row decides late (execution-model §14): a cancellation or hard pause committed while the provider ran interrupts the
+      // Attempt from rows — whatever the provider reported, and even when the abort signal reached nothing. A soft pause changes nothing.
+      const interruption: RuntimeInterruption = flight.runtimeInterruption ?? runExecutionInterruptionOf(run);
 
       // 1. The diagnostic transcript Artifact; nothing below reads it.
       const transcriptArtifactId =
@@ -452,9 +501,9 @@ export class AttemptExecutor {
       const classified =
         requestedDecisionId !== null
           ? { status: "failed" as const, failureClass: "decision_requested" as const, detail: { message: boundedFailureMessage(`Decision ${requestedDecisionId} requested; the logical turn ended`), violations: [], tool: null, cancelled: false }, result: null }
-          : classifyAttempt({ completion, validation, runtimeInterruption: flight.runtimeInterruption, consumed, allocation: invocation.allocation });
+          : classifyAttempt({ completion, validation, runtimeInterruption: interruption, consumed, allocation: invocation.allocation });
       const previous = attempt.number > 1 ? this.stores.invocations.listAttempts(invocation.id)[attempt.number - 2] : undefined;
-      const approvalRequired = requestedDecisionId === null && completion.kind === "approval_required" && flight.runtimeInterruption === null;
+      const approvalRequired = requestedDecisionId === null && completion.kind === "approval_required" && interruption === null;
       const decision = decideRetry({
         classified,
         attemptNumber: attempt.number,
@@ -487,6 +536,8 @@ export class AttemptExecutor {
       // 8–10. Retry eligibility is the decision above; the Invocation ends only when no retry remains (releasing its reservation), and its Tasks follow.
       const blockedOn = requestedDecisionId !== null ? { decisionId: requestedDecisionId } : approvalDecision ? { decisionId: approvalDecision.id } : null;
       const settlement = settleInvocation(this.stores, { invocation, attempt: terminal, decision, result: classified.result, blocked: blockedOn, meta });
+      // The last executing Attempt of a cancelled Run has ended: the nodes, Tasks, and Handoffs it held back converge in the same transaction.
+      if (run.status === "cancelled") settleCancelledRunWork(this.stores, run.id, meta);
       if (requestedDecisionId !== null) return { kind: "decision_requested", attempt: terminal, settlement, decision: this.stores.decisions.get(requestedDecisionId) };
       if (approvalDecision) return { kind: "approval_required", attempt: terminal, settlement, decision: approvalDecision };
       return { kind: "finalized", attempt: terminal, settlement };
@@ -562,13 +613,29 @@ export class AttemptExecutor {
     return this.executePreparedAttempt(prepared.attempt.id, options);
   }
 
-  /** Aborts an in-flight Attempt: `cancelled` forbids a retry; `deadline` is the wall-clock interruption. Returns false when nothing is in flight. */
+  /**
+   * Aborts an in-flight Attempt: `cancelled` forbids a retry; `operator_pause`
+   * (a hard pause) is retried once the Run resumes; `deadline` is the
+   * wall-clock interruption. Returns false when nothing is in flight or the
+   * Attempt was already aborted or has already returned — an interruption is
+   * delivered at most once and never rewritten.
+   */
   interrupt(attemptId: AttemptId, cause: Exclude<RuntimeInterruption, null>): boolean {
     const flight = this.#inFlight.get(attemptId);
     if (!flight || flight.outcome !== null || flight.controller.signal.aborted) return false;
     flight.runtimeInterruption = cause;
     flight.controller.abort(cause);
     return true;
+  }
+
+  /**
+   * Delivers one interruption to every Attempt of the Run executing in this
+   * process (execution-model §14); returns the Attempts it aborted now.
+   * Delivery only: the accepted intent is the committed Run row, which
+   * finalization revalidates whether or not the signal reached the provider.
+   */
+  interruptRun(runId: RunId, cause: "cancelled" | "operator_pause"): AttemptId[] {
+    return this.inFlightOf(runId).filter((attemptId) => this.interrupt(attemptId, cause));
   }
 
   /** Interrupts every in-flight Attempt whose deadline has passed at `now`; driven by the caller's clock, never by a timer. */

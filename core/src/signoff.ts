@@ -91,6 +91,8 @@ export const signoffResolutionInputSchema: z.ZodType<SignoffResolutionInput> = z
 export const SIGNOFF_REFUSAL_CODES = [
   /** The Run is not `awaiting_signoff`. */
   "run_not_awaiting_signoff",
+  /** The operator paused the Run; signoff is resolved only once it is resumed (execution-model §14). */
+  "run_paused",
   /** The Gate is not the Run's open `operator_signoff` Gate. */
   "gate_mismatch",
   /** The Decision is not the Gate's open, operator-required `signoff` Decision. */

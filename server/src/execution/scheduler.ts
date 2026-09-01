@@ -30,6 +30,14 @@
  * clock at the start of each iteration. Routine progress creates no
  * conversational message and no status update of any kind.
  *
+ * Operator control has precedence over every automatic readiness fact
+ * (execution-model §14): a paused Run projects no action whatever its rows
+ * imply — admitted Attempts drain under a soft pause and finalize under a
+ * hard one — and only an explicit resume, never a pass, clears the pause;
+ * `resume_run` clears exactly the automatic wait it was projected for, and
+ * every mutating action revalidates the Run's admission inside its own
+ * transaction.
+ *
  * A per-Run in-process guard makes concurrent `advanceRun` calls join one
  * pass; canonical database constraints remain the source of correctness.
  */
@@ -40,12 +48,14 @@ import {
   PLAN_NODE_MACHINE,
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
+  runAdmitsNewWork,
   type AttemptId,
   type CompletionRequestId,
   type CoordinatorPurpose,
   type DecisionId,
   type GateId,
   type InvocationId,
+  type OperatorPauseMode,
   type Pattern,
   type PatternPosition,
   type PlanNode,
@@ -148,7 +158,7 @@ export interface NodeProjection {
 export interface SchedulerProjection {
   runId: RunId;
   revisionNumber: number;
-  run: { status: RunStatus; waitReason: RunWaitReason | null };
+  run: { status: RunStatus; waitReason: RunWaitReason | null; operatorPause: OperatorPauseMode | null };
   nodes: NodeProjection[];
   /** The canonical actions, in scheduling order; the first is what a pass performs next. */
   actions: SchedulerAction[];
@@ -230,10 +240,15 @@ export class RunScheduler {
   reconcileRun(runId: RunId, now: Timestamp = this.ctx.clock()): SchedulerProjection {
     const run = this.stores.runs.get(runId);
     const graph = this.stores.plans.currentGraph(runId);
-    const base = { runId, revisionNumber: graph.revisionNumber, run: { status: run.status, waitReason: run.waitReason } };
+    const base = { runId, revisionNumber: graph.revisionNumber, run: { status: run.status, waitReason: run.waitReason, operatorPause: run.operatorPause } };
     const none: CompletionAdvice = { kind: "none" };
     if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "run_terminal" };
     const root = graph.nodes.find((n) => n.sourcePath === ROOT_SOURCE_PATH)!;
+    // Paused by the operator (execution-model §14): no action is projected whatever the rows imply. Admitted Attempts drain (soft) or
+    // finalize interrupted (hard) and are reported in flight; readiness is recomputed only after an explicit resume.
+    if (run.operatorPause !== null) {
+      return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions: [], waiting: [{ nodeId: root.id, reason: "operator", wakeAt: null }], remediating: [], limited: [], inFlight: this.inFlightOf(runId), wakeAt: null, concurrency: { active: this.stores.invocations.listActive(runId).length, max: run.budget.maxConcurrency }, completion: none, stop: "waiting" };
+    }
     // Awaiting the operator's signoff: no model or Pattern work is scheduled (execution-model §3).
     if (run.status === "awaiting_signoff") return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions: [], waiting: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "quiescent" };
     // Verifying: only the completion engine's actions execute; no ordinary Pattern work starts (execution-model §10).
@@ -250,7 +265,7 @@ export class RunScheduler {
     const remediating: RemediatingNode[] = [];
     const limited: PlanNodeId[] = [];
     // Every Attempt of the Run executing in this process, from the executor's record, whatever its node advises.
-    const inFlight = [...new Set(this.executor.inFlight().map((a) => this.stores.invocations.getAttempt(a)).filter((a) => a.runId === runId).map((a) => a.invocationId))].sort();
+    const inFlight = this.inFlightOf(runId);
     let wakeAt: Timestamp | null = null;
     let remediate: Extract<RootAdvice, { kind: "remediate" }> | null = null;
     let active = this.stores.invocations.listActive(runId).length;
@@ -428,11 +443,12 @@ export class RunScheduler {
 
     // Run-level: resume before any other action; wait only when nothing can proceed and nothing is running. A waiting Run whose
     // wait changed nature — a resolved Decision whose successor the root cannot fund now waits on budget — records the exact reason.
-    if (run.status === "waiting" && actions.length > 0) actions.unshift({ kind: "resume_run", reason: run.waitReason! });
+    // An `operator` wait is never cleared here: it belongs to the operator's explicit resume (a paused Run returned above).
+    if (run.status === "waiting" && run.waitReason !== "operator" && actions.length > 0) actions.unshift({ kind: "resume_run", reason: run.waitReason! });
     if (actions.length === 0 && waiting.length > 0 && inFlight.length === 0 && limited.length === 0) {
       const reason = RUN_WAIT_REASONS_BY_NODE[waiting[0]!.reason];
       if (run.status === "running") actions.push({ kind: "wait_run", reason });
-      else if (run.status === "waiting" && run.waitReason !== reason) actions.push({ kind: "resume_run", reason: run.waitReason! }, { kind: "wait_run", reason });
+      else if (run.status === "waiting" && run.waitReason !== "operator" && run.waitReason !== reason) actions.push({ kind: "resume_run", reason: run.waitReason! }, { kind: "wait_run", reason });
     }
     const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || limited.length > 0 || wakeAt !== null ? "waiting" : "quiescent";
     return { ...base, nodes, actions, waiting, remediating, limited, inFlight, wakeAt, concurrency: { active, max }, completion, stop };
@@ -442,7 +458,7 @@ export class RunScheduler {
   private reconcileVerifying(runId: RunId, run: { budget: { maxConcurrency: number | null } }, root: PlanNode, base: Pick<SchedulerProjection, "runId" | "revisionNumber" | "run">, now: Timestamp): SchedulerProjection {
     const actions: SchedulerAction[] = [];
     const waiting: WaitingCondition[] = [];
-    const inFlight = [...new Set(this.executor.inFlight().map((a) => this.stores.invocations.getAttempt(a)).filter((a) => a.runId === runId).map((a) => a.invocationId))].sort();
+    const inFlight = this.inFlightOf(runId);
     let wakeAt: Timestamp | null = null;
     const completion = this.runners.completion.advice(runId, now);
     switch (completion.kind) {
@@ -496,6 +512,11 @@ export class RunScheduler {
 
   private capacityRefusal(runId: RunId, invocationId: InvocationId) {
     return this.governor.check({ runId, provider: this.provider.provider, worktrees: this.worktreesOf(invocationId) });
+  }
+
+  /** The Invocations of the Run whose Attempt is executing in this process, from the executor's record. */
+  private inFlightOf(runId: RunId): InvocationId[] {
+    return [...new Set(this.executor.inFlightOf(runId).map((a) => this.stores.invocations.getAttempt(a).invocationId))].sort();
   }
 
   private worktreesOf(invocationId: InvocationId): number {
@@ -595,8 +616,13 @@ export class RunScheduler {
     const revision = projection.revisionNumber;
     switch (action.kind) {
       case "resume_run":
-        this.stores.runs.transition(runId, { to: "running", clearedWaitReason: action.reason }, meta);
-        return { kind: "transitioned" };
+        return this.ctx.tx.write(() => {
+          // Revalidated inside the transaction: exactly the automatic wait projected clears, never an operator pause (execution-model §14).
+          const run = this.stores.runs.get(runId);
+          if (run.status !== "waiting" || run.waitReason !== action.reason || run.operatorPause !== null) return { kind: "stale" };
+          this.stores.runs.transition(runId, { to: "running", clearedWaitReason: action.reason }, meta);
+          return { kind: "transitioned" };
+        });
       case "wait_run":
         return this.ctx.tx.write(() => {
           const run = this.stores.runs.get(runId);
@@ -690,7 +716,7 @@ export class RunScheduler {
     // requester's state and node, the Decision's end, the absence of a successor, and the exact position the runner is told to continue.
     const invocation = this.stores.invocations.get(action.invocationId);
     if (!this.runners.decisionRequests.awaitsContinuation(invocation, action.decisionId)) return { kind: "no_change" };
-    if (RUN_MACHINE.isTerminal(this.stores.runs.get(runId).status)) return { kind: "stale" };
+    if (!runAdmitsNewWork(this.stores.runs.get(runId))) return { kind: "stale" };
     const graph = this.stores.plans.currentGraph(runId);
     if (graph.revisionNumber !== revision) return { kind: "stale" };
     const node = this.stores.plans.getNode(action.nodeId);
@@ -709,6 +735,7 @@ export class RunScheduler {
 
   /** Applies one readiness decision after re-deciding it inside the transaction against the current graph and facts. */
   #applyReadiness(runId: RunId, revision: number, action: Extract<SchedulerAction, { kind: "ready_node" | "skip_node" }>, meta: WriteOptions): PerformedAction["outcome"] {
+    if (!runAdmitsNewWork(this.stores.runs.get(runId))) return { kind: "stale" };
     const graph = this.stores.plans.currentGraph(runId);
     if (graph.revisionNumber !== revision || !graph.nodes.some((n) => n.id === action.nodeId)) return { kind: "stale" };
     const decision = decideReadiness(projectReadinessInput(this.stores, graph), action.nodeId);

@@ -30,6 +30,7 @@ import {
   allocationFits,
   operationAt,
   ROOT_SOURCE_PATH,
+  runIsRunningOrDraining,
   TASK_MACHINE,
   ZERO_ALLOCATION,
   type AcceptanceCriterion,
@@ -199,7 +200,8 @@ export class CompletionFacts {
    */
   preflight(run: Run, requestingInvocationId: InvocationId | null): CompletionPreflightCode[] {
     const codes: CompletionPreflightCode[] = [];
-    if (run.status !== "running") codes.push("run_not_running");
+    // A draining turn under a soft pause may still request completion; the request begins only once the Run is resumed (execution-model §14).
+    if (!runIsRunningOrDraining(run)) codes.push("run_not_running");
     const active = this.stores.completionRequests.activeOf(run.id);
     if (active !== null && active.invocationId !== requestingInvocationId) codes.push("completion_request_active");
     if (this.stores.gates.listByKind(run.id, "run_completion").length >= run.verificationPolicy.maxRunCompletionCycles) codes.push("run_completion_cycles_exhausted");

@@ -519,6 +519,8 @@ export function runtimeToolResultBlocksInvocation(result: RuntimeToolResult): bo
 export const RUNTIME_TOOL_REJECTION_CODES = [
   "invalid_input",
   "caller_not_running",
+  /** The Run no longer admits execution: it was cancelled or hard-paused by the operator; nothing is read or written for the call (execution-model §14). */
+  "run_not_executing",
   "caller_not_permitted",
   "purpose_not_permitted",
   "proposal_already_accepted",

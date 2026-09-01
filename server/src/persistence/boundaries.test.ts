@@ -712,6 +712,46 @@ describe("import boundaries", () => {
     }
   });
 
+  it("operator Run control is one internal execution boundary: durable intent on the Run row, one admission rule revalidated at every mutation boundary, delivery only through the executor, no timer, polling, messaging, provider persistence, second scheduler, HTTP wiring, or compatibility mechanism (execution-model §14)", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    const read = (f: string) => strip(fs.readFileSync(path.join(repoRoot, f), "utf8"));
+    const production = ["server/src/persistence", "server/src/execution", "server/src/provider"].flatMap((dir) => listFiles(dir, (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts")));
+    const namers = (pattern: RegExp, except: string[] = []) => production.filter((f) => !except.includes(rel(f)) && pattern.test(read(rel(f)))).map(rel).sort();
+    const control = read("server/src/execution/run-control.ts");
+    const cancellation = read("server/src/execution/run-cancellation.ts");
+    // 1. The Run store owns the durable pause and resume writes; the one service outside it that calls them is the control service.
+    expect(namers(/runs\.(pause|resume)\(/, ["server/src/persistence/stores/runs.ts"])).toEqual(["server/src/execution/run-control.ts"]);
+    // 2. Interruption is delivery through the executor alone; only the control service asks for it, and only after its transaction committed.
+    expect(namers(/\.interruptRun\(/, ["server/src/execution/attempt-executor.ts"])).toEqual(["server/src/execution/run-control.ts"]);
+    expect(control).toMatch(/const committed = ctx\.tx\.write\([\s\S]*?\);\s*\n[\s\S]*?executor\.interruptRun\(runId, "cancelled"\)/);
+    expect(control).toMatch(/never runs inside a transaction/);
+    // 3. Cancelled work converges through one shared settlement, called by the cancelling transaction, the finalizing executor, and recovery.
+    expect(namers(/settleCancelledRunWork\(/, ["server/src/execution/run-cancellation.ts", "server/src/execution/index.ts"])).toEqual(["server/src/execution/attempt-executor.ts", "server/src/execution/recovery-service.ts", "server/src/execution/run-control.ts"]);
+    // 4. One admission rule: the core helper is what every mutation boundary revalidates; no boundary re-derives it from a status list of its own.
+    const admitters = namers(/\brunAdmitsNewWork\(/);
+    for (const file of ["server/src/execution/attempt-executor.ts", "server/src/execution/completion.ts", "server/src/execution/join.ts", "server/src/execution/patterns/root.ts", "server/src/execution/patterns/support.ts", "server/src/execution/scheduler.ts"]) expect(admitters, file).toContain(file);
+    expect(read("server/src/execution/invocation-preparation-service.ts")).toMatch(/run\.operatorPause !== null/);
+    expect(namers(/\brunAdmitsExecution\(/)).toEqual(["server/src/execution/runtime-tools.ts"]);
+    expect(namers(/\brunExecutionInterruptionOf\(/)).toEqual(["server/src/execution/attempt-executor.ts", "server/src/execution/tool-call-authorization.ts"]);
+    expect(namers(/\brunIsRunningOrDraining\(/)).toEqual(["server/src/execution/completion-requests.ts", "server/src/execution/decision-requests.ts", "server/src/persistence/stores/completion-requests.ts"]);
+    expect(read("server/src/execution/scheduler.ts")).toMatch(/run\.operatorPause !== null\) \{/);
+    expect(read("server/src/execution/scheduler.ts")).toMatch(/run\.waitReason !== "operator" && actions\.length > 0\) actions\.unshift\(\{ kind: "resume_run"/);
+    // 5. No permanent paused status, no second wait vocabulary, no compatibility mechanism, no timer, no polling, no messaging, no provider persistence, no scheduler driving from control.
+    const core = fs.readFileSync(path.join(repoRoot, "core/src/runs.ts"), "utf8");
+    expect(core).toMatch(/OPERATOR_PAUSE_MODES = \["soft", "hard"\] as const/);
+    expect(core).not.toMatch(/"paused"/);
+    expect(fs.readFileSync(path.join(repoRoot, "server/src/persistence/migrations/0000_orchestration_core.sql"), "utf8")).toMatch(/CONSTRAINT "runs_operator_wait_is_pause"/);
+    for (const [file, text] of [["server/src/execution/run-control.ts", control], ["server/src/execution/run-cancellation.ts", cancellation]] as const) {
+      expect(text, file).not.toMatch(/setTimeout|setInterval|setImmediate|Date\.now|\bscheduler\b|advanceRun|reconcileRun|conversations\.|postMessage|TRANSCRIPT_MEDIA_TYPE|transcript|continuation|\bprovider\b|\badapter\b|journal\.read\(/);
+      expect(text, file).not.toMatch(/\b(legacy|compat\w*|fallback\b|shim|deprecated|feature.?flag|v2|force)\b/i);
+      expect(importsOf(path.join(repoRoot, file)).some((s) => resolvesInto(path.join(repoRoot, file), s, "server/src/provider") || /provider|adapter|sdk/i.test(s)), file).toBe(false);
+    }
+    // 6. Not an agent tool and not wired to any route yet: the closed runtime-tool set names no control tool, and no legacy module reaches the service.
+    expect(fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8")).not.toMatch(/cancel_run|pause_run|resume_run|run_control/);
+    const callers = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.startsWith(path.join(repoRoot, "server", "src", "execution"))).filter((f) => /RunControlService|run-control\.ts/.test(fs.readFileSync(f, "utf8"))).map(rel);
+    expect(callers).toEqual([]);
+  });
+
   it("legacy code imports neither core nor the new persistence boundary", () => {
     for (const file of legacyFiles) {
       for (const specifier of importsOf(file)) {

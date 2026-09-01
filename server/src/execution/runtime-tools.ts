@@ -40,6 +40,7 @@ import {
   isRuntimeToolReadTool,
   NotFoundError,
   patternPositionKey,
+  runAdmitsExecution,
   runtimeToolCallMaxBytes,
   runtimeToolCallRequestSchema,
   type AttemptId,
@@ -213,6 +214,9 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
         if (invocation.status !== "running" || INVOCATION_MACHINE.isTerminal(invocation.status) || attempt.invocationId !== invocation.id || attempt.status !== "running") {
           return { kind: "rejected", tool: mutating, reasons: [{ code: "caller_not_running", message: `Invocation ${invocation.id} is ${invocation.status} and Attempt ${attempt.id} is ${attempt.status}`, path: null }] };
         }
+        // A cancelled or hard-paused Run accepts no further runtime mutation from its Attempts (execution-model §14); the replay above still answers a committed call.
+        const run = this.#stores.runs.get(invocation.runId);
+        if (!runAdmitsExecution(run)) return { kind: "rejected", tool: mutating, reasons: [{ code: "run_not_executing", message: `Run ${run.id} is ${run.status}${run.operatorPause === null ? "" : ` and paused (${run.operatorPause})`}; no runtime-tool call is accepted from a cancelled or hard-paused Run`, path: null }] };
         // An accepted blocking request ended the logical turn: nothing else of the turn is executed, and a different request is refused.
         const blocking = turn.flatMap((id) => this.#stores.runtimeToolCalls.listByInvocation(id)).find((c) => c.tool === "request_decision");
         if (blocking !== undefined) {
@@ -265,6 +269,8 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
       if (invocation.status !== "running" || attempt.invocationId !== invocation.id || attempt.status !== "running") {
         return { kind: "rejected", tool, reasons: [{ code: "caller_not_running", message: `Invocation ${invocation.id} is ${invocation.status} and Attempt ${attempt.id} is ${attempt.status}`, path: null }] };
       }
+      const run = this.#stores.runs.get(invocation.runId);
+      if (!runAdmitsExecution(run)) return { kind: "rejected", tool, reasons: [{ code: "run_not_executing", message: `Run ${run.id} is ${run.status}${run.operatorPause === null ? "" : ` and paused (${run.operatorPause})`}; no runtime-tool call is accepted from a cancelled or hard-paused Run`, path: null }] };
       const blocking = turn.flatMap((id) => this.#stores.runtimeToolCalls.listByInvocation(id)).find((c) => c.tool === "request_decision");
       if (blocking !== undefined) {
         return { kind: "rejected", tool, reasons: [{ code: "turn_ended", message: `the logical turn ended on an accepted request_decision (${blocking.id}); no further call is executed`, path: null }] };
@@ -272,7 +278,6 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
       const node = this.#stores.plans.getNode(invocation.planNodeId);
       if (node.kind !== "pattern") throw new Error(`PlanNode ${node.id} is a join node`);
       const manifest = this.#stores.invocations.getManifest(invocation.id);
-      const run = this.#stores.runs.get(invocation.runId);
       const result = this.#reads.read({ run, node, invocation, manifest, turnInvocationIds: turn }, request);
       return { kind: "read", tool, result };
     } catch (error) {
