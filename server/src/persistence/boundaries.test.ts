@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider"];
+const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state"];
 const LEGACY_SOURCE_DIRS = ["shared/src", "server/src", "web/src", "server/scripts", "server/evals"];
 
 function listFiles(dir: string, filter: (file: string) => boolean): string[] {
@@ -170,6 +170,29 @@ describe("import boundaries", () => {
     }
   });
 
+  it("the Workspace providers depend only on core, Node built-ins, the execution port contracts (as types), and themselves: no persistence, database, Blob Store, provider, or execution service", () => {
+    const files = listFiles("server/src/workspace-state", isCode);
+    expect(files.length).toBeGreaterThan(5);
+    for (const file of files) {
+      const isTest = file.endsWith(".test.ts") || file.endsWith("test-support.ts");
+      const source = fs.readFileSync(file, "utf8");
+      for (const specifier of importsOf(file)) {
+        if (isTest && specifier === "vitest") continue;
+        const portContract = resolvesInto(file, specifier, "server/src/execution/ports") && source.split(/\r?\n/).filter((line) => /^\s*(import|export)\b/.test(line) && line.includes(specifier)).every((line) => /^(import type|export type) /.test(line));
+        const allowed = specifier === "@agentique-console/core" || specifier.startsWith("node:") || resolvesInto(file, specifier, "server/src/workspace-state") || portContract;
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+      }
+      if (isTest) continue;
+      // No persistence, database, or Blob Store reaches a Workspace provider; content arrives only through the content source capability.
+      expect(source, rel(file)).not.toMatch(/PersistenceContext|\bStores\b|ArtifactStore|BlobStore|better-sqlite3|drizzle|storageKey|journal|\btx\b/);
+      // No timer, interval, or sleep of the runtime's own, except the check runner's one process-bound deadline timer (cleared on exit; it ends the process tree while the shell is alive).
+      if (!file.endsWith("checks.ts")) expect(source, rel(file)).not.toMatch(/setTimeout|setInterval|setImmediate|sleep\(/);
+      else expect(source.split("setTimeout").length - 1, rel(file)).toBe(1);
+      // Nothing force-updates a ref.
+      expect(source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""), rel(file)).not.toMatch(/--force-with-lease|push\b.*--force|update-ref.*--no-deref.*-f\b|"--force"(?!,\s*(owned|worktreePath))/);
+    }
+  });
+
   it("the scheduler, join settler, and Pattern runners import nothing legacy, poll nothing, and implement only the supported Patterns", () => {
     const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts"), path.join(repoRoot, "server/src/execution/gates.ts"), path.join(repoRoot, "server/src/execution/invocation-facts.ts"), path.join(repoRoot, "server/src/execution/patterns/root.ts"), path.join(repoRoot, "server/src/execution/completion.ts"), path.join(repoRoot, "server/src/execution/completion-requests.ts"), path.join(repoRoot, "server/src/execution/requirement-derivation.ts"), path.join(repoRoot, "server/src/execution/signoff.ts")];
     expect(files.length).toBeGreaterThan(5);
@@ -314,7 +337,8 @@ describe("import boundaries", () => {
     expect(service).toMatch(/never run inside a transaction/);
     // Only the publication service drives the port and the Publication lifecycle (outside stores, tests, and test support).
     const drivers = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.endsWith("stores/publications.ts")).filter((f) => /publications\.(create|transition|recordStagingReleased)\(|PublicationWorkspacePort/.test(strip(fs.readFileSync(f, "utf8")))).map(rel).sort();
-    expect(drivers).toEqual(["server/src/execution/index.ts", "server/src/execution/ports/publication-workspace.ts", "server/src/execution/publication.ts"]);
+    // The production Workspace providers implement the port; nothing else outside the service drives a Publication.
+    expect(drivers).toEqual(["server/src/execution/index.ts", "server/src/execution/ports/publication-workspace.ts", "server/src/execution/publication.ts", "server/src/workspace-state/index.ts", "server/src/workspace-state/publish.ts"]);
     // No provider code names a Target, a Publication, or a publish strategy: no Invocation or provider-model adapter can modify the Target.
     for (const file of listFiles("server/src/provider", isCode)) {
       expect(strip(fs.readFileSync(file, "utf8")), rel(file)).not.toMatch(/\bpublication\b|\bpublish\b|fast_forward|targetBefore|PublicationWorkspace/i);
