@@ -121,7 +121,7 @@ export const RUNTIME_TOOL_DESCRIPTIONS: Readonly<Record<ExecutableRuntimeTool, s
   create_tasks: "Create Run-level Tasks for the source Execution Plan to bind (root Orchestrator only); the runtime pins Requirement scope and identity.",
   record_decision: "Record a choice you made yourself, with the options you considered and your rationale, as a resolved orchestrator_choice Decision.",
   propose_requirements: "Propose a complete Requirement tree with rationale for the operator to approve, edit, or reject; nothing changes until the operator resolves it.",
-  revise_execution_plan: "Submit a complete source Execution Plan; the runtime compiles it and records the accepted revision or the typed rejection.",
+  revise_execution_plan: "Submit the complete source Execution Plan once; the runtime compiles it and records the accepted revision (then return your result and let the runtime run the nodes) or reports the typed rejection to fix.",
 });
 
 const RETURN_RESULT_DESCRIPTION = "Return the typed result of this Attempt exactly once, then stop.";

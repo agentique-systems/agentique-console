@@ -128,7 +128,7 @@ export async function verifyCodingRun(options: CodingRunVerificationOptions): Pr
       continuations: { root: path.join(directory, "state", "continuations"), ttlMs: null },
       stateRoot: path.join(directory, "state"),
       provider: { sdk: options.sdk, continuation: true, limits: { maxTurns: 60 }, fallbackWorkingDirectory: path.join(directory, "fallback") },
-      agents: { model: options.model, effort: options.effort, maxContextOccupancy: 0.8, allocation: { costUsd: 3, tokens: 400_000, attempts: 3 }, orchestratorAllocation: { costUsd: 3, tokens: 400_000, attempts: 6 }, maxWallClockMs: 900_000 },
+      agents: { model: options.model, effort: options.effort, maxContextOccupancy: 0.8, allocation: { costUsd: 3, tokens: 600_000, attempts: 3 }, orchestratorAllocation: { costUsd: 6, tokens: 1_500_000, attempts: 6 }, maxWallClockMs: 900_000 },
       governor: { providers: { claude: { maxConcurrency: 2 } }, maxProcessConcurrency: 3, maxWorktrees: null },
       output: (chunk) => log(`[${chunk.attemptId}] ${chunk.kind}: ${chunk.text.slice(0, 200)}`),
     });
@@ -153,9 +153,10 @@ export async function verifyCodingRun(options: CodingRunVerificationOptions): Pr
       conversationId: conversation.id,
       kind: "code",
       target: { kind: "branch", branch: "main" },
-      budget: { maxCostUsd: 20, maxTokens: 4_000_000, maxAttempts: 30, maxWallClockMs: null, maxConcurrency: 2 },
+      budget: { maxCostUsd: 40, maxTokens: 8_000_000, maxAttempts: 40, maxWallClockMs: null, maxConcurrency: 2 },
       orchestratorAgentDefinitionRevisionId: runtime.agents.builtins.orchestrator.id,
-      finalReserve: { costUsd: 4, tokens: 500_000, attempts: 6 },
+      // The final reserve funds the read-only synthesis turn: at least one Orchestrator allocation.
+      finalReserve: { costUsd: 8, tokens: 2_000_000, attempts: 8 },
       verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, runCompletionAcceptanceCriterionIds: [criterion.id] },
     });
     runId = created.run.id;
@@ -166,8 +167,8 @@ export async function verifyCodingRun(options: CodingRunVerificationOptions): Pr
       author: "operator",
       content: [
         "Add a `--version` flag to the CLI in src/cli.js that prints the version from package.json and exits 0.",
-        `Plan exactly one single node that runs the Workspace Agent Definition revision ${implementerFile.revisionId} (the implementer) with an allocation of 3 USD, 400000 tokens, 3 attempts, then return your result.`,
-        "When the node's result arrives, request completion if it succeeded; the completion check is `node test.js`.",
+        `Plan exactly one single node that runs the Workspace Agent Definition revision ${implementerFile.revisionId} (the implementer) with an allocation of 3 USD, 600000 tokens, 3 attempts: call revise_execution_plan once with { version: 1, expressions: [{ pattern: "single", title: "Add --version", operation: { agentDefinitionRevisionId: "${implementerFile.revisionId}", title: "Implement --version" }, allocation: { costUsd: 3, tokens: 600000, attempts: 3 } }] }, then return your result at once. Create no Tasks.`,
+        "When the node's result arrives in your next turn and it succeeded, call request_completion and return; the completion check is `node test.js`.",
       ].join("\n"),
       runId,
       invocationId: null,

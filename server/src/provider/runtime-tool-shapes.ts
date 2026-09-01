@@ -146,7 +146,17 @@ export const RUNTIME_TOOL_INPUT_SHAPES: Readonly<Record<ExecutableRuntimeTool, R
     rationale: z.string().min(1).max(REQUIREMENT_PROPOSAL_BOUNDS.rationaleMaxBytes),
   },
   revise_execution_plan: {
-    source: z.record(z.string(), z.unknown()).describe("the complete source Execution Plan object ({ version: 1, expressions: { ... } }); the runtime compiles and validates it"),
+    source: z
+      .record(z.string(), z.unknown())
+      .describe(
+        [
+          "the complete source Execution Plan, replacing the current one: { version: 1, expressions: [ ...Pattern expressions in dependency order ] }.",
+          'A single node: { pattern: "single", title?: string, operation: { agentDefinitionRevisionId: "agdr_...", title?: string }, allocation: { costUsd, tokens, attempts } }.',
+          'Other Patterns: { pattern: "chain", steps: [expressions] }, { pattern: "parallel", items: [expressions], aggregate?: operation, requireAll?: boolean }, { pattern: "route", selector: { kind: "evaluator", agentDefinitionRevisionId } | { kind: "decision_answer", decisionId, labelsByOptionId }, branches: { label: expression } }, { pattern: "coordinator_worker", coordinator: operation, worker: operation, bounds?: { maxTasks, maxConcurrentWorkers, maxCoordinatorInvocations } }, { pattern: "evaluator_optimizer", producer: expression, evaluator: operation, maxRounds }.',
+          "Every expression may carry allocation, title, scope ({ requirementRootIds, requirementRevisionId }), limits, onAllocationExhausted, gateAcceptanceCriterionIds. Agent Definition revision ids come from read_agent_definitions.",
+          "The result reports accepted with the revision number, or accepted: false with the compiler's typed reasons; fix the source and call again only on a rejection.",
+        ].join(" "),
+      ),
   },
   request_completion: {},
   request_decision: {
