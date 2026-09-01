@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state"];
+const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents"];
 const LEGACY_SOURCE_DIRS = ["shared/src", "server/src", "web/src", "server/scripts", "server/evals"];
 
 function listFiles(dir: string, filter: (file: string) => boolean): string[] {
@@ -190,6 +190,30 @@ describe("import boundaries", () => {
       else expect(source.split("setTimeout").length - 1, rel(file)).toBe(1);
       // Nothing force-updates a ref.
       expect(source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""), rel(file)).not.toMatch(/--force-with-lease|push\b.*--force|update-ref.*--no-deref.*-f\b|"--force"(?!,\s*(owned|worktreePath))/);
+    }
+  });
+
+  it("the Agent Definition layer depends only on core, the YAML parser, Node built-ins, the persistence stores, the Workspace mechanics, the native tool classification, and itself; it never revives an overlay, a trust flag, or a bundle", () => {
+    const files = listFiles("server/src/agents", isCode);
+    expect(files.length).toBeGreaterThan(3);
+    for (const file of files) {
+      const isTest = file.endsWith(".test.ts") || file.endsWith("test-support.ts");
+      for (const specifier of importsOf(file)) {
+        if (isTest && (specifier === "vitest" || resolvesInto(file, specifier, "server/src/execution"))) continue;
+        const allowed =
+          specifier === "@agentique-console/core" ||
+          specifier === "yaml" ||
+          specifier.startsWith("node:") ||
+          resolvesInto(file, specifier, "server/src/agents") ||
+          resolvesInto(file, specifier, "server/src/persistence") ||
+          resolvesInto(file, specifier, "server/src/workspace-state") ||
+          rel(path.resolve(path.dirname(file), specifier)) === "server/src/provider/native-tools.ts";
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+      }
+      if (isTest) continue;
+      const source = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      // No overlay, sidecar, bundle, minted variant, or trust mechanism; no live-directory read of a definition file.
+      expect(source, rel(file)).not.toMatch(/overlay|sidecar|bundle|mint|readFileSync\(.*agents|readdirSync/i);
     }
   });
 
