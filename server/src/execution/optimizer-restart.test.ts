@@ -243,11 +243,12 @@ describe("evaluator_optimizer restart", () => {
         const before = work(h, w);
         const outcome = await h.scheduler.advanceRun(w.runId);
         expect(outcome).toMatchObject({ stop: "quiescent", failure: null });
-        expect(h.provider.requests).toHaveLength(0);
+        // Only the ended node's result reaches the Orchestrator as one node_result turn (execution-model §4.6).
+        expect(h.provider.requests.map((r) => h.stores.invocations.get(h.stores.invocations.getAttempt(r.attemptId).invocationId).purpose)).toEqual(["node_result"]);
         expect(statusOf(h, w.nodeId)).toBe("succeeded");
         expect(verdictsOf(h, w.nodeId).map((v) => [optimizerRoundOf(v), v.verdict])).toEqual([[1, "fail"], [2, "pass"]]);
         expect(criterionEvaluationsOf(h, w.nodeId, 2).map((e) => e.producedBy.kind).sort()).toEqual(["evaluator", "runtime", "runtime"]);
-        expect(work(h, w)).toMatchObject({ ...before, verdicts: 2, criterionEvaluations: 5, events: work(h, w).events });
+        expect(work(h, w)).toMatchObject({ ...before, invocations: before.invocations + 1, attempts: before.attempts + 1, integrated: before.integrated + 1, verdicts: 2, criterionEvaluations: 5, events: work(h, w).events });
         expect(h.stores.plans.getNode(w.nodeId).outputArtifactIds).toEqual(producersOf(h, w.nodeId)[2]!.result!.artifactIds);
       });
       await withProcess(w, async (h) => {
@@ -326,7 +327,8 @@ describe("evaluator_optimizer restart", () => {
         expect([statusOf(h, p(3)), statusOf(h, e(3)), statusOf(h, next)]).toEqual(["skipped", "skipped", "succeeded"]);
         expect(h.stores.invocations.getManifest(h.stores.invocations.listByPlanNode(next)[0]!.id).content.handoffs.map((x) => x.artifactIds)).toEqual([h.stores.plans.getNode(e(2)).outputArtifactIds]);
         // The successor's sequence Handoff already existed (created with E2's success); only its Invocation, Attempt, and integration are new.
-        expect(work(h, w)).toMatchObject({ ...before, invocations: before.invocations + 1, attempts: before.attempts + 1, integrated: before.integrated + 1, events: work(h, w).events });
+        // The successor's Invocation, Attempt, and integration, plus the node_result turn of the ended graph.
+        expect(work(h, w)).toMatchObject({ ...before, invocations: before.invocations + 2, attempts: before.attempts + 2, integrated: before.integrated + 2, events: work(h, w).events });
         expect(work(h, w)).toMatchObject({ evaluators: 2, verdicts: 2, criterionEvaluations: 4, commands: 2 });
         expect(h.stores.handoffs.listByRun(w.runId).map((x) => x.handoffKey).filter((k) => k.startsWith("retry:"))).toEqual([`retry:${e(1)}:${p(2)}`]);
       });
@@ -360,7 +362,8 @@ describe("evaluator_optimizer restart", () => {
       await withProcess(f, async (h) => {
         const outcome = await h.scheduler.advanceRun(f.runId);
         expect(outcome).toMatchObject({ stop: "quiescent", failure: null });
-        expect(h.provider.requests).toHaveLength(0);
+        // Only the node_result turn of the failed node reached the provider.
+        expect(h.provider.requests.map((r) => h.stores.invocations.get(h.stores.invocations.getAttempt(r.attemptId).invocationId).purpose)).toEqual(["node_result"]);
         expect(verdictsOf(h, e1).map((v) => v.verdict)).toEqual(["fail"]);
         expect([statusOf(h, e1), statusOf(h, next)]).toEqual(["failed", "skipped"]);
         expect(h.ctx.journal.read({ runId: f.runId, type: "plan_node.failed" }).map((x) => x.payload)).toEqual([expect.objectContaining({ reason: "optimizer_rounds_exhausted" })]);

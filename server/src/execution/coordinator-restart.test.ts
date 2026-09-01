@@ -196,10 +196,12 @@ describe("coordinator_worker restart", () => {
         const before = work(h, w);
         const outcome = await h.scheduler.advanceRun(w.runId);
         expect(outcome.stop).toBe("quiescent");
-        expect(h.provider.requests).toHaveLength(0);
+        // Only the ended node's result reaches the Orchestrator as one node_result turn (execution-model §4.6); the Coordinator node itself repeats nothing.
+        expect(h.provider.requests.map((r) => h.stores.invocations.get(h.stores.invocations.getAttempt(r.attemptId).invocationId).purpose)).toEqual(["node_result"]);
         expect(h.stores.plans.getNode(w.nodeId)).toMatchObject({ status: "succeeded", outputArtifactIds: [final] });
-        expect(work(h, w)).toEqual({ ...before, integrated: before.integrated + 1 });
-        expect(work(h, w)).toMatchObject({ proposals: 1, calls: 1, tasks: 2, dependencies: 1, workers: 2, turns: 2, handoffs: 2, integrated: 5 });
+        // The synthesis integrated and the node_result turn ran and integrated: one Attempt and two integrations beyond `before`.
+        expect(work(h, w)).toEqual({ ...before, attempts: before.attempts + 1, integrated: before.integrated + 2 });
+        expect(work(h, w)).toMatchObject({ proposals: 1, calls: 1, tasks: 2, dependencies: 1, workers: 2, turns: 2, handoffs: 2, integrated: 6 });
         // Worker manifests and Handoffs read back from rows; no transcript was consulted (the fake wrote transcripts, nobody read them).
         expect(h.stores.changesets.listByRun(w.runId).every((c) => c.integrationStatus === "integrated")).toBe(true);
       });

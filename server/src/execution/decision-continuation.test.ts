@@ -155,7 +155,8 @@ describe("continuation after a requested Decision", () => {
       // The Task's history: running under the first Worker, blocked on the Decision, running under the successor, completed.
       expect(h.stores.invocations.listByPlanNode(scoped.node.id).filter((i) => i.role === "worker")).toHaveLength(2);
       expect(h.stores.plans.getNode(scoped.node.id).status).toBe("succeeded");
-      expect(rootTurns()).toBe(rootTurnsBefore);
+      // No relay of the Decision: the one extra root turn is the node_result turn of the succeeded node (the ended node's result reaches the Orchestrator as one node_result turn (execution-model §4.6)).
+      expect(rootTurns()).toBe(rootTurnsBefore + 1);
     } finally {
       h.close();
     }

@@ -121,7 +121,7 @@ describe("root Orchestrator continuation", () => {
       expect(content.inputs[0]).toEqual(h.stores.invocations.getManifest(blocked.id).content.inputs[0]);
       expect(h.stores.tasks.get(task.id)).toMatchObject({ status: "running", invocationId: successor.id });
       await drain(h, runId);
-      expect(rootTurnsOf(h, runId).map((t) => [t.purpose, t.status])).toEqual([["operator_input", "succeeded"], ["gate_result", "blocked"], ["gate_result", "succeeded"]]);
+      expect(rootTurnsOf(h, runId).map((t) => [t.purpose, t.status])).toEqual([["operator_input", "succeeded"], ["gate_result", "blocked"], ["gate_result", "succeeded"], ["node_result", "succeeded"]]);
       expect(h.stores.tasks.get(task.id).status).toBe("completed");
       expect(gatesOf(h, node.id).map((g) => g.status)).toEqual(["failed", "passed"]);
       expect(h.stores.plans.getNode(node.id).status).toBe("succeeded");
@@ -420,7 +420,8 @@ describe("coordinator_worker continuation", () => {
       expect(synthesizeContent.inputs.filter((x) => x.kind === "coordinator_turn")).toHaveLength(1);
       expect(turnsOf(h, node).map((t) => [t.purpose, t.status, turnInput(t).turnsUsed])).toEqual([["decompose", "succeeded", 1], ["replan", "blocked", 2], ["replan", "succeeded", 2], ["synthesize", "blocked", 3], ["synthesize", "succeeded", 3]]);
       expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "succeeded", outputArtifactIds: [final.artifactId] });
-      expect(rootTurns()).toBe(1);
+      // No relay: the one further root turn is the node_result turn of the succeeded node (the ended node's result reaches the Orchestrator as one node_result turn (execution-model §4.6)).
+      expect(rootTurns()).toBe(2);
     } finally {
       h.close();
     }

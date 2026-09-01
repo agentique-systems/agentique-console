@@ -51,7 +51,7 @@ describe("evaluate-only evaluator_optimizer nodes and retry edges", () => {
       expect(manifest.handoffs.map((x) => x.source)).toEqual([{ kind: "plan_node", planNodeId: producer(1).id }]);
       // Deterministic checks ran on the Snapshot that holds every producer Changeset (both chain steps integrated first).
       expect(h.criterionExecution.observed.map((o) => [o.round, o.snapshot])).toEqual([[1, h.stores.snapshots.get(snapshotId).identity]]);
-      expect(h.stores.changesets.listByRun(s.created.run.id).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated", "integrated", "integrated"]);
+      expect(h.stores.changesets.listByRun(s.created.run.id).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated", "integrated", "integrated", "integrated"]);
       const verdict = verdictsOf(h, e1);
       expect(verdict).toHaveLength(1);
       expect(verdict[0]).toMatchObject({ context: { kind: "optimizer_verdict", round: 1, maxRounds: 3 }, verdict: "pass", artifactIds: chainOutput, snapshotId });
@@ -66,7 +66,8 @@ describe("evaluate-only evaluator_optimizer nodes and retry edges", () => {
       // Nothing ran for the skipped rounds; nothing was evaluated twice; no Gate exists.
       expect(h.stores.invocations.listByPlanNode(producer(2).id)).toEqual([]);
       expect(h.stores.gates.listByRun(s.created.run.id)).toEqual([]);
-      expect(h.provider.requests).toHaveLength(5);
+      // Four Pattern Invocations, the root's first turn, and the node_result turn of the ended graph.
+      expect(h.provider.requests).toHaveLength(6);
     } finally {
       h.close();
     }

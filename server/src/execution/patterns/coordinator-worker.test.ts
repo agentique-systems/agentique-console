@@ -71,7 +71,7 @@ describe("CoordinatorWorkerPatternRunner", () => {
       expect(h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(workers[0]!.id)[0]!.id)!.runtimeTools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "update_task", "request_decision", "write_artifact"]);
       // Integration in canonical Task order; each integrated result handed off exactly once to the node under its stable key.
       const byChangeset = new Map(h.stores.changesets.listByRun(runId).map((c) => [c.id, c.invocationId] as const));
-      expect(h.integrationWorkspace.requests.map((r) => byChangeset.get(r.changesetId))).toEqual([s.invocation.id, turns[0]!.id, workers[0]!.id, workers[1]!.id, turns[1]!.id]);
+      expect(h.integrationWorkspace.requests.map((r) => byChangeset.get(r.changesetId))).toEqual([s.invocation.id, turns[0]!.id, workers[0]!.id, workers[1]!.id, turns[1]!.id, h.stores.invocations.listAtPosition(s.created.root.id, "orchestrator")[1]!.id]);
       const handoffs = h.stores.handoffs.listByRun(runId);
       expect(handoffs.map((x) => [x.handoffKey, x.source, x.taskIds, x.artifactIds, x.summary, x.status])).toEqual([
         [`worker_result:${node.id}:${a.id}`, { kind: "invocation", invocationId: workers[0]!.id }, [a.id], [h.stores.tasks.get(a.id).outputArtifactIds[0]], "a done", "delivered"],
@@ -89,7 +89,8 @@ describe("CoordinatorWorkerPatternRunner", () => {
       expect(h.stores.changesets.listByRun(runId).every((c) => c.integrationStatus === "integrated")).toBe(true);
       // No narrative anywhere, and routine Task progress created no Coordinator turn.
       expect(h.stores.conversations.listMessages(s.created.run.conversationId)).toHaveLength(messages);
-      expect(h.provider.requests).toHaveLength(5);
+      // The root's first turn, two Coordinator turns, two Workers, and the node_result turn of the ended node.
+      expect(h.provider.requests).toHaveLength(6);
       expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "quiescent", actions: [] });
     } finally {
       h.close();
@@ -154,7 +155,7 @@ describe("CoordinatorWorkerPatternRunner", () => {
       const workers = workersOf(h, node);
       const byChangeset = new Map(h.stores.changesets.listByRun(runId).map((c) => [c.id, c.invocationId] as const));
       // Integration order: a, b, c — the canonical Task order — never b first.
-      expect(h.integrationWorkspace.requests.map((r) => byChangeset.get(r.changesetId))).toEqual([s.invocation.id, turnsOf(h, node)[0]!.id, workers[0]!.id, workers[1]!.id, workers[2]!.id, turnsOf(h, node)[1]!.id]);
+      expect(h.integrationWorkspace.requests.map((r) => byChangeset.get(r.changesetId))).toEqual([s.invocation.id, turnsOf(h, node)[0]!.id, workers[0]!.id, workers[1]!.id, workers[2]!.id, turnsOf(h, node)[1]!.id, h.stores.invocations.listAtPosition(s.created.root.id, "orchestrator")[1]!.id]);
       expect(h.stores.handoffs.listByRun(runId).map((x) => x.handoffKey)).toEqual(tasks.map((t) => `worker_result:${node.id}:${t.id}`));
       expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "succeeded", outputArtifactIds: [final.artifactId] });
       // Only two Coordinator turns ever existed: no turn was spent on routine completion.
@@ -363,10 +364,10 @@ describe("CoordinatorWorkerPatternRunner", () => {
       expect(h.stores.changesets.listByRun(runId).every((c) => c.integrationStatus === "integrated")).toBe(true);
       expect(turnsOf(h, node).map((t) => t.purpose)).toEqual(["decompose", "synthesize"]);
       const [gate] = h.stores.gates.listByPlanNode(node.id);
-      expect(gate).toMatchObject({ status: "passed", ordinal: 1, candidateArtifactIds: [final.artifactId], snapshotId: h.stores.runs.get(runId).integrationSnapshotId });
+      expect(gate).toMatchObject({ status: "passed", ordinal: 1, candidateArtifactIds: [final.artifactId], snapshotId: h.stores.snapshots.listByRun(runId).filter((x) => x.reason === "integration").at(-2)!.id });
       expect(h.criterionExecution.observed.map((o) => [o.acceptanceCriterionId, o.gateId])).toEqual([[criterion.id, gate!.id]]);
       expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "quiescent", actions: [] });
-      expect(h.provider.requests).toHaveLength(4);
+      expect(h.provider.requests).toHaveLength(5);
     } finally {
       h.close();
     }

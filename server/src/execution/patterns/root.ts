@@ -53,7 +53,8 @@ import {
   type ManifestInput,
   type OrchestratorInputId,
   type PatternPlanNode,
-  type QueuedOrchestratorInput,
+  type PlanNode,
+  type PlanNodeId,
   type RunId,
   type Task,
   type TaskId,
@@ -78,8 +79,12 @@ export type RootAdvice =
   | { kind: "blocked"; invocationId: InvocationId; decisionId: DecisionId }
   /** The root is idle and these remediation Tasks of failed node_exit Gates await one batched `gate_result` turn; `funded` says the root can fund it now — directly or through the Allocation Extension its `extend` policy admits. */
   | { kind: "remediate"; taskIds: TaskId[]; funded: boolean }
-  /** The root is idle and typed inputs are queued for the Orchestrator (operator steering, operator resolutions; execution-model §4.6); `funded` as for `remediate`. */
-  | { kind: "prepare_turn"; inputIds: OrchestratorInputId[]; funded: boolean }
+  /**
+   * The root is idle and the Orchestrator has input to act on (execution-model §4.6): queued typed inputs (operator steering,
+   * operator resolutions) and the results of current nodes that ended without any Orchestrator turn having received them;
+   * `funded` as for `remediate`.
+   */
+  | { kind: "prepare_turn"; inputIds: OrchestratorInputId[]; nodeIds: PlanNodeId[]; funded: boolean }
   | { kind: "run_terminal" };
 
 export type RootOutcome =
@@ -91,8 +96,8 @@ export type RootOutcome =
   | { kind: "remediation_prepared"; invocationId: InvocationId; taskIds: TaskId[] }
   /** The `gate_result` turn's Tasks ended: addressed (`completed`) after a completed turn, or ended (`failed`/`cancelled`) after a turn that did not complete. */
   | { kind: "remediation_settled"; invocationId: InvocationId; completed: TaskId[]; ended: TaskId[] }
-  /** One Orchestrator turn was prepared delivering these queued root inputs, now marked delivered by it. */
-  | { kind: "turn_prepared"; invocationId: InvocationId; inputIds: OrchestratorInputId[] }
+  /** One Orchestrator turn was prepared delivering these queued root inputs (now marked delivered by it) and these nodes' results. */
+  | { kind: "turn_prepared"; invocationId: InvocationId; inputIds: OrchestratorInputId[]; nodeIds: PlanNodeId[] }
   /** The root's effective allocation cannot fund the turn and no Allocation Extension fits the Run's effective ordinary capacity: nothing was written; the Run waits with reason `budget` until a Budget Increase is approved. */
   | { kind: "unfunded" }
   | { kind: "no_change" };
@@ -176,10 +181,30 @@ export class RootNodeSupport {
   private idle(runId: RunId, invocationId: InvocationId | null): RootAdvice {
     if (this.rootOf(runId).status !== "running") return { kind: "idle", invocationId };
     const queued = this.deps.stores.orchestratorInputs.pending(runId);
-    if (queued.length > 0) return { kind: "prepare_turn", inputIds: queued.map((q) => q.id), funded: this.funded(runId) };
+    const ended = this.pendingNodeResults(runId);
+    if (queued.length > 0 || ended.length > 0) return { kind: "prepare_turn", inputIds: queued.map((q) => q.id), nodeIds: ended.map((n) => n.id), funded: this.funded(runId) };
     const pending = this.pendingRemediations(runId);
     if (pending.length === 0) return { kind: "idle", invocationId };
     return { kind: "remediate", taskIds: pending.map((r) => r.task.id), funded: this.funded(runId) };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Node results (rows only)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The current non-root nodes that ended (succeeded, failed, cancelled, or skipped) and whose result no Orchestrator turn
+   * of the Run has received as a `node_result` input (execution-model §4.6): each becomes one typed input of the next root
+   * turn, exactly once, in membership order. Derived from the current graph and the root turns' manifests alone.
+   */
+  pendingNodeResults(runId: RunId): PlanNode[] {
+    const { stores } = this.deps;
+    const root = this.rootOf(runId);
+    const delivered = new Set<PlanNodeId>();
+    for (const turn of stores.invocations.listAtPosition(root.id, "orchestrator")) {
+      for (const input of stores.invocations.getManifest(turn.id).content.inputs) if (input.kind === "node_result") delivered.add(input.planNodeId);
+    }
+    return stores.plans.currentGraph(runId).nodes.filter((node) => node.id !== root.id && PLAN_NODE_MACHINE.isTerminal(node.status) && !delivered.has(node.id));
   }
 
   // ---------------------------------------------------------------------------
@@ -469,7 +494,9 @@ export class RootNodeSupport {
       const unfunded = this.fund(root, "root_turn", options);
       if (unfunded !== null) return unfunded;
       const queued = stores.orchestratorInputs.pending(runId);
-      const inputs: QueuedOrchestratorInput[] = queued.map((q) => q.input);
+      const ended = this.pendingNodeResults(runId);
+      const results: ManifestInput[] = ended.map((node) => ({ kind: "node_result", planNodeId: node.id, status: node.status, outputArtifactIds: [...(node.outputArtifactIds ?? [])] }));
+      const inputs: ManifestInput[] = [...queued.map((q): ManifestInput => q.input), ...results];
       const latest = this.latestTurn(runId);
       const prepared = preparation.prepare({
         runId,
@@ -481,12 +508,14 @@ export class RootNodeSupport {
         funding: { source: "plan_node" },
         handoffIds: [],
         inputs,
+        // The ended nodes' outputs are listed for the Orchestrator to read; nothing else travels on account of the turn.
+        artifactIds: [...new Set(ended.flatMap((node) => node.outputArtifactIds ?? []))],
         correlationId: options.correlationId ?? null,
         causationSeq: options.causationSeq ?? null,
       });
       const inputIds = queued.map((q) => q.id);
-      stores.orchestratorInputs.markDelivered(inputIds, prepared.invocation.id, { ...options, causationSeq: ctx.journal.lastSeq() });
-      return { kind: "turn_prepared", invocationId: prepared.invocation.id, inputIds };
+      if (inputIds.length > 0) stores.orchestratorInputs.markDelivered(inputIds, prepared.invocation.id, { ...options, causationSeq: ctx.journal.lastSeq() });
+      return { kind: "turn_prepared", invocationId: prepared.invocation.id, inputIds, nodeIds: ended.map((node) => node.id) };
     });
   }
 }

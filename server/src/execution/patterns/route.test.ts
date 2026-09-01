@@ -483,7 +483,8 @@ describe("RoutePatternRunner", () => {
         expect(h.stores.invocations.listByPlanNode(routeId).map((x) => [x.patternPosition?.kind, x.status])).toEqual([["route_selection", "succeeded"], ["route_branch", "succeeded"]]);
         expect(h.stores.plans.getNode(routeId).status).toBe("succeeded");
         expect(h.stores.plans.getNode(afterId).status).toBe("succeeded");
-        expect(h.provider.requests).toHaveLength(2);
+        // The branch, the step after it, and the node_result turn of the ended chain.
+        expect(h.provider.requests).toHaveLength(3);
         h.close();
       }
       {

@@ -107,8 +107,8 @@ export type SchedulerAction =
   | { kind: "settle_root"; invocationId: InvocationId }
   /** Nothing else can proceed: every pending root-owned remediation Task of a failed node_exit Gate goes to one batched `gate_result` Orchestrator turn (execution-model §10). */
   | { kind: "prepare_gate_remediation"; taskIds: TaskId[] }
-  /** The idle root has queued typed inputs (operator steering or resolutions): one Orchestrator turn delivers them (execution-model §4.6). */
-  | { kind: "prepare_root_turn"; inputIds: OrchestratorInputId[] }
+  /** The idle root has input to act on — queued typed inputs (operator steering or resolutions) and ended nodes' results: one Orchestrator turn delivers them (execution-model §4.6). */
+  | { kind: "prepare_root_turn"; inputIds: OrchestratorInputId[]; nodeIds: PlanNodeId[] }
   /** The latest `gate_result` turn ended: its Changeset is integrated and its remediation Tasks are addressed or ended. */
   | { kind: "settle_gate_remediation"; invocationId: InvocationId }
   /** The requesting root turn settled: the Run enters `verifying` and the `run_completion` Gate opens (execution-model §10). */
@@ -271,6 +271,7 @@ export class RunScheduler {
     const inFlight = this.inFlightOf(runId);
     let wakeAt: Timestamp | null = null;
     let remediate: Extract<RootAdvice, { kind: "remediate" }> | null = null;
+    let batchedResultsTurn: Extract<RootAdvice, { kind: "prepare_turn" }> | null = null;
     let active = this.stores.invocations.listActive(runId).length;
     const max = run.budget.maxConcurrency;
     const withinNodeLimit = (node: PlanNode) => node.maxConcurrency === null || this.stores.invocations.listByPlanNode(node.id).filter((i) => !["blocked", "succeeded", "failed", "cancelled"].includes(i.status)).length < node.maxConcurrency;
@@ -314,9 +315,12 @@ export class RunScheduler {
         remediate = rootAdvice;
         break;
       case "prepare_turn":
-        // Queued root inputs make one Orchestrator turn now; an unfundable turn waits on budget like every root turn.
-        if (rootAdvice.funded) actions.push({ kind: "prepare_root_turn", inputIds: rootAdvice.inputIds });
-        else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
+        // Queued operator inputs make one Orchestrator turn now; ended nodes' results alone are batched like remediation, after
+        // every other node had its turn in this pass, so one node_result turn carries every node that ended together. An
+        // unfundable turn waits on budget like every root turn.
+        if (!rootAdvice.funded) waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
+        else if (rootAdvice.inputIds.length > 0) actions.push({ kind: "prepare_root_turn", inputIds: rootAdvice.inputIds, nodeIds: rootAdvice.nodeIds });
+        else batchedResultsTurn = rootAdvice;
         break;
       case "idle":
       case "run_terminal":
@@ -441,6 +445,10 @@ export class RunScheduler {
     if (remediate !== null && actions.length === 0 && inFlight.length === 0 && limited.length === 0) {
       if (remediate.funded) actions.push({ kind: "prepare_gate_remediation", taskIds: remediate.taskIds });
       else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
+    }
+    // Ended nodes' results reach the Orchestrator once nothing else can act: one node_result turn per quiescence point.
+    if (batchedResultsTurn !== null && actions.length === 0 && inFlight.length === 0 && limited.length === 0) {
+      actions.push({ kind: "prepare_root_turn", inputIds: batchedResultsTurn.inputIds, nodeIds: batchedResultsTurn.nodeIds });
     }
 
     // An accepted Completion Request whose requesting turn settled begins (or, when that turn did not complete, ends) once the root is idle

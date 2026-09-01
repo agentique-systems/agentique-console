@@ -66,7 +66,8 @@ describe("RunScheduler", () => {
       const outcome = await pass;
       expect(outcome.stop).toBe("quiescent");
       expect(outcome.failure).toBeNull();
-      expect(outcome.executed).toHaveLength(4);
+      // Three nodes, the root's first turn, and the ended node's result reaches the Orchestrator as one node_result turn (execution-model §4.6).
+      expect(outcome.executed).toHaveLength(5);
       expect(statuses(h, [a, b, c])).toEqual(["succeeded", "succeeded", "succeeded"]);
       expect(h.stores.plans.getNode(s.created.root.id).status).toBe("running");
       // Deterministic order: readiness, starts, and settlements in membership order; waits cleared with their exact reason.
@@ -79,12 +80,12 @@ describe("RunScheduler", () => {
       expect(kinds.indexOf("settle_node:1")).toBeLessThan(kinds.indexOf("settle_node:2"));
       expect(h.ctx.journal.read({ runId: s.created.run.id, type: "plan_node.wait_cleared" })).toHaveLength(2);
       // The root's Changeset was integrated; every worker Changeset too, one integration per Changeset.
-      expect(h.stores.changesets.listByRun(s.created.run.id).map((x) => x.integrationStatus)).toEqual(["integrated", "integrated", "integrated", "integrated"]);
-      expect(h.integrationWorkspace.requests).toHaveLength(4);
+      expect(h.stores.changesets.listByRun(s.created.run.id).map((x) => x.integrationStatus)).toEqual(["integrated", "integrated", "integrated", "integrated", "integrated"]);
+      expect(h.integrationWorkspace.requests).toHaveLength(5);
       expect(h.integrationWorkspace.maxConcurrentByRun.get(s.created.run.id)).toBe(1);
       // No narrative, no status message, no model call for scheduling itself.
       expect(h.stores.conversations.listMessages(s.created.run.conversationId)).toHaveLength(messages);
-      expect(h.provider.requests).toHaveLength(4);
+      expect(h.provider.requests).toHaveLength(5);
       // A further pass is a no-op.
       const again = await h.scheduler.advanceRun(s.created.run.id);
       expect(again).toMatchObject({ stop: "quiescent", actions: [], executed: [] });
@@ -293,7 +294,7 @@ describe("RunScheduler", () => {
       // The Gate is opened, checked (external), and settled by typed actions; nothing is deferred and the node succeeds.
       expect(outcome.stop).toBe("quiescent");
       const kinds = outcome.actions.map((p) => p.action.kind);
-      expect(kinds.slice(kinds.indexOf("open_node_gate"))).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate"]);
+      expect(kinds.slice(kinds.indexOf("open_node_gate"))).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate", "prepare_root_turn", "execute_invocation", "settle_root"]);
       expect(outcome.actions.map((p) => p.outcome.kind)).toEqual(expect.arrayContaining(["gate_opened", "gate_verified", "gate_passed"]));
       expect(g.stores.plans.getNode(nodes[0]!.id).status).toBe("succeeded");
       expect(g.stores.gates.listByPlanNode(nodes[0]!.id).map((x) => [x.ordinal, x.status])).toEqual([[1, "passed"]]);

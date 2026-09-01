@@ -101,8 +101,9 @@ describe("join settlement", () => {
       expect(h.stores.invocations.listByPlanNode(join.id)).toEqual([]);
       expect(h.stores.invocations.listByRun(runId).filter((i) => i.planNodeId === join.id)).toEqual([]);
       expect(h.stores.usage.totalsForPlanNode(join.id).rows).toBe(0);
-      expect(h.stores.usage.totalsForRun(runId).rows).toBe(usageBefore + 4);
-      expect(h.stores.leases.listByRun(runId)).toHaveLength(leasesBefore + 4);
+      // Four source steps and the ended node's result reaches the Orchestrator as one node_result turn (execution-model §4.6); the join itself consumed nothing.
+      expect(h.stores.usage.totalsForRun(runId).rows).toBe(usageBefore + 5);
+      expect(h.stores.leases.listByRun(runId)).toHaveLength(leasesBefore + 5);
       expect(h.stores.reservations.activeForChild({ type: "plan_node", id: join.id })).toBeNull();
       expect(h.ctx.journal.read({ runId, type: "plan_node.started" }).some((e) => e.scope.planNodeId === join.id)).toBe(false);
       // The compiled aggregation received the index through the ordinary sequence Handoff and is the expression's exit.
@@ -256,7 +257,8 @@ describe("join settlement", () => {
         expect(h.stores.artifacts.listByRun(runId).filter((x) => x.mediaType === JOIN_INDEX_MEDIA_TYPE)).toHaveLength(1);
         expect(h.stores.handoffs.listByRun(runId)).toHaveLength(1);
         expect(h.stores.plans.listNodes(runId).filter((x) => x.sourcePath !== "root").map((x) => x.status)).toEqual(["succeeded", "succeeded", "succeeded", "succeeded"]);
-        expect(h.provider.requests).toHaveLength(1);
+        // The aggregation step and the node_result turn of the ended graph; the join repeats nothing.
+        expect(h.provider.requests).toHaveLength(2);
         h.close();
       }
     } finally {

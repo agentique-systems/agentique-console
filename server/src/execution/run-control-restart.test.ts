@@ -58,7 +58,8 @@ describe("Run control across restarts", () => {
         expect((await h.scheduler.advanceRun(w.runId)).stop).toBe("quiescent");
         expect(attemptsOf(h, invocationId)).toEqual([[1, "interrupted", true], [2, "succeeded", null]]);
         expect(h.stores.plans.getNode(w.nodeId).status).toBe("succeeded");
-        expect(h.provider.requests).toHaveLength(1);
+        expect(h.provider.requests.map((r) => h.stores.invocations.get(h.stores.invocations.getAttempt(r.attemptId).invocationId).purpose)).toEqual(expect.arrayContaining(["node_result"]));
+        expect(h.provider.requests).toHaveLength(2);
       }, { recover: false });
     } finally {
       fs.rmSync(w.dir, { recursive: true, force: true });
@@ -195,12 +196,13 @@ describe("Run control across restarts", () => {
         h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
         const resumed = await h.scheduler.advanceRun(w.runId);
         expect(resumed.stop).toBe("quiescent");
-        expect(resumed.actions.map((x) => x.action.kind)).toEqual(["settle_node", "execute_invocation", "settle_node"]);
+        expect(resumed.actions.map((x) => x.action.kind)).toEqual(["settle_node", "execute_invocation", "settle_node", "prepare_root_turn", "execute_invocation", "settle_root"]);
         expect(attemptsOf(h, a0)).toEqual([[1, "succeeded", null]]);
         expect(h.stores.invocations.listByPlanNode(w.nodeId).map((i) => i.status)).toEqual(["succeeded", "succeeded"]);
         expect(h.stores.changesets.listByRun(w.runId).filter((c) => c.invocationId === a0).map((c) => c.integrationStatus)).toEqual(["integrated"]);
         expect(h.stores.plans.getNode(w.nodeId).status).toBe("succeeded");
-        expect(h.provider.requests).toHaveLength(1);
+        expect(h.provider.requests.map((r) => h.stores.invocations.get(h.stores.invocations.getAttempt(r.attemptId).invocationId).purpose)).toEqual(expect.arrayContaining(["node_result"]));
+        expect(h.provider.requests).toHaveLength(2);
       }, { recover: false });
     } finally {
       fs.rmSync(w.dir, { recursive: true, force: true });

@@ -141,7 +141,7 @@ describe("EvaluatorOptimizerPatternRunner (inline)", () => {
       expect(h.stores.handoffs.listByRun(s.created.run.id).map((x) => x.handoffKey).sort()).toEqual([`optimizer_candidate:${node.id}:2`, `optimizer_feedback:${node.id}:1`].sort());
       // The node's output is round 2's candidate; every Changeset was integrated in round order; no Gate row exists.
       expect(h.stores.plans.getNode(node.id).outputArtifactIds).toEqual(p2!.result!.artifactIds);
-      expect(h.stores.changesets.listByRun(s.created.run.id).map((c) => [c.invocationId, c.integrationStatus])).toEqual([[s.invocation.id, "integrated"], [p1!.id, "integrated"], [p2!.id, "integrated"]]);
+      expect(h.stores.changesets.listByRun(s.created.run.id).map((c) => [c.invocationId, c.integrationStatus])).toEqual([[s.invocation.id, "integrated"], [p1!.id, "integrated"], [p2!.id, "integrated"], [h.stores.invocations.listAtPosition(s.created.root.id, "orchestrator")[1]!.id, "integrated"]]);
       expect(h.stores.gates.listByRun(s.created.run.id)).toEqual([]);
     } finally {
       h.close();

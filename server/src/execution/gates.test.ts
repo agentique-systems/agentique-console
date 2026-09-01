@@ -248,7 +248,7 @@ describe("node_exit Gate lifecycle", () => {
       expect(remediationOf(h, gate.id)).toBeNull();
       expect(h.stores.plans.getNode(node.id).status).toBe("failed");
       expect(failureReasonOf(h, runId, node.id)).toMatchObject({ reason: "gate_evaluator_failed" });
-      expect(rootTurnsOf(h, runId)).toHaveLength(1);
+      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "node_result"]);
       expect(h.scheduler.reconcileRun(runId)).toMatchObject({ actions: [], remediating: [] });
     } finally {
       h.close();
@@ -325,6 +325,8 @@ describe("node_exit Gate lifecycle", () => {
       expect(runner.prepareGateEvaluator(node.id, revisionNumber)).toEqual({ kind: "no_change" });
       expect(h.ctx.journal.lastSeq()).toBe(seq);
       expect(evaluatorsOf(h, opened.gateId)).toHaveLength(1);
+      // The pass performs only the node_result turn the succeeded node implies, then nothing.
+      expect((await h.scheduler.advanceRun(runId)).actions.map((p) => p.action.kind)).toEqual(["prepare_root_turn", "execute_invocation", "settle_root"]);
       expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "quiescent", actions: [] });
     } finally {
       h.close();

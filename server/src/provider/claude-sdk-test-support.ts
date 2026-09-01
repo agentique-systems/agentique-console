@@ -39,8 +39,13 @@ export const DEFAULT_CALL_USAGE: Readonly<FakeCallUsage> = Object.freeze({ input
 export type FakeSdkStep =
   /** An assistant text message; `messageId` lets two messages share one API message id. */
   | { kind: "text"; text: string; usage?: Partial<FakeCallUsage>; messageId?: string }
-  /** An assistant tool_use, then the CLI tool path; `result`/`error` script a native tool's execution. */
-  | { kind: "tool_use"; name: string; input: Record<string, unknown>; id?: string; result?: string; error?: string; usage?: Partial<FakeCallUsage>; messageId?: string }
+  /**
+   * An assistant tool_use, then the CLI tool path; `result`/`error` script a native tool's execution. `effect` runs when — and
+   * only when — the native tool actually executes (after every hook and permission decision), with the subprocess working
+   * directory: a test stands in for the tool's own side effect (a `Write` creating a file in the worktree) without the fake
+   * inventing tool semantics of its own.
+   */
+  | { kind: "tool_use"; name: string; input: Record<string, unknown>; id?: string; result?: string; error?: string; usage?: Partial<FakeCallUsage>; messageId?: string; effect?: (context: { cwd: string }) => void | Promise<void> }
   | { kind: "api_retry"; attempt?: number; maxRetries?: number; status?: number | null; error?: SDKAssistantMessageError }
   /** An assistant message that carries an error and no content. */
   | { kind: "assistant_error"; error: SDKAssistantMessageError }
@@ -373,6 +378,7 @@ export class FakeClaudeSdk implements ClaudeSdk {
       this.captured.mcpCalls.push({ tool: name, input: step.input, isError: result.isError === true });
       return { messages: [toolResult(result.content.map((c) => c.text ?? "").join(""), result.isError === true)], denial: null, stop };
     }
+    if (step.effect !== undefined) await step.effect({ cwd: options.cwd ?? "" });
     this.captured.executed.push({ tool: name, input: step.input });
     return { messages: [toolResult(step.error ?? step.result ?? `${name} ok`, step.error !== undefined)], denial: null, stop };
   }

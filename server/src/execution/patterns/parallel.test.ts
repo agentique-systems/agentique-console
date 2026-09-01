@@ -115,7 +115,7 @@ describe("ParallelPatternRunner", () => {
       expect(outcome.stop).toBe("quiescent");
       // Integration order is item order: i0, i1, i2, then the aggregation's Changeset.
       const byChangeset = new Map(h.stores.changesets.listByRun(runId).map((c) => [c.id, c.invocationId] as const));
-      expect(h.integrationWorkspace.requests.map((r) => byChangeset.get(r.changesetId)).map((id) => (id === s.invocation.id ? "root" : indexOf(h, id!)))).toEqual(["root", 0, 1, 2, "parallel_aggregation"]);
+      expect(h.integrationWorkspace.requests.map((r) => byChangeset.get(r.changesetId)).map((id) => (id === s.invocation.id ? "root" : indexOf(h, id!)))).toEqual(["root", 0, 1, 2, "parallel_aggregation", "orchestrator"]);
       expect(h.stores.changesets.listByRun(runId).every((c) => c.integrationStatus === "integrated")).toBe(true);
       // One canonical index: ordered by index, structured facts only, canonical bytes.
       const { artifact, index } = indexArtifact(h, node);
@@ -136,7 +136,8 @@ describe("ParallelPatternRunner", () => {
       expect(manifest.artifacts.map((a) => a.artifactId)).not.toContain(outputs[0]!.id);
       // The node's output is the aggregation's Artifacts.
       expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "succeeded", outputArtifactIds: [aggregationArtifact.id] });
-      expect(h.provider.requests).toHaveLength(5);
+      // The root's first turn, three items, the aggregation, and the node_result turn of the ended node.
+      expect(h.provider.requests).toHaveLength(6);
       expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "quiescent", actions: [] });
     } finally {
       h.close();
@@ -318,8 +319,8 @@ describe("ParallelPatternRunner", () => {
       h.stores.tasks.transition(task.id, { to: "completed", evidence: [{ kind: "url", url: "https://example.test/resolved" }], outputArtifactIds: [] });
       const resumed = await h.scheduler.advanceRun(runId);
       expect(resumed.stop).toBe("quiescent");
-      expect(h.integrationWorkspace.requests.map((r) => h.stores.changesets.get(r.changesetId).invocationId).map((id) => (id === s.invocation.id ? "root" : indexOf(h, id!)))).toEqual(["root", 0, 0, 1]);
-      expect(changesets()).toEqual([[1, "integrated"], [0, "integrated"]]);
+      expect(h.integrationWorkspace.requests.map((r) => h.stores.changesets.get(r.changesetId).invocationId).map((id) => (id === s.invocation.id ? "root" : indexOf(h, id!)))).toEqual(["root", 0, 0, 1, "orchestrator"]);
+      expect(changesets()).toEqual([[1, "integrated"], [0, "integrated"], ["orchestrator", "integrated"]]);
       expect(h.stores.plans.getNode(node.id).status).toBe("succeeded");
     } finally {
       h.close();
@@ -403,8 +404,9 @@ describe("ParallelPatternRunner", () => {
         expect(h.scheduler.reconcileRun(runId).actions).toEqual([{ kind: "execute_invocation", nodeId, invocationId: h.stores.invocations.listAtPosition(nodeId, "parallel_aggregation")[0]!.id, worktrees: 1 }]);
         const outcome = await h.scheduler.advanceRun(runId);
         expect(outcome.stop).toBe("quiescent");
-        expect(h.provider.requests).toHaveLength(1);
-        expect(work(h)).toEqual({ items: 2, aggregations: 1, indexes: 1, handoffs: 1, integrated: 4 });
+        // The aggregation and the node_result turn of the ended node; nothing of the Pattern repeats.
+        expect(h.provider.requests).toHaveLength(2);
+        expect(work(h)).toEqual({ items: 2, aggregations: 1, indexes: 1, handoffs: 1, integrated: 5 });
         expect(h.stores.plans.getNode(nodeId).status).toBe("succeeded");
         expect(indexArtifact(h, h.stores.plans.getNode(nodeId)).index.items.map((i) => i.outputArtifactIds)).toEqual([[outputs[0]!], [outputs[1]!]]);
         } finally {
@@ -416,7 +418,7 @@ describe("ParallelPatternRunner", () => {
           const before = r.ctx.journal.lastSeq();
           expect(await r.scheduler.advanceRun(runId)).toMatchObject({ stop: "quiescent", actions: [] });
           expect(r.ctx.journal.lastSeq()).toBe(before);
-          expect(work(r)).toEqual({ items: 2, aggregations: 1, indexes: 1, handoffs: 1, integrated: 4 });
+          expect(work(r)).toEqual({ items: 2, aggregations: 1, indexes: 1, handoffs: 1, integrated: 5 });
         } finally {
           r.close();
         }

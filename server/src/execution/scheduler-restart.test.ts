@@ -107,8 +107,9 @@ describe("scheduler restart", () => {
         expect(b0).toMatchObject({ status: "blocked", patternPosition: { kind: "chain_step", index: 0, count: 2 } });
         // The sequence Handoff from A was delivered to B0; A's Changeset was integrated before the chain started.
         expect(h.stores.invocations.getManifest(b0.id).content.handoffs.map((x) => x.source)).toEqual([{ kind: "plan_node", planNodeId: a }]);
-        expect(h.stores.changesets.listByRun(w.runId).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated"]);
-        expect(h.provider.requests).toHaveLength(2);
+        // A's Changeset, the root turn's, and the node_result turn's integration; three provider requests: A's retry, the node_result turn, B0.
+        expect(h.stores.changesets.listByRun(w.runId).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated", "integrated"]);
+        expect(h.provider.requests).toHaveLength(3);
         return b0.blockedByDecisionId!;
       });
       // Process 4: nothing changed; the pass finds the same wait and repeats nothing.
@@ -157,11 +158,13 @@ describe("scheduler restart", () => {
         const outcome = await h.scheduler.advanceRun(w.runId);
         expect(outcome.stop).toBe("quiescent");
         expect(h.stores.plans.getNode(chain)).toMatchObject({ status: "succeeded", outputArtifactIds: [] });
-        expect(h.provider.requests).toHaveLength(0);
+        // Only the node_result turn of the ended chain reached the provider; no step ran again.
+        expect(h.provider.requests.map((r) => h.stores.invocations.get(h.stores.invocations.getAttempt(r.attemptId).invocationId).purpose)).toEqual(["node_result"]);
         const after = work(h, w.runId);
-        expect(after).toEqual({ ...beforeWork, integrated: beforeWork.integrated + 1, snapshots: beforeWork.snapshots + 1 });
+        // The last step's integration, then the node_result turn (one Invocation, one Attempt) and its own integration.
+        expect(after).toEqual({ ...beforeWork, invocations: beforeWork.invocations + 1, attempts: beforeWork.attempts + 1, integrated: beforeWork.integrated + 2, snapshots: beforeWork.snapshots + 2 });
         expect(h.stores.changesets.listByRun(w.runId).every((c) => c.integrationStatus === "integrated")).toBe(true);
-        expect(h.stores.invocations.listByRun(w.runId).map((i) => [i.patternPosition?.kind, i.status])).toEqual([["orchestrator", "succeeded"], ["single", "succeeded"], ["chain_step", "blocked"], ["chain_step", "succeeded"], ["chain_step", "succeeded"]]);
+        expect(h.stores.invocations.listByRun(w.runId).map((i) => [i.patternPosition?.kind, i.status])).toEqual([["orchestrator", "succeeded"], ["single", "succeeded"], ["chain_step", "blocked"], ["orchestrator", "succeeded"], ["chain_step", "succeeded"], ["chain_step", "succeeded"], ["orchestrator", "succeeded"]]);
         expect(await h.scheduler.advanceRun(w.runId)).toMatchObject({ stop: "quiescent", actions: [] });
       });
       await withProcess(w, async (h) => {
@@ -224,12 +227,13 @@ describe("scheduler restart", () => {
         expect(h.scheduler.reconcileRun(w.runId).actions.map((x) => x.kind)).toEqual(["resume_run", "resume_node"]);
         const outcome = await h.scheduler.advanceRun(w.runId);
         expect(outcome.stop).toBe("quiescent");
-        expect(outcome.actions.map((p) => p.action.kind)).toEqual(["resume_run", "resume_node", "settle_node"]);
+        expect(outcome.actions.map((p) => p.action.kind)).toEqual(["resume_run", "resume_node", "settle_node", "prepare_root_turn", "execute_invocation", "settle_root"]);
         expect(h.stores.plans.getNode(a).status).toBe("succeeded");
-        expect(h.stores.changesets.listByRun(w.runId).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated"]);
+        expect(h.stores.changesets.listByRun(w.runId).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated", "integrated"]);
         expect(h.stores.runs.get(w.runId).status).toBe("running");
-        expect(h.integrationWorkspace.requests).toHaveLength(1);
-        expect(h.provider.requests).toHaveLength(0);
+        // The conflicted Changeset's retry and the node_result turn's integration; only the node_result turn reached the provider.
+        expect(h.integrationWorkspace.requests).toHaveLength(2);
+        expect(h.provider.requests.map((r) => h.stores.invocations.get(h.stores.invocations.getAttempt(r.attemptId).invocationId).purpose)).toEqual(["node_result"]);
       });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

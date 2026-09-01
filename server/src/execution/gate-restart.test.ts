@@ -283,8 +283,8 @@ describe("node_exit Gate restart", () => {
         expect(work(h, w)).toEqual(before);
         const outcome = await h.scheduler.advanceRun(w.runId);
         expect(outcome.stop).toBe("quiescent");
-        expect(outcome.actions.map((p) => [p.action.kind, p.outcome.kind])).toEqual([["settle_node_gate", "gate_passed"]]);
-        expect(work(h, w)).toMatchObject({ node: "succeeded", gates: [[1, "failed"], [2, "passed"]], evaluations: 4, evaluators: 2, commands: 2, tasks: ["completed"], rootTurns: ["operator_input", "gate_result"], integrated: 3 });
+        expect(outcome.actions.map((p) => [p.action.kind, p.outcome.kind])).toEqual([["settle_node_gate", "gate_passed"], ["prepare_root_turn", "turn_prepared"], ["execute_invocation", "prepared"], ["settle_root", "integrated"]]);
+        expect(work(h, w)).toMatchObject({ node: "succeeded", gates: [[1, "failed"], [2, "passed"]], evaluations: 4, evaluators: 2, commands: 2, tasks: ["completed"], rootTurns: ["operator_input", "gate_result", "node_result"], integrated: 4 });
         expect(h.stores.plans.getNode(w.nodeId).outputArtifactIds).toEqual(gatesOf(h, w.nodeId)[0]!.candidateArtifactIds);
         before = work(h, w);
       });
@@ -371,8 +371,8 @@ describe("node_exit Gate restart", () => {
         expect(nextActions(h, w)).toEqual(["open_node_gate"]);
         const outcome = await h.scheduler.advanceRun(w.runId);
         expect(outcome.stop).toBe("quiescent");
-        expect(outcome.actions.map((p) => p.action.kind)).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate"]);
-        expect(work(h, w)).toMatchObject({ node: "succeeded", gates: [[1, "failed"], [2, "passed"]], tasks: ["completed"], commands: 2, rootTurns: ["operator_input"] });
+        expect(outcome.actions.map((p) => p.action.kind)).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate", "prepare_root_turn", "execute_invocation", "settle_root"]);
+        expect(work(h, w)).toMatchObject({ node: "succeeded", gates: [[1, "failed"], [2, "passed"]], tasks: ["completed"], commands: 2, rootTurns: ["operator_input", "node_result"] });
         expect(turnsOf(h, h.stores.plans.getNode(w.nodeId)).map((t) => t.purpose)).toEqual(["decompose", "synthesize", "replan", "synthesize"]);
         before = work(h, w);
       });

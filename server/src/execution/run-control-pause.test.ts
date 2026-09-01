@@ -147,10 +147,11 @@ describe("soft pause", () => {
       h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
       const resumed = await h.scheduler.advanceRun(runId);
       expect(resumed.stop).toBe("quiescent");
-      expect(resumed.actions.map((a) => a.action.kind)).toEqual(["settle_node", "execute_invocation", "settle_node"]);
+      expect(resumed.actions.map((a) => a.action.kind)).toEqual(["settle_node", "execute_invocation", "settle_node", "prepare_root_turn", "execute_invocation", "settle_root"]);
       expect(h.stores.invocations.listByPlanNode(node.id).map((i) => [i.patternPosition?.kind === "chain_step" ? i.patternPosition.index : -1, i.status])).toEqual([[0, "succeeded"], [1, "succeeded"]]);
       expect(attemptsOf(h, a0.id)).toEqual([[1, "succeeded", null]]);
-      expect(h.provider.requests).toHaveLength(requests + 1);
+      // The second step and the node_result turn of the succeeded node; the finished step was not repeated.
+      expect(h.provider.requests).toHaveLength(requests + 2);
       expect(h.stores.plans.getNode(node.id).status).toBe("succeeded");
       expect(h.stores.changesets.listByRun(runId).filter((c) => c.invocationId === a0.id).map((c) => c.integrationStatus)).toEqual(["integrated"]);
       expect(eventsAfter(h, runId, seq).filter((t) => t !== "run.integrated")).toEqual(["run.paused", "run.waiting", "run.resumed", "run.wait_cleared"]);
@@ -274,12 +275,13 @@ describe("hard pause", () => {
       h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
       const resumed = await h.scheduler.advanceRun(runId);
       expect(resumed.stop).toBe("quiescent");
-      expect(resumed.actions.map((x) => x.action.kind)).toEqual(["execute_invocation", "settle_node"]);
+      expect(resumed.actions.map((x) => x.action.kind)).toEqual(["execute_invocation", "settle_node", "prepare_root_turn", "execute_invocation", "settle_root"]);
       expect(attemptsOf(h, invocation.id)).toEqual([[1, "interrupted", true], [2, "succeeded", null]]);
       expect(h.stores.invocations.listAttempts(invocation.id)[1]).toMatchObject({ kind: "retry", startMode: "fresh" });
       expect(h.stores.invocations.listByPlanNode(a.id)).toHaveLength(1);
       expect(h.stores.plans.getNode(a.id).status).toBe("succeeded");
-      expect(work(h, runId)).toMatchObject({ invocations: 2, attempts: 3, usage: 3 });
+      // The root's first turn, the node's Invocation (two Attempts), and the node_result turn.
+      expect(work(h, runId)).toMatchObject({ invocations: 3, attempts: 4, usage: 4 });
       expect(eventsAfter(h, runId, seq).filter((t) => t !== "run.integrated")).toEqual(["run.paused", "run.waiting", "run.resumed", "run.wait_cleared"]);
       expect(activeCapacity(h, runId).leases).toEqual([]);
     } finally {
@@ -310,7 +312,7 @@ describe("hard pause", () => {
       // The node's failure is applied only once the Run is resumed; nothing changes while paused.
       expect(h.stores.plans.getNode(a.id).status).toBe("running");
       h.runControl.resume({ runId });
-      expect((await h.scheduler.advanceRun(runId)).actions.map((x) => x.action.kind)).toEqual(["settle_node"]);
+      expect((await h.scheduler.advanceRun(runId)).actions.map((x) => x.action.kind)).toEqual(["settle_node", "prepare_root_turn", "execute_invocation", "settle_root"]);
       expect(h.stores.plans.getNode(a.id)).toMatchObject({ status: "failed" });
     } finally {
       h.close();
@@ -365,7 +367,8 @@ describe("hard pause", () => {
       expect((await h.scheduler.advanceRun(runId)).stop).toBe("quiescent");
       expect(attemptsOf(h, started.invocationId)).toEqual([[1, "interrupted", true], [2, "succeeded", null]]);
       expect(h.stores.invocations.listByPlanNode(a.id)).toHaveLength(1);
-      expect(h.provider.requests).toHaveLength(requests + 1);
+      // The retried Attempt and the node_result turn of the succeeded node.
+      expect(h.provider.requests).toHaveLength(requests + 2);
     } finally {
       h.close();
     }

@@ -41,7 +41,13 @@ export const orchestratorInputSchema: z.ZodType<OrchestratorInput> = z
   .refine((row) => row.input.kind === row.kind, { message: "the input carries the row's kind", path: ["input"] })
   .refine((row) => (row.deliveredByInvocationId === null) === (row.deliveredAt === null), { message: "delivery names the delivering Invocation and its time together", path: ["deliveredAt"] });
 
-/** The purpose of the turn that delivers `inputs`: the first applicable row of the purpose table (execution-model §4.6) — an operator message makes it an `operator_input` turn, otherwise a `decision_resolution` turn. */
-export function orchestratorInputPurposeOf(inputs: readonly QueuedOrchestratorInput[]): Extract<InvocationPurpose, "operator_input" | "decision_resolution"> {
-  return inputs.some((i) => i.kind === "operator_message") ? "operator_input" : "decision_resolution";
+/**
+ * The purpose of the turn that delivers `inputs`: the first applicable row of the purpose table (execution-model §4.6) — an
+ * operator message makes it an `operator_input` turn, otherwise a node's result a `node_result` turn, otherwise a
+ * `decision_resolution` turn (a Decision's or a proposal's resolution).
+ */
+export function orchestratorInputPurposeOf(inputs: readonly ManifestInput[]): Extract<InvocationPurpose, "operator_input" | "node_result" | "decision_resolution"> {
+  if (inputs.some((i) => i.kind === "operator_message")) return "operator_input";
+  if (inputs.some((i) => i.kind === "node_result")) return "node_result";
+  return "decision_resolution";
 }

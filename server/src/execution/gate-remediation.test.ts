@@ -110,18 +110,21 @@ describe("node_exit Gate remediation", () => {
       const doneB = h.stores.tasks.get(taskB.id);
       expect(doneA.status).toBe("completed");
       expect(doneA.outputArtifactIds).toHaveLength(1);
-      expect(doneB).toMatchObject({ status: "completed", outputArtifactIds: [], evidence: [{ kind: "snapshot", snapshotId: h.stores.runs.get(runId).integrationSnapshotId }] });
-      // Cycle 2 on the new integration Snapshot: A judges the Task's output, B judges its previous candidate; both pass and the nodes succeed.
+      // Cycle 2 on the integration Snapshot the remediation produced (the later node_result turn's own integration moves the Run's head past
+      // it): A judges the Task's output, B judges its previous candidate; both pass and the nodes succeed.
       const [, secondA] = gatesOf(h, a.id);
       const [, secondB] = gatesOf(h, b.id);
-      expect(secondA).toMatchObject({ ordinal: 2, status: "passed", snapshotId: h.stores.runs.get(runId).integrationSnapshotId, candidateArtifactIds: doneA.outputArtifactIds });
-      expect(secondB).toMatchObject({ ordinal: 2, status: "passed", snapshotId: h.stores.runs.get(runId).integrationSnapshotId, candidateArtifactIds: gateB!.candidateArtifactIds });
-      expect(secondA!.snapshotId).not.toBe(gateA!.snapshotId);
+      const cycle2 = secondA!.snapshotId!;
+      expect(h.stores.snapshots.get(cycle2).reason).toBe("integration");
+      expect(doneB).toMatchObject({ status: "completed", outputArtifactIds: [], evidence: [{ kind: "snapshot", snapshotId: cycle2 }] });
+      expect(secondA).toMatchObject({ ordinal: 2, status: "passed", snapshotId: cycle2, candidateArtifactIds: doneA.outputArtifactIds });
+      expect(secondB).toMatchObject({ ordinal: 2, status: "passed", snapshotId: cycle2, candidateArtifactIds: gateB!.candidateArtifactIds });
+      expect(cycle2).not.toBe(gateA!.snapshotId);
       expect(h.stores.plans.getNode(a.id)).toMatchObject({ status: "succeeded", outputArtifactIds: doneA.outputArtifactIds });
       expect(h.stores.plans.getNode(b.id)).toMatchObject({ status: "succeeded", outputArtifactIds: gateB!.candidateArtifactIds });
       // No Worker ran again, no Task or turn was duplicated, and every Gate's deterministic check ran exactly once per cycle.
       expect(h.stores.invocations.listByPlanNode(a.id).filter((i) => i.role === "worker")).toHaveLength(1);
-      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "gate_result"]);
+      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "gate_result", "node_result"]);
       expect(h.stores.tasks.listRemediationTasks(runId)).toHaveLength(2);
       expect(h.criterionExecution.observed.map((o) => o.gateId).sort()).toEqual([gateA!.id, gateB!.id, secondA!.id, secondB!.id].sort());
       expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "quiescent", actions: [] });
@@ -192,7 +195,7 @@ describe("node_exit Gate remediation", () => {
       const outcome = await h.scheduler.advanceRun(runId);
       expect(outcome.stop).toBe("quiescent");
       const turns = rootTurnsOf(h, runId);
-      expect(turns.map((t) => [t.purpose, t.continuedFromInvocationId])).toEqual([["operator_input", null], ["gate_result", turns[0]!.id], ["gate_result", blocked.id]]);
+      expect(turns.map((t) => [t.purpose, t.continuedFromInvocationId])).toEqual([["operator_input", null], ["gate_result", turns[0]!.id], ["gate_result", blocked.id], ["node_result", turns[2]!.id]]);
       const successor = h.stores.invocations.getManifest(turns[2]!.id).content;
       expect(successor.inputs.filter((i) => i.kind === "gate_result")).toEqual(h.stores.invocations.getManifest(blocked.id).content.inputs.filter((i) => i.kind === "gate_result"));
       expect(successor.inputs.at(-1)).toMatchObject({ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: blocked.id, outcome: "approve_once" });
@@ -220,7 +223,7 @@ describe("node_exit Gate remediation", () => {
       expect(h.stores.tasks.listRemediationTasks(s.created.run.id)).toHaveLength(1);
       expect(h.stores.plans.getNode(node.id).status).toBe("failed");
       expect(failureReasonOf(h, s.created.run.id, node.id)).toMatchObject({ reason: "gate_cycles_exhausted" });
-      expect(rootTurnsOf(h, s.created.run.id).map((t) => t.purpose)).toEqual(["operator_input", "gate_result"]);
+      expect(rootTurnsOf(h, s.created.run.id).map((t) => t.purpose)).toEqual(["operator_input", "gate_result", "node_result"]);
       expect(h.scheduler.reconcileRun(s.created.run.id)).toMatchObject({ actions: [], remediating: [] });
     } finally {
       h.close();
@@ -293,8 +296,9 @@ describe("node_exit Gate remediation", () => {
       const resumed = await h.scheduler.advanceRun(runId);
       expect(resumed.actions.map((a) => a.action.kind).slice(0, 2)).toEqual(["resume_run", "prepare_gate_remediation"]);
       expect(h.ctx.journal.read({ runId, type: "run.wait_cleared" }).map((e) => e.payload)).toEqual([{ from: "waiting", to: "running", clearedWaitReason: "budget" }]);
-      expect(h.stores.allocationExtensions.listByRun(runId)).toMatchObject([{ planNodeId: rootId, trigger: "gate_remediation", added: { costUsd: 0, tokens: 0, attempts: 1 } }]);
-      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "gate_result"]);
+      // One extension funded the remediation turn; the node_result turn that follows the node's success extends once more under the same policy.
+      expect(h.stores.allocationExtensions.listByRun(runId)).toMatchObject([{ planNodeId: rootId, trigger: "gate_remediation", added: { costUsd: 0, tokens: 0, attempts: 1 } }, { planNodeId: rootId, trigger: "root_turn", added: { costUsd: 0, tokens: 0, attempts: 1 } }]);
+      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "gate_result", "node_result"]);
       expect(h.stores.reservations.runCapacity(runId).increases.ordinary).toEqual({ costUsd: 0, tokens: 0, attempts: 1 });
       expect(h.stores.runs.get(runId).budget.maxAttempts).toBe(17);
     } finally {
@@ -335,8 +339,8 @@ describe("node_exit Gate remediation", () => {
       expect(inputs.find((i) => i.kind === "coordinator_turn")).toMatchObject({ purpose: "replan", blockerKeys: [`gate_failed:${gate1!.id}`] });
       expect(criterionVerdictsOf(h, gate2!.id)).toEqual(Object.fromEntries(criteria.all.map((id) => [id, "pass"])));
       expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "succeeded", outputArtifactIds: [second.artifactId] });
-      // The root never remediated a Coordinator's Gate.
-      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input"]);
+      // The root never remediated a Coordinator's Gate; it only received the node's result once it succeeded.
+      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "node_result"]);
     } finally {
       h.close();
     }
@@ -360,7 +364,8 @@ describe("node_exit Gate remediation", () => {
       const [gate] = gatesOf(h, node.id);
       expect(gatesOf(h, node.id)).toHaveLength(1);
       expect(remediationOf(h, gate!.id)!.status).not.toBe("completed");
-      expect(rootTurnsOf(h, runId)).toHaveLength(1);
+      // The root never remediated; the failed node's result reached it once.
+      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "node_result"]);
     } finally {
       h.close();
     }

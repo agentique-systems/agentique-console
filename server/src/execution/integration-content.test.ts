@@ -267,7 +267,7 @@ describe("Changeset content delivery", () => {
       expect(outcome.stop).toBe("quiescent");
       expect(h.stores.plans.getNode(nodes[0]!.id).status).toBe("succeeded");
       const changesets = h.stores.changesets.listByRun(runId);
-      expect(changesets.map((c) => c.integrationStatus)).toEqual(["integrated", "integrated", "integrated"]);
+      expect(changesets.map((c) => c.integrationStatus)).toEqual(["integrated", "integrated", "integrated", "integrated"]);
       // Positive control: the content exists and was delivered.
       const marked = changesets.find((c) => h.stores.artifacts.get(c.diffArtifactId).byteSize === DIFF.byteLength)!;
       expect(new TextDecoder().decode(h.stores.artifacts.read(marked.diffArtifactId).bytes)).toContain(MARKER);
