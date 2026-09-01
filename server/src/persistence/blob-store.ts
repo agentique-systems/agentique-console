@@ -1,12 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { FailureKind } from "@agentique-console/core";
 
 export function sha256Hex(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
 export class BlobMissingError extends Error {
+  /** The closed kind a diagnostic reports for this failure (`failureKindOf`). */
+  readonly failureKind: FailureKind = "storage:content_missing";
+
   constructor(readonly digest: string) {
     super(`artifact content ${digest} is missing from the blob store`);
     this.name = "BlobMissingError";
@@ -14,6 +18,9 @@ export class BlobMissingError extends Error {
 }
 
 export class BlobCorruptedError extends Error {
+  /** The closed kind a diagnostic reports for this failure (`failureKindOf`). */
+  readonly failureKind: FailureKind = "storage:content_corrupt";
+
   constructor(
     readonly digest: string,
     readonly actualDigest: string,

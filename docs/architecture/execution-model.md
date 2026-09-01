@@ -1896,10 +1896,15 @@ in `core/src/runtime-reads.ts`):
   tool-call input, or unrelated Artifact content; errors and diagnostics
   carry bounded identifiers and closed failure kinds only — an
   infrastructure failure of a read or a `write_artifact` call reports the
-  tool, the caller's ids, the call digest, and the closed failure kind
-  (the error's class name and token-shaped code), never the thrown text,
-  which may embed a path, a storage key, raw input, or content;
-  truncating such text does not make it safe;
+  tool, the caller's ids, the call digest, and the closed failure kind —
+  one literal of the finite `FAILURE_KINDS` set in core (the domain error
+  codes, the Artifact Store's `storage:content_missing` and
+  `storage:content_corrupt`, the SQLite primary result codes the runtime
+  distinguishes or `sqlite:other`, the listed filesystem errno names or
+  `filesystem:other`, and `unknown` for everything else) — never the
+  thrown value's class name, constructor, `code`, message, stack, cause,
+  or details, however token-shaped: such fields are content channels, and
+  truncating or validating their text does not make it safe;
 - authorization is canonical ownership plus the caller's manifest scope;
   a supplied id authorizes nothing, and an exactly named record outside
   the caller's scope is refused (`record_out_of_scope`) without

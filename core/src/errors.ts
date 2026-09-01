@@ -13,22 +13,118 @@ export type DomainErrorCode =
   | "insufficient_capacity"
   | "immutable";
 
-const SAFE_TOKEN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/**
+ * The closed set of failure kinds a diagnostic or a provider-facing failure
+ * may name (execution-model §6.4, §13, §14). Every value is a literal of
+ * this tuple; nothing a thrown value carries — its class name, constructor,
+ * `code`, message, stack, cause, or details — is ever forwarded as text.
+ * Recognized families keep a useful distinction: the domain error codes,
+ * the Artifact Store's two content failures, SQLite's primary result codes
+ * that a runtime can act on, and the filesystem errno names an Artifact
+ * blob store can raise. Everything else is `unknown`.
+ */
+export const FAILURE_KINDS = [
+  "domain:validation",
+  "domain:illegal_transition",
+  "domain:not_found",
+  "domain:conflict",
+  "domain:invariant_violation",
+  "domain:allocation_exhausted",
+  "domain:insufficient_capacity",
+  "domain:immutable",
+  "storage:content_missing",
+  "storage:content_corrupt",
+  "sqlite:busy",
+  "sqlite:locked",
+  "sqlite:constraint",
+  "sqlite:corrupt",
+  "sqlite:full",
+  "sqlite:ioerr",
+  "sqlite:readonly",
+  "sqlite:cantopen",
+  "sqlite:other",
+  "filesystem:ENOENT",
+  "filesystem:EACCES",
+  "filesystem:EPERM",
+  "filesystem:EEXIST",
+  "filesystem:ENOSPC",
+  "filesystem:EROFS",
+  "filesystem:EBUSY",
+  "filesystem:EIO",
+  "filesystem:EMFILE",
+  "filesystem:ENFILE",
+  "filesystem:ENOTDIR",
+  "filesystem:EISDIR",
+  "filesystem:ENOTEMPTY",
+  "filesystem:EINVAL",
+  "filesystem:EAGAIN",
+  "filesystem:ENAMETOOLONG",
+  "filesystem:ELOOP",
+  "filesystem:other",
+  "unknown",
+] as const;
+export type FailureKind = (typeof FAILURE_KINDS)[number];
+
+const FAILURE_KIND_SET: ReadonlySet<string> = new Set(FAILURE_KINDS);
+
+/** The property a boundary error may carry to declare its own kind; only a value of `FAILURE_KINDS` is honoured. */
+export const FAILURE_KIND_PROPERTY = "failureKind";
+
+/** SQLite primary result codes the runtime distinguishes, by the primary code an extended code (`SQLITE_CONSTRAINT_UNIQUE`) begins with. */
+const SQLITE_PRIMARY_KINDS: Readonly<Record<string, FailureKind>> = {
+  SQLITE_BUSY: "sqlite:busy",
+  SQLITE_LOCKED: "sqlite:locked",
+  SQLITE_CONSTRAINT: "sqlite:constraint",
+  SQLITE_CORRUPT: "sqlite:corrupt",
+  SQLITE_FULL: "sqlite:full",
+  SQLITE_IOERR: "sqlite:ioerr",
+  SQLITE_READONLY: "sqlite:readonly",
+  SQLITE_CANTOPEN: "sqlite:cantopen",
+};
+
+/** Reads one property of a thrown value without trusting it: a throwing accessor, a proxy, or a non-object yields `undefined`. */
+function property(value: unknown, name: string): unknown {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return undefined;
+  try {
+    return (value as Record<string, unknown>)[name];
+  } catch {
+    return undefined;
+  }
+}
 
 /**
- * The bounded, closed description of a thrown value for a diagnostic or a
- * provider-facing failure: the error's class name and, when it carries a
- * token-shaped `code` (a domain code, a SQLite result code, an errno name),
- * that code — never its message, its stack, or anything else it holds. A
- * message may embed a filesystem path, a storage key, raw call input, or
- * Artifact content; a class name and a code cannot. A value that is not an
- * Error, or whose name is not a plain token, is reported as `unknown`.
+ * The closed failure kind of a thrown value, for a diagnostic or a
+ * provider-facing failure. The classification is a finite policy, never a
+ * content channel: a `DomainError` maps to its own closed code; a boundary
+ * error that declares a `failureKind` of `FAILURE_KINDS` maps to exactly
+ * that; a SQLite error (a `SqliteError` carrying a `SQLITE_*` code) maps to
+ * its primary result code's kind or `sqlite:other`; a Node filesystem error
+ * (a `code` together with the `errno` or `syscall` an errno error carries)
+ * maps to its errno name when listed or `filesystem:other`; anything else —
+ * an unknown class, a forged or unlisted code, a non-Error value — is
+ * `unknown`. Names, codes, messages, stacks, causes, and details are never
+ * echoed, and classification never throws.
  */
-export function failureKindOf(error: unknown): string {
-  if (!(error instanceof Error)) return "unknown";
-  const name = SAFE_TOKEN.test(error.name) ? error.name : "unknown";
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" && SAFE_TOKEN.test(code) ? `${name}:${code}` : name;
+export function failureKindOf(error: unknown): FailureKind {
+  try {
+    if (error instanceof DomainError) return (FAILURE_KIND_SET.has(`domain:${error.code}`) ? `domain:${error.code}` : "unknown") as FailureKind;
+    if (!(error instanceof Error)) return "unknown";
+    const declared = property(error, FAILURE_KIND_PROPERTY);
+    if (typeof declared === "string" && FAILURE_KIND_SET.has(declared)) return declared as FailureKind;
+    const code = property(error, "code");
+    if (property(error, "name") === "SqliteError" && typeof code === "string" && code.startsWith("SQLITE_")) {
+      const primary = code.split("_").slice(0, 2).join("_");
+      return SQLITE_PRIMARY_KINDS[primary] ?? "sqlite:other";
+    }
+    const errno = property(error, "errno");
+    const syscall = property(error, "syscall");
+    if (typeof code === "string" && (typeof errno === "number" || typeof syscall === "string")) {
+      return (FAILURE_KIND_SET.has(`filesystem:${code}`) ? `filesystem:${code}` : "filesystem:other") as FailureKind;
+    }
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 export class DomainError extends Error {

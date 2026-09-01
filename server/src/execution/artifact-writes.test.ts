@@ -227,7 +227,7 @@ describe("write_artifact", () => {
       vi.spyOn(h.blobs, "remove").mockImplementationOnce(() => { throw new Error("injected: cleanup failed"); });
       const failed = await r.port.call(writeArtifact({ title: "doomed", content: "cleanup fails" }));
       // The outcome names the canonical failure's closed kind (the call row, not the cleanup) and no exception text at all.
-      expect(failed).toEqual({ kind: "failed", tool: "write_artifact", message: "write_artifact failed: ConflictError:conflict" });
+      expect(failed).toEqual({ kind: "failed", tool: "write_artifact", message: "write_artifact failed: domain:conflict" });
       expect(h.diagnostics.map((d) => d.kind)).toContain("blob_cleanup_failed");
       expect(JSON.stringify([failed, h.diagnostics])).not.toContain("injected");
     } finally {
