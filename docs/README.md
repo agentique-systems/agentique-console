@@ -41,6 +41,17 @@ the legacy code during construction and remain after cutover:
 Neither imports from, exports to, or is selected against its legacy
 counterpart; see the migration contract §2–§4.
 
+## Proposals (not binding)
+
+Design proposals under `docs/proposals/` are reviewable drafts. They bind
+nothing until a decision moves their content into the architecture
+documents; a proposal never describes a guarantee as implemented.
+
+- [Artifact blob crash recovery](proposals/artifact-crash-recovery.md) —
+  proposed pending-write marker protocol so startup recovery removes the
+  unreferenced blob an abrupt death can leave (execution-model §2.1);
+  awaiting an explicit decision.
+
 ## Legacy documents (scheduled for deletion at cutover)
 
 These describe the current implementation. They are superseded by the
