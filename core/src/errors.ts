@@ -13,6 +13,24 @@ export type DomainErrorCode =
   | "insufficient_capacity"
   | "immutable";
 
+const SAFE_TOKEN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/**
+ * The bounded, closed description of a thrown value for a diagnostic or a
+ * provider-facing failure: the error's class name and, when it carries a
+ * token-shaped `code` (a domain code, a SQLite result code, an errno name),
+ * that code — never its message, its stack, or anything else it holds. A
+ * message may embed a filesystem path, a storage key, raw call input, or
+ * Artifact content; a class name and a code cannot. A value that is not an
+ * Error, or whose name is not a plain token, is reported as `unknown`.
+ */
+export function failureKindOf(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown";
+  const name = SAFE_TOKEN.test(error.name) ? error.name : "unknown";
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && SAFE_TOKEN.test(code) ? `${name}:${code}` : name;
+}
+
 export class DomainError extends Error {
   readonly code: DomainErrorCode;
   readonly details: Readonly<Record<string, unknown>>;

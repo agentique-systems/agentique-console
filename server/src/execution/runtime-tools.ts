@@ -20,9 +20,10 @@
  * Attempt of a running Invocation whose logical turn has not ended, the
  * handler validates (read-only) and applies, and the row and its Event
  * commit with the mutation. A rejected call writes no row, no domain
- * mutation, and no Event. A commit failure reports `failed` with a bounded
- * message and one diagnostic; the adapter may call again. Neither the raw
- * input nor any transcript reaches an Event, a diagnostic, or the record.
+ * mutation, and no Event. A commit failure reports `failed` with the closed
+ * failure kind and one diagnostic — never the thrown text; the adapter may
+ * call again. Neither the raw input nor any transcript reaches an Event, a
+ * diagnostic, or the record.
  *
  * An accepted `request_decision` ends the logical turn (execution-model
  * §8.2): after it commits, an identical call still replays, but every other
@@ -33,6 +34,7 @@
 import {
   boundedFailureMessage,
   canonicalRuntimeToolCall,
+  failureKindOf,
   effectiveRuntimeTools,
   INVOCATION_MACHINE,
   isRuntimeToolReadTool,
@@ -183,10 +185,22 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
         return { kind: "accepted", tool: mutating, callId: call.id, callDigest, replayed: false, result: call.result };
       });
     } catch (error) {
-      const message = boundedFailureMessage(error instanceof Error ? error.message : String(error));
-      this.#diagnostics({ kind: "runtime_tool_call_failed", invocationId: this.#binding.invocationId, attemptId: this.#binding.attemptId, tool: mutating, callDigest, message });
-      return { kind: "failed", tool: mutating, message };
+      return this.#failed(mutating, callDigest, error);
     }
+  }
+
+  /**
+   * An infrastructure failure of a call (execution-model §6.4, §14): nothing
+   * persisted, one bounded diagnostic, the call may be retried. The outcome
+   * and the diagnostic carry the tool, the caller's ids, the call digest,
+   * and the closed failure kind (`failureKindOf`) — never the thrown
+   * message, which may embed a path, a storage key, raw call input, or
+   * Artifact bytes; truncating such text would not make it safe.
+   */
+  #failed(tool: ExecutableRuntimeTool, callDigest: string, error: unknown): RuntimeToolCallOutcome {
+    const message = boundedFailureMessage(`${tool} failed: ${failureKindOf(error)}`);
+    this.#diagnostics({ kind: "runtime_tool_call_failed", invocationId: this.#binding.invocationId, attemptId: this.#binding.attemptId, tool, callDigest, message });
+    return { kind: "failed", tool, message };
   }
 
   /**
@@ -217,9 +231,7 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
       return { kind: "read", tool, result };
     } catch (error) {
       if (error instanceof ReadRefused) return { kind: "rejected", tool, reasons: error.reasons };
-      const message = boundedFailureMessage(error instanceof Error ? error.message : String(error));
-      this.#diagnostics({ kind: "runtime_tool_call_failed", invocationId: this.#binding.invocationId, attemptId: this.#binding.attemptId, tool, callDigest, message });
-      return { kind: "failed", tool, message };
+      return this.#failed(tool, callDigest, error);
     }
   }
 

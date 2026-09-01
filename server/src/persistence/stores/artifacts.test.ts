@@ -184,7 +184,7 @@ describe("artifacts", () => {
         throw new Error("original database failure");
       });
       vi.spyOn(h.blobs, "remove").mockImplementationOnce(() => {
-        throw new Error("filesystem is read-only");
+        throw Object.assign(new Error("EROFS: read-only file system, unlink '/var/lib/console/blobs/ab/abcdef'"), { code: "EROFS" });
       });
       const bytes = encode("stuck orphan");
       let caught: unknown;
@@ -194,8 +194,10 @@ describe("artifacts", () => {
         caught = error;
       }
       expect((caught as Error).message).toBe("original database failure");
-      expect((caught as { blobCleanupFailure?: { digest: string; message: string } }).blobCleanupFailure).toEqual({ digest: sha256Hex(bytes), message: "filesystem is read-only" });
-      expect(h.diagnostics).toEqual([{ kind: "blob_cleanup_failed", digest: sha256Hex(bytes), message: "filesystem is read-only" }]);
+      // The cleanup failure is the closed kind and the digest: never the filesystem path the exception named.
+      expect((caught as { blobCleanupFailure?: { digest: string; message: string } }).blobCleanupFailure).toEqual({ digest: sha256Hex(bytes), message: "blob removal failed: Error:EROFS" });
+      expect(h.diagnostics).toEqual([{ kind: "blob_cleanup_failed", digest: sha256Hex(bytes), message: "blob removal failed: Error:EROFS" }]);
+      expect(JSON.stringify(h.diagnostics)).not.toContain("/var/lib");
       expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
     } finally {
       h.close();
@@ -388,8 +390,8 @@ describe("artifact composition inside an outer transaction", () => {
         caught = error;
       }
       expect((caught as Error).message).toBe("outer failure");
-      expect((caught as { blobCleanupFailure?: unknown }).blobCleanupFailure).toEqual({ digest: sha256Hex(bytes), message: "filesystem is read-only" });
-      expect(h.diagnostics).toEqual([{ kind: "blob_cleanup_failed", digest: sha256Hex(bytes), message: "filesystem is read-only" }]);
+      expect((caught as { blobCleanupFailure?: unknown }).blobCleanupFailure).toEqual({ digest: sha256Hex(bytes), message: "blob removal failed: Error" });
+      expect(h.diagnostics).toEqual([{ kind: "blob_cleanup_failed", digest: sha256Hex(bytes), message: "blob removal failed: Error" }]);
       expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
       expect(h.ctx.tx.inTransaction).toBe(false);
     } finally {

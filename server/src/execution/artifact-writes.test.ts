@@ -9,7 +9,7 @@
  * Event, no `runtime_tool_calls` row, and no unreferenced blob; and raw
  * content never reaches an Event, a diagnostic, or the call record.
  */
-import { canonicalJson, canonicalRuntimeToolCall, RUNTIME_TOOL_CALL_MAX_BYTES, utf8ByteLength, WRITE_ARTIFACT_BOUNDS, WRITE_ARTIFACT_CALL_MAX_BYTES, type RunId } from "@agentique-console/core";
+import { canonicalJson, canonicalRuntimeToolCall, ConflictError, RUNTIME_TOOL_CALL_MAX_BYTES, utf8ByteLength, WRITE_ARTIFACT_BOUNDS, WRITE_ARTIFACT_CALL_MAX_BYTES, type RunId } from "@agentique-console/core";
 import { describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../persistence/blob-store.ts";
 import { decomposePort, portFor, WIDE_GOVERNOR } from "./coordinator-test-support.ts";
@@ -223,11 +223,13 @@ describe("write_artifact", () => {
     try {
       const s = seedPlanningRuntime(h);
       const r = await rootPort(h, s);
-      vi.spyOn(h.stores.runtimeToolCalls, "record").mockImplementationOnce(() => { throw new Error("injected: canonical failure"); });
+      vi.spyOn(h.stores.runtimeToolCalls, "record").mockImplementationOnce(() => { throw new ConflictError("injected: canonical failure"); });
       vi.spyOn(h.blobs, "remove").mockImplementationOnce(() => { throw new Error("injected: cleanup failed"); });
       const failed = await r.port.call(writeArtifact({ title: "doomed", content: "cleanup fails" }));
-      expect(failed).toMatchObject({ kind: "failed", tool: "write_artifact", message: expect.stringContaining("injected: canonical failure") });
+      // The outcome names the canonical failure's closed kind (the call row, not the cleanup) and no exception text at all.
+      expect(failed).toEqual({ kind: "failed", tool: "write_artifact", message: "write_artifact failed: ConflictError:conflict" });
       expect(h.diagnostics.map((d) => d.kind)).toContain("blob_cleanup_failed");
+      expect(JSON.stringify([failed, h.diagnostics])).not.toContain("injected");
     } finally {
       vi.restoreAllMocks();
       h.close();

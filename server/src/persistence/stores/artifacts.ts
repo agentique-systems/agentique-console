@@ -2,6 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import {
   artifactInputSchema,
   artifactSchema,
+  failureKindOf,
   InvariantViolationError,
   parseOrThrow,
   type Artifact,
@@ -34,7 +35,12 @@ function toDomain(row: Row): Artifact {
   );
 }
 
-/** Attached (non-enumerably) to a database error whose compensating blob cleanup also failed. */
+/**
+ * Attached (non-enumerably) to a database error whose compensating blob
+ * cleanup also failed: the digest whose blob may remain unreferenced and
+ * the closed kind of the cleanup failure (`failureKindOf`) — never the
+ * cleanup exception's text, which may name a filesystem path.
+ */
 export interface BlobCleanupFailure {
   digest: string;
   message: string;
@@ -145,15 +151,17 @@ export class ArtifactStore {
    * written once and referenced by several rolled-back rows is handled by
    * the single hook its one write registered. A cleanup failure never
    * replaces the transaction error: it is reported to the diagnostics sink
-   * as `blob_cleanup_failed` (digest and message only, never bytes) and
-   * attached to the error as the non-enumerable `blobCleanupFailure`.
+   * as `blob_cleanup_failed` (the digest and the closed failure kind only —
+   * never bytes, never a path) and attached to the error as the
+   * non-enumerable `blobCleanupFailure`. Neither claims the blob was
+   * removed: after such a failure an unreferenced blob may remain.
    */
   private discardUnreferencedBlob(digest: string, cause: unknown): void {
     try {
       const referenced = this.ctx.db.select({ id: artifacts.id }).from(artifacts).where(eq(artifacts.digest, digest)).get();
       if (!referenced) this.ctx.blobs.remove(digest);
     } catch (cleanupError) {
-      const failure: BlobCleanupFailure = { digest, message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) };
+      const failure: BlobCleanupFailure = { digest, message: `blob removal failed: ${failureKindOf(cleanupError)}` };
       this.ctx.diagnostics({ kind: "blob_cleanup_failed", ...failure });
       if (cause !== null && typeof cause === "object") {
         Object.defineProperty(cause, "blobCleanupFailure", { value: failure, enumerable: false, configurable: true });
