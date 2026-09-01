@@ -139,7 +139,7 @@ function runChild(w: CrashWorld, args: Omit<CrashChildArgs, "db" | "blobs" | "si
       const record = fs.existsSync(sidecar) ? (JSON.parse(fs.readFileSync(sidecar, "utf8")) as CrashSidecar) : null;
       resolve({ code, signal, stderr: fs.readFileSync(stderrFile, "utf8"), sidecar: record, messages });
     });
-  }, CASE_TIMEOUT_MS);
+  });
 }
 
 /** Runs a crashing child and asserts it died by its own hand after writing the sidecar. */

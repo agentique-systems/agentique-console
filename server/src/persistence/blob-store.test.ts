@@ -45,14 +45,14 @@ describe("FileBlobStore", () => {
     // The marker exists beside the published blob until the owning transaction clears it; it is an empty regular file.
     expect(allFiles(root)).toEqual([markerPath(digest), blobPath(digest)]);
     expect(fs.readFileSync(path.join(root, markerPath(digest)))).toHaveLength(0);
-    expect(store.listPending()).toEqual([{ kind: "marker", digest }]);
+    expect([...store.listPending()]).toEqual([{ kind: "marker", digest }]);
     // A reuse of an already present blob publishes no marker and carries no obligation.
     expect(store.put(content)).toEqual({ digest, byteSize: 5, written: false, pending: false });
     expect(allFiles(root)).toEqual([markerPath(digest), blobPath(digest)]);
     expect(store.clearPending(digest)).toBe(true);
     expect(store.clearPending(digest)).toBe(false);
     expect(allFiles(root)).toEqual([blobPath(digest)]);
-    expect(store.listPending()).toEqual([]);
+    expect([...store.listPending()]).toEqual([]);
     expect(Uint8Array.from(store.get(digest))).toEqual(content);
     expect(store.has(digest)).toBe(true);
     expect(() => store.get("0".repeat(64))).toThrow(BlobMissingError);
@@ -71,7 +71,7 @@ describe("FileBlobStore", () => {
     // A same-size corruption is caught by the digest, not the size.
     fs.writeFileSync(target, bytes("PAYLOAD"));
     expect(() => store.put(content)).toThrow(BlobCorruptedError);
-    expect(store.listPending()).toEqual([]);
+    expect([...store.listPending()]).toEqual([]);
   });
 
   it("removes its temporary file and withdraws its marker when the write fails, leaving no target behind", () => {
@@ -84,7 +84,7 @@ describe("FileBlobStore", () => {
     expect(() => store.put(bytes("unlucky"))).toThrow("disk full");
     expect(allFiles(root)).toEqual([]);
     expect(store.has(digest)).toBe(false);
-    expect(store.listPending()).toEqual([]);
+    expect([...store.listPending()]).toEqual([]);
   });
 
   it("an early marker failure publishes nothing: an unsafe pending directory refuses the write before any byte is written", () => {
@@ -95,7 +95,7 @@ describe("FileBlobStore", () => {
     expect(() => store.put(content)).toThrow(BlobUnsafeEntryError);
     expect(store.has(sha256Hex(content))).toBe(false);
     expect(allFiles(root)).toEqual([".pending"]);
-    expect(() => store.listPending()).toThrow(BlobUnsafeEntryError);
+    expect(() => [...store.listPending()]).toThrow(BlobUnsafeEntryError);
   });
 
   it("tolerates a concurrent writer of the same digest only when the winner's content verifies; the marker stays with the caller in the reused case and is withdrawn otherwise", () => {
@@ -124,7 +124,7 @@ describe("FileBlobStore", () => {
     expect(() => store.put(other)).toThrow(BlobCorruptedError);
     // No temporary file and no marker for the failed write; the first call's marker is untouched.
     expect(allFiles(root)).toEqual([markerPath(digest), blobPath(digest), blobPath(sha256Hex(other))].sort());
-    expect(store.listPending()).toEqual([{ kind: "marker", digest }]);
+    expect([...store.listPending()]).toEqual([{ kind: "marker", digest }]);
   });
 
   it("uses a distinct protocol-named temporary file per write, inside the pending area", () => {
@@ -145,7 +145,7 @@ describe("FileBlobStore", () => {
       expect(path.basename(name)).toMatch(new RegExp(`^${digest}\\.${process.pid}\\.\\d+\\.[0-9a-f-]{36}\\.tmp$`));
     }
     // Both failed writes withdrew their marker.
-    expect(store.listPending()).toEqual([]);
+    expect([...store.listPending()]).toEqual([]);
   });
 
   it("removes a blob for compensation only when it is a regular file in a regular shard directory, and reports whether one existed", () => {
@@ -216,10 +216,10 @@ describe("FileBlobStore", () => {
     expect(store.has(linked)).toBe(false);
   });
 
-  it("enumerates the pending area deterministically: markers, protocol temporaries, unsafe entries, and unrecognized entries with sanitized identifiers", () => {
+  it("enumerates the pending area entry by entry: markers, protocol temporaries, unsafe entries, and unrecognized entries with sanitized identifiers, in the directory's own order", () => {
     const root = tempRoot();
     const store = new FileBlobStore(root);
-    expect(store.listPending()).toEqual([]);
+    expect([...store.listPending()]).toEqual([]);
     const a = sha256Hex(bytes("a"));
     const b = sha256Hex(bytes("b"));
     store.markPending(b);
@@ -238,8 +238,9 @@ describe("FileBlobStore", () => {
     const d = sha256Hex(bytes("d"));
     fs.symlinkSync(path.join(root, "nowhere"), path.join(pending, d), "file");
     fs.mkdirSync(path.join(pending, temporaryName(c, 2)));
-    const listed = store.listPending();
-    // Entries in directory order (by raw name); foreign names are reported sanitized and bounded, never as found.
+    const listed = [...store.listPending()];
+    // Every entry once, classified by its own name and type; foreign names are reported sanitized and bounded, never as found.
+    // The order is the pending directory's own (no global sort), so the comparison is by identity, not position.
     const byRawName: Record<string, unknown> = {
       [a]: { kind: "marker", digest: a },
       [temporaryName(a)]: { kind: "temporary", digest: a, name: temporaryName(a) },
@@ -253,12 +254,9 @@ describe("FileBlobStore", () => {
       "we ird$name": { kind: "unrecognized", entry: "we_ird_name" },
       ["x".repeat(200)]: { kind: "unrecognized", entry: "x".repeat(96) },
     };
-    expect(listed).toEqual(
-      Object.keys(byRawName)
-        .sort()
-        .map((name) => byRawName[name]),
-    );
-    expect(store.listPending()).toEqual(listed);
+    const canonical = (entries: unknown[]) => [...entries].sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1));
+    expect(canonical(listed)).toEqual(canonical(Object.values(byRawName)));
+    expect(canonical([...store.listPending()])).toEqual(canonical(listed));
     // Removal of a recognized temporary is lstat-guarded and idempotent; a malformed name is refused before any filesystem access.
     expect(store.removeTemporary(temporaryName(a))).toBe(true);
     expect(store.removeTemporary(temporaryName(a))).toBe(false);
@@ -273,11 +271,166 @@ describe("FileBlobStore", () => {
     const linkedRoot = tempRoot();
     fs.symlinkSync(other, path.join(linkedRoot, ".pending"), "junction");
     const linkedStore = new FileBlobStore(linkedRoot);
-    expect(() => linkedStore.listPending()).toThrow(BlobUnsafeEntryError);
+    expect(() => [...linkedStore.listPending()]).toThrow(BlobUnsafeEntryError);
     expect(() => linkedStore.markPending(a)).toThrow(BlobUnsafeEntryError);
     expect(() => linkedStore.clearPending(a)).toThrow(BlobUnsafeEntryError);
     expect(() => linkedStore.removeTemporary(temporaryName(a))).toThrow(BlobUnsafeEntryError);
     expect(fs.readdirSync(other)).toEqual([]);
+  });
+
+  it("refuses a symlink at a blob leaf or a shard directory in put, get, and has: bytes behind a link are never reused, read, or reported present, whatever their digest", () => {
+    const root = tempRoot();
+    const store = new FileBlobStore(root);
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-elsewhere-"));
+    dirs.push(elsewhere);
+    // A leaf that is a symlink to external bytes of exactly the expected digest.
+    const linkedContent = bytes("linked content");
+    const linked = sha256Hex(linkedContent);
+    const victim = path.join(elsewhere, "victim.bin");
+    fs.writeFileSync(victim, linkedContent);
+    fs.mkdirSync(path.join(root, linked.slice(0, 2)), { recursive: true });
+    fs.symlinkSync(victim, path.join(root, blobPath(linked)), "file");
+    expect(() => store.put(linkedContent)).toThrow(BlobUnsafeEntryError);
+    expect(() => store.get(linked)).toThrow(BlobUnsafeEntryError);
+    expect(() => store.has(linked)).toThrow(BlobUnsafeEntryError);
+    // Nothing was written, published, or removed: the link is still a link, the target unchanged, no marker, no temporary.
+    expect(fs.lstatSync(path.join(root, blobPath(linked))).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(victim)).toEqual(Buffer.from(linkedContent));
+    expect(allFiles(root)).toEqual([blobPath(linked)]);
+    // A shard directory that is a junction to a directory holding a regular file of the expected digest.
+    const shardContent = bytes("sharded content");
+    const sharded = sha256Hex(shardContent);
+    const foreignShard = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-shard-"));
+    dirs.push(foreignShard);
+    fs.writeFileSync(path.join(foreignShard, sharded), shardContent);
+    fs.symlinkSync(foreignShard, path.join(root, sharded.slice(0, 2)), "junction");
+    expect(() => store.put(shardContent)).toThrow(BlobUnsafeEntryError);
+    expect(() => store.get(sharded)).toThrow(BlobUnsafeEntryError);
+    expect(() => store.has(sharded)).toThrow(BlobUnsafeEntryError);
+    expect(fs.readFileSync(path.join(foreignShard, sharded))).toEqual(Buffer.from(shardContent));
+    expect(fs.readdirSync(foreignShard)).toEqual([sharded]);
+    expect(fs.lstatSync(path.join(root, sharded.slice(0, 2))).isSymbolicLink()).toBe(true);
+    // A dangling leaf symlink is unsafe, not missing: nothing is written over it and nothing is reported absent.
+    const danglingContent = bytes("dangling");
+    const dangling = sha256Hex(danglingContent);
+    fs.mkdirSync(path.join(root, dangling.slice(0, 2)), { recursive: true });
+    fs.symlinkSync(path.join(elsewhere, "nowhere"), path.join(root, blobPath(dangling)), "file");
+    expect(() => store.put(danglingContent)).toThrow(BlobUnsafeEntryError);
+    expect(() => store.get(dangling)).toThrow(BlobUnsafeEntryError);
+    expect(() => store.has(dangling)).toThrow(BlobUnsafeEntryError);
+    expect(fs.lstatSync(path.join(root, blobPath(dangling))).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(elsewhere, "nowhere"))).toBe(false);
+    // A directory at the leaf is unsafe too; the three distinctions stay: absent is missing, wrong bytes are corrupt, a link is unsafe.
+    const nested = sha256Hex(bytes("nested"));
+    fs.mkdirSync(path.join(root, blobPath(nested)), { recursive: true });
+    expect(() => store.get(nested)).toThrow(BlobUnsafeEntryError);
+    expect(() => store.get(sha256Hex(bytes("absent")))).toThrow(BlobMissingError);
+    expect(store.has(sha256Hex(bytes("absent")))).toBe(false);
+    const corrupt = sha256Hex(bytes("corrupt"));
+    fs.mkdirSync(path.join(root, corrupt.slice(0, 2)), { recursive: true });
+    fs.writeFileSync(path.join(root, blobPath(corrupt)), bytes("CORRUPT"));
+    expect(() => store.get(corrupt)).toThrow(BlobCorruptedError);
+    expect(store.has(corrupt)).toBe(true);
+    // Ordinary reuse of a regular blob keeps working beside the refused entries.
+    const plain = bytes("plain");
+    expect(store.put(plain)).toMatchObject({ written: true, pending: true });
+    expect(store.put(plain)).toMatchObject({ written: false, pending: false });
+    expect(Uint8Array.from(store.get(sha256Hex(plain)))).toEqual(plain);
+    // The closed failure never names a path.
+    for (const probe of [() => store.put(linkedContent), () => store.get(sharded), () => store.has(dangling)]) {
+      let caught: unknown;
+      try {
+        probe();
+      } catch (error) {
+        caught = error;
+      }
+      expect((caught as { failureKind?: string }).failureKind).toBe("storage:unsafe_entry");
+      expect((caught as Error).message).not.toContain(root);
+      expect((caught as Error).message).not.toContain(elsewhere);
+    }
+  });
+
+  it("never reuses a symlink planted by a concurrent writer: the fallback reuses a regular file that verifies and refuses a link to matching bytes, withdrawing its marker", () => {
+    const root = tempRoot();
+    const store = new FileBlobStore(root);
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-elsewhere-"));
+    dirs.push(elsewhere);
+    const content = bytes("raced");
+    const digest = sha256Hex(content);
+    const victim = path.join(elsewhere, "victim.bin");
+    fs.writeFileSync(victim, content);
+    vi.spyOn(fs, "renameSync").mockImplementationOnce((_from, to) => {
+      // Something else lands a symlink to matching external bytes at the target; our rename then fails.
+      fs.symlinkSync(victim, String(to), "file");
+      throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+    });
+    expect(() => store.put(content)).toThrow(BlobUnsafeEntryError);
+    expect(fs.lstatSync(path.join(root, blobPath(digest))).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(victim)).toEqual(Buffer.from(content));
+    // The marker was withdrawn and the temporary removed: only the foreign link remains, and it is reported unsafe, never read.
+    expect(allFiles(root)).toEqual([blobPath(digest)]);
+    expect([...store.listPending()]).toEqual([]);
+    expect(() => store.get(digest)).toThrow(BlobUnsafeEntryError);
+    // A regular file the concurrent writer left is still reused when it verifies (the existing fallback), with the marker kept.
+    const shared = bytes("shared by two");
+    vi.spyOn(fs, "renameSync").mockImplementationOnce((_from, to) => {
+      fs.writeFileSync(String(to), shared);
+      throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+    });
+    expect(store.put(shared)).toEqual({ digest: sha256Hex(shared), byteSize: shared.byteLength, written: false, pending: true });
+    expect([...store.listPending()]).toEqual([{ kind: "marker", digest: sha256Hex(shared) }]);
+  });
+
+  it("enumerates with bounded memory through one directory handle read incrementally, and releases it on completion, early return, and a read failure part-way", () => {
+    const root = tempRoot();
+    const store = new FileBlobStore(root);
+    const digests = ["p", "q", "r", "s"].map((t) => sha256Hex(bytes(t)));
+    for (const digest of digests) store.markPending(digest);
+    const opened: { reads: number; closed: number; failAt: number | null }[] = [];
+    const opendirSync = fs.opendirSync;
+    vi.spyOn(fs, "opendirSync").mockImplementation(((target: fs.PathLike, options?: fs.OpenDirOptions) => {
+      const dir = opendirSync(target, options ?? {});
+      const record = { reads: 0, closed: 0, failAt: opened.length === 2 ? 2 : null };
+      opened.push(record);
+      const readSync = dir.readSync.bind(dir);
+      const closeSync = dir.closeSync.bind(dir);
+      dir.readSync = (() => {
+        record.reads += 1;
+        if (record.failAt !== null && record.reads === record.failAt) throw Object.assign(new Error("EIO: i/o error, scandir"), { code: "EIO", errno: -5, syscall: "scandir" });
+        return readSync();
+      }) as typeof dir.readSync;
+      dir.closeSync = (() => {
+        record.closed += 1;
+        closeSync();
+      }) as typeof dir.closeSync;
+      return dir;
+    }) as typeof fs.opendirSync);
+    // 1. Incremental: the first entry arrives after one read; nothing beyond it has been read; the handle is still open.
+    const iterator = store.listPending()[Symbol.iterator]();
+    const first = iterator.next();
+    expect(first.done).toBe(false);
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ reads: 1, closed: 0 });
+    // Early return releases the handle without reading further.
+    iterator.return?.();
+    expect(opened[0]).toMatchObject({ reads: 1, closed: 1 });
+    // 2. Completion: one read per entry plus the end marker, then the handle is closed exactly once.
+    const all = [...store.listPending()];
+    expect(all).toHaveLength(4);
+    expect(new Set(all.map((e) => (e.kind === "marker" ? e.digest : "")))).toEqual(new Set(digests));
+    expect(opened[1]).toEqual({ reads: 5, closed: 1, failAt: null });
+    // 3. A read failure after one entry surfaces to the consumer after that entry, and the handle is closed anyway.
+    const partial: unknown[] = [];
+    expect(() => {
+      for (const entry of store.listPending()) partial.push(entry);
+    }).toThrow("EIO");
+    expect(partial).toHaveLength(1);
+    expect(opened[2]).toEqual({ reads: 2, closed: 1, failAt: 2 });
+    // No listing was ever materialized by the store: `readdirSync` is not how the pending area is read.
+    const readdir = vi.spyOn(fs, "readdirSync");
+    [...store.listPending()];
+    expect(readdir).not.toHaveBeenCalled();
+    expect(opened.at(-1)).toMatchObject({ closed: 1 });
   });
 });
 

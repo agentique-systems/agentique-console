@@ -670,12 +670,21 @@ describe("import boundaries", () => {
     for (const file of newFiles.filter((f) => isCode(f) && !f.endsWith(".test.ts"))) {
       expect(fs.readFileSync(file, "utf8"), rel(file)).not.toMatch(/durableBarriers/);
     }
-    // 5. Bounded, non-destructive enumeration: the blob store reads exactly one directory (the pending area) and never walks the
-    //    tree; every removal is an lstat-guarded unlink of a regular file at a validated path; the only `rmSync` is the
-    //    temporary file's own cleanup with `force` and never `recursive`; markers are created exclusively (`wx`); nothing is
+    // 5. Bounded, non-destructive enumeration: the blob store opens exactly one directory handle (the pending area), reads it
+    //    one entry at a time, closes it in a `finally`, and never materializes a listing or walks the tree; every removal is an
+    //    lstat-guarded unlink of a regular file at a validated path; the only `rmSync` is the temporary file's own cleanup with
+    //    `force` and never `recursive`; markers and temporaries are created exclusively (`wx`); every owned blob path is
+    //    probed by `lstat` before it is reused, read, or reported (never `existsSync`, which follows a symlink); nothing is
     //    recognized by a `.tmp` suffix alone.
-    expect(blobStore.match(/readdirSync\(/g)).toHaveLength(1);
-    expect(blobStore).toMatch(/readdirSync\(this\.pendingDir, \{ withFileTypes: true \}\)/);
+    expect(blobStore.match(/opendirSync\(/g)).toHaveLength(1);
+    expect(blobStore).toMatch(/fs\.opendirSync\(this\.pendingDir\)/);
+    expect(blobStore).toMatch(/const entry = dir\.readSync\(\);/);
+    expect(blobStore).toMatch(/\} finally \{\s*dir\.closeSync\(\);\s*\}/);
+    expect(blobStore).not.toMatch(/readdirSync\(|existsSync\(|readdir\(/);
+    expect(blobStore).toMatch(/fs\.writeFileSync\(temp, bytes, \{ flag: "wx" \}\)/);
+    expect(blobStore.match(/this\.blobEntry\(digest\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    expect(blobStore.match(/fs\.readFileSync\(/g)).toHaveLength(1);
+    expect(blobStore.match(/lstatSync\(/g)).toHaveLength(1);
     expect(blobStore.match(/\bunlinkSync\(/g)).toHaveLength(1);
     expect(blobStore).toMatch(/if \(!existing\.isFile\(\)\) throw new BlobUnsafeEntryError\(role, entry\);\s*fs\.unlinkSync\(target\);/);
     expect(blobStore.match(/\brmSync\(/g)).toHaveLength(1);

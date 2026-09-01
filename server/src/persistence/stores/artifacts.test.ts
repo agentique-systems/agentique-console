@@ -1,6 +1,9 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { InvariantViolationError, NotFoundError, ValidationError, type ArtifactInput } from "@agentique-console/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BlobCorruptedError, BlobMissingError, MemoryBlobStore, sha256Hex } from "../blob-store.ts";
+import { BlobCorruptedError, BlobMissingError, FileBlobStore, MemoryBlobStore, sha256Hex } from "../blob-store.ts";
 import { emptyPendingBlobReconciliation, PENDING_BLOB_REPORT_LIMIT } from "./artifacts.ts";
 import { openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, seedWorkerNode, type Harness, type Seeded } from "../test-support.ts";
 
@@ -801,6 +804,128 @@ describe("pending-blob reconciliation", () => {
       expect(() => h.ctx.tx.write(() => h.stores.artifacts.reconcilePendingBlobs())).toThrow(/never runs inside a transaction/);
     } finally {
       h.close();
+    }
+  });
+
+  it("over a real file store: an enumeration failure part-way keeps the effects of the entries already resolved, reports its own obligation, releases the directory handle, and a repeated recovery resolves the rest", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-reconcile-"));
+    const blobs = new FileBlobStore(path.join(dir, "blobs"));
+    const h = openHarness(":memory:", { blobs: blobs as unknown as MemoryBlobStore });
+    try {
+      const s = seedRun(h);
+      // One referenced marker (kept), three unreferenced protocol-published blobs, one stray temporary.
+      const kept = seedArtifact(h, s, "kept over files");
+      blobs.markPending(kept.digest);
+      const orphans = ["o1", "o2", "o3"].map((t) => blobs.put(encode(t)).digest);
+      const temporary = `${orphans[0]}.${process.pid}.9.0f0e0d0c-0b0a-4908-8706-050403020100.tmp`;
+      fs.writeFileSync(path.join(dir, "blobs", ".pending", temporary), "partial");
+      const pendingBefore = [...blobs.listPending()].length;
+      expect(pendingBefore).toBe(5);
+      // The directory read fails after the second entry; the handle is tracked to prove it is released anyway.
+      const handles: { reads: number; closed: number }[] = [];
+      const opendirSync = fs.opendirSync;
+      vi.spyOn(fs, "opendirSync").mockImplementation(((target: fs.PathLike, options?: fs.OpenDirOptions) => {
+        const opened = opendirSync(target, options ?? {});
+        const record = { reads: 0, closed: 0 };
+        handles.push(record);
+        const readSync = opened.readSync.bind(opened);
+        const closeSync = opened.closeSync.bind(opened);
+        opened.readSync = (() => {
+          record.reads += 1;
+          if (handles.length === 1 && record.reads === 3) throw Object.assign(new Error("EIO: i/o error, scandir"), { code: "EIO", errno: -5, syscall: "scandir" });
+          return readSync();
+        }) as typeof opened.readSync;
+        opened.closeSync = (() => {
+          record.closed += 1;
+          closeSync();
+        }) as typeof opened.closeSync;
+        return opened;
+      }) as typeof fs.opendirSync);
+      const first = h.stores.artifacts.reconcilePendingBlobs();
+      // Exactly two entries were resolved before the failure, each with its own effect, and the failure is one further obligation.
+      expect(first.complete).toBe(false);
+      expect(first.failureCount).toBe(1);
+      expect(first.failures).toEqual([{ kind: "enumeration_failed", digest: null, entry: null, failureKind: "filesystem:EIO" }]);
+      expect(first.resolvedMarkers + first.removedTemporaries).toBe(2);
+      expect(handles).toEqual([{ reads: 3, closed: 1 }]);
+      expect(h.diagnostics.map((d) => d.kind)).toEqual(["blob_reconciliation_failed"]);
+      expect(JSON.stringify(first)).not.toContain(dir);
+      const remaining = [...blobs.listPending()];
+      expect(remaining).toHaveLength(pendingBefore - 2);
+      // The referenced blob is never removed whatever order the area was read in.
+      expect(blobs.has(kept.digest)).toBe(true);
+      expect(Uint8Array.from(h.stores.artifacts.read(kept.id).bytes)).toEqual(encode("kept over files"));
+      // The repeated recovery resumes from the remaining entries, resolves every one, and reports complete; a third pass finds nothing.
+      vi.restoreAllMocks();
+      h.diagnostics.length = 0;
+      const second = h.stores.artifacts.reconcilePendingBlobs();
+      expect(second).toMatchObject({ complete: true, failureCount: 0, failures: [] });
+      expect(second.resolvedMarkers + second.removedTemporaries).toBe(remaining.length);
+      expect(first.resolvedMarkers + second.resolvedMarkers).toBe(4);
+      expect(first.removedTemporaries + second.removedTemporaries).toBe(1);
+      expect(first.removedBlobs + second.removedBlobs).toBe(3);
+      expect([...blobs.listPending()]).toEqual([]);
+      expect(orphans.map((d) => blobs.has(d))).toEqual([false, false, false]);
+      expect(blobs.has(kept.digest)).toBe(true);
+      expect(h.stores.artifacts.reconcilePendingBlobs()).toEqual(emptyPendingBlobReconciliation());
+      // The reconciliation is bounded: it never materializes the area (no `readdirSync` of the pending directory).
+      const readdir = vi.spyOn(fs, "readdirSync");
+      h.stores.artifacts.reconcilePendingBlobs();
+      expect(readdir).not.toHaveBeenCalled();
+    } finally {
+      h.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("over a real file store: a failure while an entry is being resolved still releases the directory handle, and the entries before it keep their effects", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-reconcile-"));
+    const blobs = new FileBlobStore(path.join(dir, "blobs"));
+    const h = openHarness(":memory:", { blobs: blobs as unknown as MemoryBlobStore });
+    try {
+      seedRun(h);
+      const digests = ["x1", "x2", "x3"].map((t) => blobs.put(encode(t)).digest);
+      const handles: { closed: number }[] = [];
+      const opendirSync = fs.opendirSync;
+      vi.spyOn(fs, "opendirSync").mockImplementation(((target: fs.PathLike, options?: fs.OpenDirOptions) => {
+        const opened = opendirSync(target, options ?? {});
+        const record = { closed: 0 };
+        handles.push(record);
+        const closeSync = opened.closeSync.bind(opened);
+        opened.closeSync = (() => {
+          record.closed += 1;
+          closeSync();
+        }) as typeof opened.closeSync;
+        return opened;
+      }) as typeof fs.opendirSync);
+      // The diagnostics sink itself throws on the second unresolved obligation: an unexpected failure outside the protocol's own
+      // handling escapes the reconciliation, and the handle is released on the way out.
+      let removals = 0;
+      vi.spyOn(blobs, "remove").mockImplementation((digest) => {
+        removals += 1;
+        if (removals >= 2) throw Object.assign(new Error("EPERM"), { code: "EPERM", errno: -1, syscall: "unlink" });
+        return FileBlobStore.prototype.remove.call(blobs, digest);
+      });
+      let reported = 0;
+      const diagnostics = h.ctx.diagnostics;
+      h.ctx.diagnostics = (diagnostic) => {
+        reported += 1;
+        if (reported === 2) throw new Error("the diagnostics sink is broken");
+        diagnostics(diagnostic);
+      };
+      expect(() => h.stores.artifacts.reconcilePendingBlobs()).toThrow("the diagnostics sink is broken");
+      expect(handles).toEqual([{ closed: 1 }]);
+      // The first entry resolved (its blob removed and marker cleared); the rest stay for the next recovery.
+      expect(digests.filter((d) => blobs.has(d))).toHaveLength(2);
+      expect([...blobs.listPending()]).toHaveLength(2);
+      h.ctx.diagnostics = diagnostics;
+      vi.restoreAllMocks();
+      expect(h.stores.artifacts.reconcilePendingBlobs()).toEqual({ ...emptyPendingBlobReconciliation(), resolvedMarkers: 2, removedBlobs: 2 });
+      expect([...blobs.listPending()]).toEqual([]);
+      expect(handles.at(-1)).toEqual({ closed: 1 });
+    } finally {
+      h.close();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

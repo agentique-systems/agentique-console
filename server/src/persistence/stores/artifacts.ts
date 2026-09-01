@@ -273,14 +273,27 @@ export class ArtifactStore {
    * Startup reconciliation of the pending-write protocol, under the
    * exclusive ownership of the database and blob store by this process and
    * before any new write is admitted. Enumerates only the store's pending
-   * area (work proportional to the entries left there, never to the store);
-   * for every marker, queries the committed references of its digest across
-   * every Run, keeps the blob when one exists, removes it when none does,
-   * and removes the marker last; removes every recognized protocol
-   * temporary file; and leaves every unsafe or unrecognized entry in place,
-   * reported. Never runs inside a transaction. Blobs that carry no marker —
-   * an orphan left before the protocol existed — are outside its scope and
-   * are never enumerated or touched.
+   * area, one entry at a time through the store's bounded iteration (work
+   * and memory proportional to the entries left there, never to the store,
+   * and never a materialized listing); for every marker, queries the
+   * committed references of its digest across every Run, keeps the blob
+   * when one exists, removes it when none does, and removes the marker
+   * last; removes every recognized protocol temporary file; and leaves every
+   * unsafe or unrecognized entry in place, reported. Never runs inside a
+   * transaction. Blobs that carry no marker — an orphan left before the
+   * protocol existed — are outside its scope and are never enumerated or
+   * touched.
+   *
+   * Ordering contract: entries are resolved in the order the pending area
+   * enumerates them — the pending directory's own order, which is not
+   * sorted — and `failures` lists the first `PENDING_BLOB_REPORT_LIMIT`
+   * unresolved obligations in that order. The canonical effect of a pass
+   * does not depend on the order: every marker is resolved by its own
+   * committed references and every temporary by its own name, so two passes
+   * over the same area converge to the same store whatever order they read
+   * it in. An enumeration failure part-way is reported as its own
+   * obligation after the entries already processed, which keep their
+   * effects; the directory handle is released on every path.
    *
    * Every failure is recorded by closed kind with the digest or the safe
    * entry identifier (never a path or file contents) up to
@@ -299,53 +312,74 @@ export class ArtifactStore {
         this.ctx.diagnostics({ kind: "blob_reconciliation_failed", failure: failure.kind, digest: failure.digest, message: `${failure.kind}${failure.entry === null ? "" : ` (${failure.entry})`}${failure.failureKind === null ? "" : `: ${failure.failureKind}`}` });
       }
     };
-    let entries: PendingEntry[];
+    // The enumeration is consumed step by step: an entry is resolved before the next one is read, so nothing but the
+    // report's bounded failure list grows with the area, and an enumeration failure is one obligation of its own
+    // whatever was already processed.
+    let entries: Iterator<PendingEntry>;
     try {
-      entries = this.ctx.blobs.listPending();
+      entries = this.ctx.blobs.listPending()[Symbol.iterator]();
     } catch (error) {
       fail({ kind: "enumeration_failed", digest: null, entry: null, failureKind: failureKindOf(error) });
       report.complete = false;
       return report;
     }
-    for (const entry of entries) {
-      switch (entry.kind) {
-        case "temporary":
-          try {
-            if (this.ctx.blobs.removeTemporary(entry.name)) report.removedTemporaries += 1;
-          } catch (error) {
-            fail({ kind: "temporary_removal_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
-          }
-          break;
-        case "marker": {
-          let referenced: boolean;
-          try {
-            referenced = this.referenced(entry.digest);
-          } catch (error) {
-            fail({ kind: "reference_query_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
-            break;
-          }
-          if (!referenced) {
-            try {
-              if (this.ctx.blobs.remove(entry.digest)) report.removedBlobs += 1;
-            } catch (error) {
-              fail({ kind: "blob_removal_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
-              break;
-            }
-          }
-          try {
-            this.ctx.blobs.clearPending(entry.digest);
-            report.resolvedMarkers += 1;
-          } catch (error) {
-            fail({ kind: "marker_removal_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
-          }
+    try {
+      for (;;) {
+        let step: IteratorResult<PendingEntry>;
+        try {
+          step = entries.next();
+        } catch (error) {
+          fail({ kind: "enumeration_failed", digest: null, entry: null, failureKind: failureKindOf(error) });
           break;
         }
-        case "unsafe":
-          fail({ kind: "unsafe_entry", digest: null, entry: entry.entry, failureKind: null });
-          break;
-        case "unrecognized":
-          fail({ kind: "unrecognized_entry", digest: null, entry: entry.entry, failureKind: null });
-          break;
+        if (step.done === true) break;
+        const entry = step.value;
+        switch (entry.kind) {
+          case "temporary":
+            try {
+              if (this.ctx.blobs.removeTemporary(entry.name)) report.removedTemporaries += 1;
+            } catch (error) {
+              fail({ kind: "temporary_removal_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
+            }
+            break;
+          case "marker": {
+            let referenced: boolean;
+            try {
+              referenced = this.referenced(entry.digest);
+            } catch (error) {
+              fail({ kind: "reference_query_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
+              break;
+            }
+            if (!referenced) {
+              try {
+                if (this.ctx.blobs.remove(entry.digest)) report.removedBlobs += 1;
+              } catch (error) {
+                fail({ kind: "blob_removal_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
+                break;
+              }
+            }
+            try {
+              this.ctx.blobs.clearPending(entry.digest);
+              report.resolvedMarkers += 1;
+            } catch (error) {
+              fail({ kind: "marker_removal_failed", digest: entry.digest, entry: null, failureKind: failureKindOf(error) });
+            }
+            break;
+          }
+          case "unsafe":
+            fail({ kind: "unsafe_entry", digest: null, entry: entry.entry, failureKind: null });
+            break;
+          case "unrecognized":
+            fail({ kind: "unrecognized_entry", digest: null, entry: entry.entry, failureKind: null });
+            break;
+        }
+      }
+    } finally {
+      // The store's iteration releases its directory handle itself on completion and failure; an early exit returns it too.
+      try {
+        entries.return?.();
+      } catch {
+        // A handle that could not be released is not an obligation of the protocol; the next enumeration opens its own.
       }
     }
     report.complete = report.failureCount === 0;

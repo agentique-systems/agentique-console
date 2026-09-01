@@ -148,6 +148,36 @@ re-entrant over one SQLite connection:
     only the pending area, never walks the blob tree, and never removes a
     file it did not name by a validated digest or temporary name — there
     is no garbage collector and no sweep.
+  - *Owned paths.* The store owns the root, its shard directories, the
+    pending area, and every marker, temporary, and blob path it computes
+    from a validated digest or protocol name, and it examines an owned
+    path with `lstat` — parents first, then the leaf — before it probes,
+    reads, reuses, publishes into, or removes it. A symlink, junction,
+    directory, or other non-regular entry at any of those paths is an
+    **unsafe entry** (`storage:unsafe_entry`): it is never followed,
+    written through, or removed, and it is never taken for content — not
+    even when what it points at holds bytes of the expected digest.
+    Unsafe is a third outcome beside missing content and corrupted
+    content, and it names the entry's protocol role and digest only,
+    never a filesystem path. Temporaries and markers are created
+    exclusively (`wx`), so a write never goes through an entry that
+    appeared at its name. These checks defend the protocol's own
+    invariants under the single-owner model below; they do not claim
+    protection against arbitrary concurrent hostile mutation of the root
+    between a check and the operation it guards.
+  - *Bounded enumeration.* Reconciliation reads the pending area through
+    one directory handle, one entry at a time, resolving each entry before
+    the next is read: its memory does not grow with the number of entries
+    (the report's failure list is bounded and its counts are totals), no
+    listing is materialized, and nothing is sorted. Entries are resolved
+    in the directory's own order; the canonical effect of a pass does not
+    depend on that order, because every marker is resolved by its own
+    committed references and every temporary by its own name, so repeated
+    passes converge whatever order they read the area in. The handle is
+    released when the enumeration completes, when it fails, and when the
+    consumer stops early; a read failure part-way is reported as its own
+    unresolved obligation after the entries already resolved, which keep
+    their effects.
   - *Truthful reporting.* A cleanup or reconciliation failure never
     replaces a transaction's canonical error or a committed result: it is
     reported by closed kind with the digest or a bounded safe entry

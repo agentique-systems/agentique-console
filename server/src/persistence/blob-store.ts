@@ -34,9 +34,9 @@ export class BlobCorruptedError extends Error {
  * A path the store owns is not what the protocol expects (a symlink, a
  * directory, or another non-regular entry where a marker, temporary file,
  * blob, shard directory, or the pending directory itself should be). The
- * store never follows, removes, or writes through such an entry. The
- * message names the entry's protocol role and safe identifier only, never
- * a filesystem path.
+ * store never follows, reads, reuses, removes, or writes through such an
+ * entry. The message names the entry's protocol role and safe identifier
+ * only, never a filesystem path.
  */
 export class BlobUnsafeEntryError extends Error {
   /** The closed kind a diagnostic reports for this failure (`failureKindOf`). */
@@ -95,8 +95,9 @@ export type PendingEntry =
  */
 export interface BlobStore {
   put(bytes: Uint8Array): BlobWrite;
+  /** Whether a regular blob file of `digest` exists; throws `BlobUnsafeEntryError` for a non-regular entry at the blob's or its shard's path. */
   has(digest: string): boolean;
-  /** Bytes for `digest`; throws `BlobMissingError` or `BlobCorruptedError`. */
+  /** Bytes for `digest`; throws `BlobMissingError`, `BlobCorruptedError`, or `BlobUnsafeEntryError`. */
   get(digest: string): Uint8Array;
   /**
    * Compensating removal, used only by persistence consistency handling
@@ -111,8 +112,18 @@ export interface BlobStore {
   markPending(digest: string): void;
   /** Removes the pending marker for `digest`; returns whether one existed. Throws `BlobUnsafeEntryError` for a non-regular entry. */
   clearPending(digest: string): boolean;
-  /** Every entry of the pending area, deterministically ordered; throws `BlobUnsafeEntryError` when the area itself is unsafe. */
-  listPending(): PendingEntry[];
+  /**
+   * Enumerates the pending area one entry at a time, in the order the
+   * pending directory yields them (its filesystem order; no global sort).
+   * Memory is bounded independently of the number of entries: the
+   * consumer sees one entry per step and the store holds at most one
+   * directory read buffer. The iteration releases its directory handle when
+   * it completes, when it throws, and when the consumer returns early, and
+   * throws `BlobUnsafeEntryError` when the area itself is unsafe. A read
+   * failure part-way surfaces as a thrown error after the entries already
+   * yielded.
+   */
+  listPending(): Iterable<PendingEntry>;
   /** Removes one recognized protocol temporary file by its validated name; returns whether it existed. */
   removeTemporary(name: string): boolean;
 }
@@ -150,6 +161,9 @@ function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
+/** What the store found at a blob's owned path: nothing, or a regular file; anything else throws before it is named. */
+type BlobEntry = "absent" | "file";
+
 let temporaryCounter = 0;
 
 /**
@@ -165,11 +179,19 @@ let temporaryCounter = 0;
  * it left behind verifies.
  *
  * The root is the owning process's configured directory. Inside it the store
- * refuses to write through, remove, or enumerate anything but regular files
- * and regular directories at the paths the protocol computes from a
- * validated digest or temporary name: a symlink or foreign entry at the
- * pending directory, a shard directory, a marker, a temporary file, or a
- * blob is reported, never followed. Nothing here calls `fsync`: the
+ * refuses to write through, read through, reuse, remove, or enumerate
+ * anything but regular files and regular directories at the paths the
+ * protocol computes from a validated digest or temporary name: a symlink or
+ * foreign entry at the pending directory, a shard directory, a marker, a
+ * temporary file, or a blob is reported as unsafe, never followed — whatever
+ * the entry it points at holds, even bytes of the expected digest. Every
+ * owned path is examined with `lstat` before it is probed, read, reused,
+ * published, or removed; a temporary file is created exclusively (`wx`), so
+ * a write never goes through an entry that appeared at its name. This is the
+ * documented single-owner model: the checks defend the protocol's own
+ * invariants and report foreign entries; they do not claim protection
+ * against arbitrary concurrent hostile mutation of the root between a
+ * check and the operation it guards. Nothing here calls `fsync`: the
  * ordering holds for abrupt process termination (every returned operation
  * has reached the kernel), not for power loss.
  */
@@ -216,6 +238,23 @@ export class FileBlobStore implements BlobStore {
     return true;
   }
 
+  /**
+   * The one probe of a blob's owned path, parents first: an absent or regular
+   * shard directory, then an absent or regular leaf. A symlink, a directory,
+   * or any other entry at either level is unsafe and is named by role and
+   * digest only — never treated as absent (a dangling link is not missing
+   * content) and never followed (a link to bytes of the right digest is not
+   * this store's content).
+   */
+  private blobEntry(digest: string): BlobEntry {
+    const target = this.pathFor(digest);
+    if (!this.directoryIfPresent(path.dirname(target), "shard_directory", digest.slice(0, 2))) return "absent";
+    const leaf = this.entryAt(target);
+    if (leaf === null) return "absent";
+    if (!leaf.isFile()) throw new BlobUnsafeEntryError("blob", digest);
+    return "file";
+  }
+
   /** Removes the regular file at an owned path; `false` when absent; refuses anything else. */
   private unlinkRegular(target: string, role: "marker" | "temporary" | "blob", entry: string): boolean {
     const existing = this.entryAt(target);
@@ -225,16 +264,26 @@ export class FileBlobStore implements BlobStore {
     return true;
   }
 
-  private verifyExisting(target: string, digest: string, expectedSize: number): void {
-    verifyStored(fs.readFileSync(target), digest, expectedSize);
+  /** Reads and verifies the regular blob file `blobEntry` reported at the digest's path; a file that vanished meanwhile is missing content. */
+  private readVerified(digest: string, expectedSize: number | null): Uint8Array {
+    let bytes: Buffer;
+    try {
+      bytes = fs.readFileSync(this.pathFor(digest));
+    } catch (error) {
+      if (isMissing(error)) throw new BlobMissingError(digest);
+      throw error;
+    }
+    verifyStored(bytes, digest, expectedSize ?? bytes.byteLength);
+    return bytes;
   }
 
   put(bytes: Uint8Array): BlobWrite {
     const digest = sha256Hex(bytes);
     const byteSize = bytes.byteLength;
     const target = this.pathFor(digest);
-    if (fs.existsSync(target)) {
-      this.verifyExisting(target, digest, byteSize);
+    // The owned path is probed with the safe-path rules before it is reused: an unsafe shard or leaf is refused, never followed.
+    if (this.blobEntry(digest) === "file") {
+      this.readVerified(digest, byteSize);
       return { digest, byteSize, written: false, pending: false };
     }
     // The marker exists before any byte of a new blob does; the temporary file lives beside it.
@@ -243,7 +292,8 @@ export class FileBlobStore implements BlobStore {
     const temp = path.join(this.pendingDir, `${digest}.${process.pid}.${temporaryCounter}.${randomUUID()}.tmp`);
     try {
       this.ensureDirectory(path.dirname(target), "shard_directory", digest.slice(0, 2));
-      fs.writeFileSync(temp, bytes);
+      // Exclusive creation: the temporary is never written through an entry that appeared at its name.
+      fs.writeFileSync(temp, bytes, { flag: "wx" });
       fs.renameSync(temp, target);
     } catch (error) {
       let failure: unknown = error;
@@ -252,14 +302,15 @@ export class FileBlobStore implements BlobStore {
       } catch {
         // A temporary file that cannot be removed now is a recognized protocol entry; reconciliation removes it.
       }
-      // Another writer may have created the target meanwhile; reuse it only if it verifies. The marker stays with the caller.
-      if (fs.existsSync(target)) {
-        try {
-          this.verifyExisting(target, digest, byteSize);
+      // Another writer may have created the target meanwhile; reuse it only if it is a regular file that verifies. An unsafe
+      // entry or corrupt content at the path is the failure reported. The marker stays with the caller in the reused case.
+      try {
+        if (this.blobEntry(digest) === "file") {
+          this.readVerified(digest, byteSize);
           return { digest, byteSize, written: false, pending: true };
-        } catch (verifyError) {
-          failure = verifyError;
         }
+      } catch (probeError) {
+        failure = probeError;
       }
       // Nothing was published: the marker this call created is withdrawn best-effort (a marker that stays is resolved by reconciliation).
       try {
@@ -274,22 +325,13 @@ export class FileBlobStore implements BlobStore {
 
   has(digest: string): boolean {
     assertDigest(digest);
-    return fs.existsSync(this.pathFor(digest));
+    return this.blobEntry(digest) === "file";
   }
 
   get(digest: string): Uint8Array {
     assertDigest(digest);
-    const target = this.pathFor(digest);
-    let bytes: Buffer;
-    try {
-      bytes = fs.readFileSync(target);
-    } catch (error) {
-      if (isMissing(error)) throw new BlobMissingError(digest);
-      throw error;
-    }
-    const actual = sha256Hex(bytes);
-    if (actual !== digest) throw new BlobCorruptedError(digest, actual);
-    return bytes;
+    if (this.blobEntry(digest) === "absent") throw new BlobMissingError(digest);
+    return this.readVerified(digest, null);
   }
 
   remove(digest: string): boolean {
@@ -318,15 +360,25 @@ export class FileBlobStore implements BlobStore {
     return this.unlinkRegular(this.markerFor(digest), "marker", digest);
   }
 
-  listPending(): PendingEntry[] {
-    if (!this.directoryIfPresent(this.pendingDir, "pending_directory", PENDING_DIRECTORY)) return [];
-    const entries: PendingEntry[] = [];
-    for (const entry of fs.readdirSync(this.pendingDir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      if (DIGEST.test(entry.name)) entries.push(entry.isFile() ? { kind: "marker", digest: entry.name } : { kind: "unsafe", entry: entry.name });
-      else if (TEMPORARY.test(entry.name)) entries.push(entry.isFile() ? { kind: "temporary", digest: entry.name.slice(0, 64), name: entry.name } : { kind: "unsafe", entry: entry.name });
-      else entries.push({ kind: "unrecognized", entry: safeEntryId(entry.name) });
+  /**
+   * One directory handle over the pending area, read one entry at a time
+   * (the runtime's read buffer is the only memory the enumeration holds),
+   * classified as it is read, and closed in every case — completion, a
+   * read failure, or the consumer's early return. Entries arrive in the
+   * directory's own order; nothing is collected or sorted.
+   */
+  *listPending(): Generator<PendingEntry, void, undefined> {
+    if (!this.directoryIfPresent(this.pendingDir, "pending_directory", PENDING_DIRECTORY)) return;
+    const dir = fs.opendirSync(this.pendingDir);
+    try {
+      for (;;) {
+        const entry = dir.readSync();
+        if (entry === null) return;
+        yield classifyPendingEntry(entry);
+      }
+    } finally {
+      dir.closeSync();
     }
-    return entries;
   }
 
   removeTemporary(name: string): boolean {
@@ -334,6 +386,13 @@ export class FileBlobStore implements BlobStore {
     if (!this.directoryIfPresent(this.pendingDir, "pending_directory", PENDING_DIRECTORY)) return false;
     return this.unlinkRegular(path.join(this.pendingDir, name), "temporary", name);
   }
+}
+
+/** The protocol's reading of one pending-area entry: by its exact name shape and its own entry type (a symlink is never followed). */
+function classifyPendingEntry(entry: fs.Dirent): PendingEntry {
+  if (DIGEST.test(entry.name)) return entry.isFile() ? { kind: "marker", digest: entry.name } : { kind: "unsafe", entry: entry.name };
+  if (TEMPORARY.test(entry.name)) return entry.isFile() ? { kind: "temporary", digest: entry.name.slice(0, 64), name: entry.name } : { kind: "unsafe", entry: entry.name };
+  return { kind: "unrecognized", entry: safeEntryId(entry.name) };
 }
 
 /** An in-memory store for tests, with the same verification behaviour and the same marker protocol over an in-memory pending set. */
@@ -383,6 +442,7 @@ export class MemoryBlobStore implements BlobStore {
     return this.#pending.delete(digest);
   }
 
+  /** The pending markers in digest order (the in-memory area has no directory order of its own). */
   listPending(): PendingEntry[] {
     return [...this.#pending].sort().map((digest) => ({ kind: "marker", digest }));
   }
