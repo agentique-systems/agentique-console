@@ -154,15 +154,15 @@ imports, re-exports, or aliases anything from it. Per-file replacements:
 
 | Path | Disposition |
 |---|---|
-| `main.ts` | Rewritten: opens the database with the reset-required check, builds the new app graph. |
+| `main.ts` | Rewritten: opens the database with the reset-required check, builds the new app graph, runs the clean-break restart recovery (`execution/recovery-service.ts`, including the blob store's pending-area reconciliation) and admits work only when it is complete, then starts the one scheduler. Not yet rewritten: the replacement runtime is not wired into the legacy entrypoint during construction (roadmap Phase 9). |
 | `app.ts` | Rewritten: composes the new services. Every legacy service construction deleted. |
-| `boot.ts` | Rewritten: Attempt recovery from manifests only. `expirePendingOnBoot`, delivery requeue, `reconcileDurableCommunication`, orphan worktree recovery by session, orphan child archival, scheduled-assignment redrive, cron fallback, governance sweep deleted. |
+| `boot.ts` | Rewritten: startup recovery is the clean-break `RecoveryService` (Attempts from rows, leases, worktree obligations, pending blobs), nothing from a transcript. `expirePendingOnBoot`, delivery requeue, `reconcileDurableCommunication`, orphan worktree recovery by session, orphan child archival, scheduled-assignment redrive, cron fallback, governance sweep deleted. |
 | `context.ts` | Retained in shape (`AppContext`), retyped to the new `App`. |
 | `config.ts` | Rewritten. See section 9 for variables. |
 | `ids.ts` | Deleted. Replaced by `core/src/ids.ts` (the glossary prefixes). Legacy prefixes `us`, `as`, `msg`, `int`, `turn`, `delivery`, `cron`, `proc`, `draft`, `rnd`, `sched`, `spec`, `ost`, `rqs`, `rqd`, `proj`, `rql`, `chg`, `wl`, `di`, `ckpt`, `land` deleted. |
 | `errors.ts`, `late.ts`, `async-queue.ts` | Generic; rewritten under the same names if the new code needs them (rule 7 of the contract), otherwise deleted. |
 | `paging.ts`, `paging.test.ts` | Deleted with no replacement (existed for `read_handoff` and tool-output windowing; Artifacts are read by id and range). |
-| `recovery.ts`, `recovery.test.ts` | Deleted. Replaced by Attempt recovery in `invocations/attempts.ts`. |
+| `recovery.ts`, `recovery.test.ts` | Deleted. Replaced by `execution/recovery-service.ts` (`recovery-service.test.ts`). |
 | `test-helpers.ts` | Deleted. New harness under `server/src/test/`. |
 | `requirements-format.test.ts` | Deleted. |
 

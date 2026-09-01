@@ -6,7 +6,10 @@ defined in [glossary.md](glossary.md) and
 implementation. It is a contract: every rule here is binding on every
 commit on the `rewrite/orchestration-core` branch and on the cutover merge.
 The inventory of what is removed is in
-[legacy-removal.md](legacy-removal.md).
+[legacy-removal.md](legacy-removal.md). Delivery against this contract —
+the original phases 0–10, what each has shipped, the evidence, and what
+remains — is tracked in [implementation-roadmap.md](../implementation-roadmap.md);
+that ledger records progress and never defines semantics.
 
 ## 1. Statement
 
@@ -257,9 +260,14 @@ code; each is the final production location of what it contains.
   `server/src/persistence/` and only in the new runtime's tests until
   cutover. The two never share a database file.
 - A database file and its Artifact blob store are opened and written by
-  exactly one runtime process at a time. Transactional compensation for
-  blobs ([execution-model.md](execution-model.md) §2.1) relies on that
-  single owner and is not multi-process safe.
+  exactly one runtime process at a time, which runs restart recovery —
+  including the blob store's pending-area reconciliation — before it
+  admits work. Transactional compensation and startup reconciliation for
+  blobs ([execution-model.md](execution-model.md) §2.1) rely on that
+  single owner and are not multi-process safe; no lock service
+  establishes the owner. The blob store's pending area holds markers and
+  protocol temporary files only — no Artifact content, path, credential,
+  or provider input — and no table or migration accompanies it.
 - The legacy import and profile migration scripts
   (`server/scripts/import-legacy.ts`, `server/scripts/migrate-profile.ts`)
   are deleted with no replacement. Provider JSONL transcripts are not
@@ -633,35 +641,50 @@ is one or more commits; each commit keeps `npm run typecheck` and
    Coordinator cancellation `update_task`, `request_completion`, and
    `request_decision`; the `final_synthesis` turn reads only); and
    restart safety across every write-replay, rollback, routing,
-   corruption, and Evaluator-Evidence window, and the abrupt-death
-   windows verified with a real child process over a real SQLite file
-   and `FileBlobStore` — which leave a safe unreferenced blob that
-   recovery does not remove (execution-model §2.1; no orphan-free
-   recovery is claimed for this phase). The remaining
-   permitted-but-not-executable tools of execution-model §6.4
-   (`create_tasks`, `record_decision`, `propose_requirements`,
-   `revise_execution_plan`, `update_task` beyond the Coordinator's
-   cancel) and operator supersession of a policy-resolved Decision
-   are later subphases. Later
-   subphases: Runs, Execution
-   Plan source validation and compiler,
-   Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
-   Requirement scope, scheduler, resource governor, Budget reservations,
-   Invocations (one per logical turn, with purposes), Attempts (`initial`,
-   `retry`, with the provider adapter's optional pointer-based resumption),
-   Context Manifests, results, Task states, Usage, Events. The provider
-   adapter and its continuation payload store are built in
-   `server/src/provider/` by extraction and rewrite from `server/src/sdk/`
-   where rule 7 permits. Patterns `single` and `chain` first, then `route`,
-   `parallel`, `coordinator_worker`, `evaluator_optimizer`, then
-   composition and joins in the compiler. Integration tests with a fake
-   provider for every Pattern, every compilation rule, and every invariant.
+   corruption, and Evaluator-Evidence window. Phase 2G-A correction
+   (done): the pending-write marker protocol of the blob store, the
+   transactor's `afterCommit` completion hooks, the Artifact Store's
+   marker lifecycle and pending-area reconciliation, its invocation by
+   the clean-break `RecoveryService` after the worktree releases with the
+   typed `blobs` report, and the abrupt-death windows verified with a
+   real child process over a real SQLite file and `FileBlobStore` — after
+   which a successful exclusive recovery removes every unreferenced blob
+   and temporary the protocol published, keeps every blob committed
+   metadata references, and resolves every marker (execution-model §2.1;
+   process death only, no power-loss claim, unmarked historical orphans
+   excluded). The remaining permitted-but-not-executable tools of
+   execution-model §6.4 (`create_tasks`, `record_decision`,
+   `propose_requirements`, `revise_execution_plan`, `update_task` beyond
+   the Coordinator's cancel) and operator supersession of a
+   policy-resolved Decision are existing acceptance commitments owned by
+   the roadmap's original Phases 4 and 5; their deferral waives none of
+   them. Still open under this step: operator Run cancellation and
+   pause/resume (roadmap Phase 2 exit work), the production provider
+   adapter built in `server/src/provider/` by extraction and rewrite from
+   `server/src/sdk/` where rule 7 permits (roadmap Phase 3), and the real
+   Workspace adapters for the six ports (roadmap Phase 4). Everything the
+   original wording of this step listed as future — Runs, Execution Plan
+   source validation and the compiler, Plan Nodes of both kinds
+   (`pattern`, `join`), Plan Edges, Plan Node Requirement scope, the
+   scheduler, the resource governor, Budget reservations, Invocations (one
+   per logical turn, with purposes), Attempts (`initial`, `retry`, with
+   the provider adapter's optional pointer-based resumption), Context
+   Manifests, results, Task states, Usage, Events, and all six Patterns
+   with composition and joins in the compiler — is implemented and
+   verified with the scripted fake provider for every Pattern, every
+   compilation rule, and every invariant, as credited in the roadmap.
 4. **Specification and verification.** Requirements (including
    `requirement_waiver` Decisions), Acceptance Criteria, Decisions with
    resolution policies, Evaluations, Gates, Agent Definition revisions and
    Tool Policy interception, Snapshots, Changesets, the Integration
-   Workspace, and publishing.
-5. **API and web.** Routes, event stream, views.
+   Workspace, and publishing. Status: implemented and verified against
+   the declared Workspace ports and their fake implementations under the
+   Phase 2 subphase labels; the production Workspace adapters,
+   Workspace-file Agent Definitions, and operator supersession of a
+   policy-resolved Decision remain (roadmap Phase 4).
+5. **API and web.** Routes, event stream, views. Status: not started
+   (roadmap Phase 9), together with the rewritten entrypoints that open
+   the database, run recovery, and start the scheduler.
 6. **Cutover.** Delete every entry in [legacy-removal.md](legacy-removal.md),
    delete the legacy tests, delete the evaluation harness, replace
    `README.md` and `docs/`, remove legacy environment variables from
@@ -1026,11 +1049,38 @@ the passing total alone.
   heavily escaped text is refused without a write or allowance, the same
   bytes as base64 succeed), and the abrupt-death windows with a real
   child process over a real SQLite file and `FileBlobStore`, driven by
-  IPC barriers and exit notifications: death after the blob write, death
-  after the Artifact row and Event, death after the commit with the
-  response lost, a deduplicated blob referenced by committed metadata,
-  and on-disk corruption in a fresh process — each inspecting rows and
-  blob files immediately after death and again after recovery.
+  IPC barriers and exit notifications: death after the pending marker,
+  during the temporary write, after the blob publication, after the
+  Artifact row and Event, after COMMIT before the marker removal, after
+  COMMIT with the response lost, and inside recovery between a blob
+  removal and its marker removal; a marked orphan another Run references
+  before recovery, a reuse crash over another Run's committed content,
+  restoration of a missing committed blob, two same-digest creates in one
+  uncommitted transaction, pre-existing unmarked content, a failed cleanup
+  followed by a successful repeated recovery, and on-disk corruption in a
+  fresh process — each inspecting rows, blob files, and the pending area
+  immediately after death, after recovery, and after a repeated recovery,
+  asserting no duplicate Artifact, Event, call row, or replay result and
+  no removal of committed content.
+- Pending-write protocol tests: the transactor's `afterCommit` (nested
+  registration on the root, registration order, never after a rollback or
+  a failed COMMIT, a throwing hook reported while later hooks run, a
+  throwing diagnostic sink never replacing the committed result, a hook
+  opening a new root); the blob store's marker, temporary-file, symlink,
+  junction, malformed-name, and unsafe-entry handling over a real
+  directory (no removal through a symlink, no recursive delete, no
+  `.tmp`-suffix matching, bounded sanitized identifiers); the Artifact
+  Store's marker lifecycle on commit, rollback, reuse, restoration, the
+  store's own put failure, and same-transaction duplicates, with every
+  cleanup failure reported by closed kind beside the canonical error; and
+  the reconciliation matrix (a stale marker with and without a blob,
+  referenced by this or another Run, a restored blob, an interrupted
+  cleanup, an unmarked orphan untouched, every failure kind reported
+  truthfully and resolved by a later pass, bounded reports and
+  diagnostics, refusal inside a transaction). The boundary test pins the
+  protocol's single owner, its single reconciliation caller and ordering,
+  the absence of timers, sweeps, fsync knobs, `durableBarriers`,
+  recursive deletes, and legacy bootstrap wiring.
 - Task proposal tests: every rule of execution-model §5.5.1 rejects the
   whole batch with its closed code and persists nothing; an accepted
   batch creates every Task, dependency, and reservation atomically;

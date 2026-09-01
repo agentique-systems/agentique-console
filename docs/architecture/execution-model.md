@@ -92,37 +92,85 @@ re-entrant over one SQLite connection:
   are cleared when the root ends. A hook that throws never replaces the
   canonical error: the failure is reported as the `rollback_hook_failed`
   diagnostic and attached to the thrown error.
+- **Transaction-scoped completion.** A store that must finish an external
+  side effect only once the mutation is durable (removing the pending
+  marker of a newly published Artifact blob, below) registers
+  `afterCommit(hook)` on the root, from any nesting depth. Hooks run
+  exactly once, only after a successful `COMMIT`, after the transactor has
+  settled its bookkeeping and left the transaction (a hook may open a new
+  root of its own), in registration order; they never run after a
+  rollback or a failed `COMMIT`, whose hooks are discarded with the
+  transaction. A hook that throws is reported as the `commit_hook_failed`
+  diagnostic and the remaining hooks still run; neither a failing hook nor
+  a failing diagnostic sink changes the committed result the caller
+  receives. The hook takes no argument: the Event sequence is read from
+  the journal by whoever needs it.
 - **What is and is not guaranteed for blobs.** SQLite and the Artifact
-  blob store do not form a crash-atomic distributed transaction. The
-  guarantee is: no invalid request writes a blob (every validation runs
-  first); Artifact metadata never commits before its blob exists; every
-  validation failure and ordinary synchronous transaction failure is
-  compensated by removing a blob the transaction newly wrote, unless a
-  committed Artifact references its digest (a pre-existing or restored
-  blob is never removed); a process or machine crash between the blob
-  write and the database commit can leave a safe, unreferenced blob behind
-  — never committed metadata pointing at content the operation did not
-  write — and reads always verify digest and size.
-  Three states are distinct and each is tested as itself: after an
-  ordinary synchronous failure (an exception, a failed COMMIT) the
-  compensation has run and the newly written blob is gone; immediately
-  after an abrupt death (the process killed between the blob write and
-  the commit, verified with a real child process over a real file and a
-  `FileBlobStore`) the uncommitted rows are gone and the blob file
-  remains, unreferenced; after startup recovery that blob still remains —
-  recovery repairs rows and leases and removes no blob, and the retried
-  call reuses the content-addressed file rather than writing it again.
-  There is no garbage collector in Phase 1, so "no orphan after recovery"
-  is not a guarantee of this phase. A compensation failure never replaces
-  the transaction's canonical error: it is reported as the
-  `blob_cleanup_failed` diagnostic naming the digest and the closed
-  failure kind (never the cleanup exception's text, which may name a
-  path), and it claims neither that the blob was removed nor that no
-  orphan remains.
+  blob store do not form a crash-atomic distributed transaction. Two
+  mechanisms cover the two failure classes, and each is tested as itself:
+  - *Synchronous failure → rollback compensation.* No invalid request
+    writes a blob (every validation runs first); Artifact metadata never
+    commits before its blob exists; every validation failure and ordinary
+    synchronous transaction failure (an exception, a failed `COMMIT`) is
+    compensated by the root's rollback hook, which removes a blob the
+    transaction newly wrote unless a committed Artifact of any Run
+    references its digest (a pre-existing or restored blob is never
+    removed) and then removes the write's pending marker.
+  - *Abrupt process death → startup reconciliation.* Before the blob
+    store publishes a blob of a digest it does not yet hold, it records a
+    **pending marker** for the digest — an empty regular file named by the
+    digest under the store's private pending area — and writes the bytes
+    to a protocol-named temporary file beside it, renamed into the store
+    once complete; the transaction that owns the write removes the marker
+    after `COMMIT` (`afterCommit`) or after compensation. A death anywhere
+    between the marker and its removal therefore leaves at most a marker,
+    a temporary file, or an unreferenced blob — never committed metadata
+    pointing at content the operation did not write. At startup, under
+    the exclusive ownership below and before any new write is admitted,
+    recovery reconciles the pending area: for every marker it queries the
+    committed references of the digest across every Run, keeps the blob
+    when one exists (a committed write whose marker outlived the process,
+    a restored blob, content another Run committed before recovery ran)
+    and removes it when none does, and removes the marker last; it
+    removes every recognised protocol temporary file; it leaves every
+    unsafe or unrecognised entry in place and reports it. The guarantee,
+    exactly: **after abrupt process termination (`SIGKILL` included), a
+    successful exclusive recovery pass removes every unreferenced blob and
+    temporary the protocol published, preserves every blob referenced by
+    committed Artifact metadata, and resolves every pending marker.** An
+    orphan may exist between the death and that recovery. Nothing is
+    fsynced and no SQLite durability setting is changed: the ordering
+    holds because every returned file operation has reached the kernel,
+    which is true for process death and not for power loss or filesystem
+    corruption — neither is covered. Blobs that carry no marker (an
+    orphan left before the protocol existed, or content another process
+    placed in the store) are outside the protocol: recovery enumerates
+    only the pending area, never walks the blob tree, and never removes a
+    file it did not name by a validated digest or temporary name — there
+    is no garbage collector and no sweep.
+  - *Truthful reporting.* A cleanup or reconciliation failure never
+    replaces a transaction's canonical error or a committed result: it is
+    reported by closed kind with the digest or a bounded safe entry
+    identifier (`blob_cleanup_failed`, `blob_marker_cleanup_failed`,
+    `blob_reconciliation_failed`; never the exception's text, which may
+    name a path, and never Artifact bytes), and the marker stays so the
+    next recovery retries the obligation. The recovery report's
+    reconciliation is `complete` only when every in-scope obligation was
+    resolved — a failed removal, a failed reference query, a failed
+    enumeration, or an unsafe or unrecognised entry makes it incomplete,
+    and an incomplete recovery is not presented as ready for new work.
+    Reconciliation is idempotent and its work is proportional to the
+    entries left in the pending area, never to the size of the store.
+  Reads always verify digest and size.
 - **Ownership.** A database file and its blob store are owned by exactly
-  one runtime process at a time. Compensation and reference checks assume
-  that single owner; multi-process cleanup safety is neither implemented
-  nor claimed.
+  one runtime process at a time, which opens them, runs recovery, and only
+  then admits work. Compensation, reference checks, and the pending-area
+  reconciliation assume that single owner; no lock service establishes
+  it, and concurrent recovery beside an active writer is neither
+  implemented nor claimed safe. The test harnesses model the boundary
+  (recovery first, work refused while the reconciliation is incomplete);
+  the production entrypoint that performs it is the application cutover's
+  (see `docs/implementation-roadmap.md`, Phase 9).
 
 | Object | Writer | Canonical store | Projections |
 |---|---|---|---|
@@ -2043,8 +2091,10 @@ and blob are created through the canonical `ArtifactStore.create` (with
 its rollback compensation), the Artifact Event and the safe
 `runtime_tool_calls` row commit together, and a callback, Event, insert,
 or COMMIT failure leaves no Artifact row, Event, call row, or
-unreferenced blob. Raw content never enters the row, an Event, or a
-diagnostic; the safe result carries `artifactId`, `mediaType`, `digest`,
+unreferenced blob; an abrupt process death anywhere in the call leaves at
+most a pending marker, a temporary file, or an unreferenced blob that the
+next startup recovery resolves (§2.1). Raw content never enters the row,
+an Event, or a diagnostic; the safe result carries `artifactId`, `mediaType`, `digest`,
 `byteSize`, and `title` only. An identical call of the same logical turn
 replays the same Artifact id; distinct requests create distinct Artifact
 metadata over safely deduplicated content-addressed blobs; concurrent
@@ -3873,7 +3923,7 @@ mechanism, if ever added, is a new feature with its own design.
 | Crash during a Gate cycle (between opening, a check, the Evaluator, settlement, the remediation turn, or a reopened cycle) | Every step is one transaction or one external step recorded once; the next pass finds the open Gate, the recorded checks, the existing Evaluator or Task, or the closed Gate, and repeats nothing (§10). |
 | Deterministic check cannot run (timeout, abort, lost view, lost output, failed start) | Infrastructure failure: nothing recorded, no Evaluation fabricated, the pass stops typed (`verification_failed`); the next pass reruns exactly the unrecorded checks (§10.1). |
 | Crash between a check's command and its record | The command reruns in a fresh view (the stale one is discarded); the output Artifact and its Evaluation are recorded once, in one transaction. |
-| Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` naming the tool and the closed failure kind, with one `runtime_tool_call_failed` diagnostic carrying the ids, the digest, and that kind — never the thrown text; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). A crash between a `write_artifact` blob write and its commit leaves a safe unreferenced blob that recovery does not remove and the retry reuses (§2.1). |
+| Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` naming the tool and the closed failure kind, with one `runtime_tool_call_failed` diagnostic carrying the ids, the digest, and that kind — never the thrown text; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). A crash anywhere in a `write_artifact` — after the pending marker, during the temporary write, after the blob publication, after the rows entered the transaction, or after COMMIT before the marker removal — leaves at most a marker, a temporary file, or an unreferenced blob; the next exclusive recovery removes the temporary and the blob unless a committed Artifact of any Run references the digest, and removes the marker (§2.1); the retry publishes the content anew or replays the committed row. |
 | `request_decision` refused (a kind with another owner, an out-of-scope or inaccessible id, invalid or over-bound input, an unbound role or purpose, a non-running or Gate-owned caller, a second request of the turn) | Rejected typed inside the call's transaction; nothing is written; the turn continues (§6.4). |
 | Provider misbehaves after an accepted `request_decision` (returns a result, attempts a further call, throws, fails transiently, ends on an approval-required call) | Ignored: the Attempt ends `failed` with class `decision_requested` and a refused retry, the Invocation `blocked` on the Decision, Usage recorded once for whatever the provider reported; no result, Changeset, approval, or second Decision is recorded (§8.2). |
 | Crash between an accepted `request_decision` and the Attempt's settlement | The Decision and its call row are the record; recovery marks the Attempt `interrupted` with the refused `decision_requested` retry and settles the Invocation `blocked` on the Decision, without a provider call; the Attempt's and the Invocation's settlement are one transaction, so neither exists without the other. |
@@ -3896,7 +3946,7 @@ mechanism, if ever added, is a new feature with its own design.
 | Approval claim transaction fails (callback or COMMIT) | No use row, no Event, no execution; the adapter learns `failed` and ends the Attempt as a tool failure with a bounded message; one `tool_call_authorization_failed` diagnostic; the retry may claim again. |
 | Provider fails after an approval claim | The use stays committed; the retry receives the same manifest but the grant is refused; repeating the call needs a new `side_effect_approval` Decision. |
 | Crash after an approval claim, before the external call | The approval is conservatively consumed (recovery repairs nothing); the retry cannot repeat the call under the original Decision and intercepts it again for a new approval. |
-| Server restart | Recovery (`server/src/execution/recovery-service.ts`) runs once at startup in one transaction: every `pending` or `running` Attempt of the previous process is marked `interrupted` with its consumed Attempt kept and its durable retry decision recorded; every stale lease is released and the governor is rebuilt from canonical lease state; an Invocation with no Attempt remaining is `failed` with `allocation_exhausted` (its Task failing likewise); every other interrupted Invocation is left `running` with durable retry eligibility under the same Invocation-wide deadline (§7.6), `resumed` only where §6.6 permits and `fresh` when the payload is absent or invalid. After that transaction recovery retries, outside any transaction, every worktree cleanup obligation still `pending` on a terminal Invocation (§9.1). Recovery is idempotent, reads no transcript and no provider message, and executes nothing: recoverable work is returned for an explicit execution call, which the scheduler drives. The worktree of a retry-eligible Invocation is preserved and reattached by Invocation id; reservations are read as persisted. |
+| Server restart | Recovery (`server/src/execution/recovery-service.ts`) runs once at startup in one transaction: every `pending` or `running` Attempt of the previous process is marked `interrupted` with its consumed Attempt kept and its durable retry decision recorded; every stale lease is released and the governor is rebuilt from canonical lease state; an Invocation with no Attempt remaining is `failed` with `allocation_exhausted` (its Task failing likewise); every other interrupted Invocation is left `running` with durable retry eligibility under the same Invocation-wide deadline (§7.6), `resumed` only where §6.6 permits and `fresh` when the payload is absent or invalid. After that transaction recovery retries, outside any transaction, every worktree cleanup obligation still `pending` on a terminal Invocation (§9.1), and then reconciles the Artifact blob store's pending area (§2.1): every marker a death left is resolved by the committed references, unreferenced protocol-published blobs and temporaries are removed, and the report states whether every obligation was resolved; a process admits no new work while that reconciliation is incomplete. Recovery is idempotent, reads no transcript and no provider message, and executes nothing: recoverable work is returned for an explicit execution call, which the scheduler drives. The worktree of a retry-eligible Invocation is preserved and reattached by Invocation id; reservations are read as persisted. |
 | Operator cancels a Run | All Attempts interrupted, all nodes `cancelled`, all reservations released, Integration Workspace left in place, Run `cancelled`. |
 | Operator pauses a Run | The scheduler stops starting Attempts for that Run; running Attempts are allowed to finish (`soft`) or interrupted (`hard`); Run `waiting` with reason `operator`. Other Runs are unaffected. |
 

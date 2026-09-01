@@ -41,16 +41,26 @@ the legacy code during construction and remain after cutover:
 Neither imports from, exports to, or is selected against its legacy
 counterpart; see the migration contract §2–§4.
 
+## Delivery tracking (not binding on semantics)
+
+- [Implementation roadmap](implementation-roadmap.md) — the original
+  phases 0–10 of the replacement, what each has shipped under which
+  subphase label, the evidence, the remaining work, and each phase's
+  completion condition. A ledger of progress; the architecture documents
+  define the semantics.
+
 ## Proposals (not binding)
 
 Design proposals under `docs/proposals/` are reviewable drafts. They bind
 nothing until a decision moves their content into the architecture
-documents; a proposal never describes a guarantee as implemented.
+documents; a proposal never describes a guarantee as implemented. Once
+decided, a proposal records its disposition and points at the binding
+text.
 
 - [Artifact blob crash recovery](proposals/artifact-crash-recovery.md) —
-  proposed pending-write marker protocol so startup recovery removes the
-  unreferenced blob an abrupt death can leave (execution-model §2.1);
-  awaiting an explicit decision.
+  the pending-write marker protocol; accepted with amendments and
+  implemented on 2026-09-01, now binding as execution-model §2.1. The
+  proposal keeps the options considered and its disposition.
 
 ## Legacy documents (scheduled for deletion at cutover)
 

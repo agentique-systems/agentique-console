@@ -466,6 +466,8 @@ prompt if it can be passed as an Artifact id.
 - Id prefix: `art_`
 - Owned by: the runtime
 - Store: `artifacts` (metadata) and the artifact blob store
+  (content-addressed blobs with a private pending-marker area the store
+  reconciles at startup; execution-model §2.1)
 - Related: Handoff, Task, Changeset, Evidence, Context Manifest
 
 ### Handoff

@@ -1,15 +1,109 @@
 # Proposal: Artifact blob crash recovery (pending-write markers)
 
-**Status: PROPOSED — not implemented, not authorized.** Nothing in this
-document is binding. The binding architecture
-([execution-model.md](../architecture/execution-model.md) §2.1) still
-states, and the child-process crash suite
-(`server/src/execution/data-access-crash.test.ts`) still demonstrates, that
-an abrupt death between a blob write and its database commit leaves a safe,
-unreferenced blob that startup recovery does not remove. This proposal is
-the smallest extension the author found that closes that gap under the
-existing single-runtime-owner model, submitted for an explicit decision:
-implement it as specified, amend it, or change the requirement.
+**Status: ACCEPTED WITH AMENDMENTS — implemented 2026-09-01.** The
+binding statement of the implemented guarantee is
+[execution-model.md](../architecture/execution-model.md) §2.1; where a
+section below differs from it, §2.1 and the code govern. This document is
+kept for the options considered (§2) and for the record of what was
+accepted, amended, implemented, and deliberately excluded (the
+disposition immediately below). Its remaining sections were written
+before implementation and are annotated where the implementation
+diverged.
+
+## Disposition
+
+**Accepted and implemented as proposed.**
+
+- Option 1, the targeted pending-write marker protocol under
+  `<root>/.pending/` — markers named by the digest alone, temporaries
+  moved into the same directory, the marker durable before any byte of a
+  new blob, marker removal after `COMMIT` or after compensation, and
+  startup reconciliation deciding every surviving marker by the global
+  committed-reference check (§2, §4 steps 1–8, §5, §6).
+- `Transactor.afterCommit` with the stated semantics: root-owned from any
+  depth, once, only after a successful `COMMIT`, after the transactor has
+  left the transaction, in registration order, a throwing hook reported
+  and never rethrown (§3).
+- Reconciliation owned by `ArtifactStore.reconcilePendingBlobs()` and
+  invoked by `RecoveryService.recover()` after the canonical transaction
+  and the worktree releases, outside any transaction; no second scheduler,
+  timer, or loop (§3).
+- Every `ArtifactStore.create` participates without opting in; the
+  marker is published inside the store's `put` (§3 "Participating
+  creation paths").
+- Unmarked historical orphans excluded; no scan, no automatic sweep, no
+  "if no marker, assume old" path (§2, §7).
+- The child-process crash windows of §6, each inspected after death,
+  after recovery, and after a repeated recovery.
+
+**Amended.**
+
+- *Marker ownership on reuse.* The proposal published a marker before
+  every `put` (§4 step 2), so a reuse of an already present blob carried
+  a marker whose recovery action would have been decided by the reference
+  check — and a crashed reuse of a pre-existing *unmarked, unreferenced*
+  blob would have authorized its deletion. The implementation publishes
+  the marker only when the store finds no blob for the digest: a reuse
+  publishes none, a crashed reuse marks nothing, and a pre-existing
+  unmarked blob is never deleted on the authority of a failed new
+  transaction. `BlobWrite` gained `pending` (this call published a
+  marker) beside `written` (this call wrote the blob); a `written: false`
+  result can still carry a marker obligation (the concurrent-writer
+  fallback that verified another writer's content), which is why the
+  Artifact Store settles the marker from `pending`, not from `written`.
+- *Hook registration order.* Compensation and completion are registered
+  before the marker or the blob can exist, so the failure-prone steps
+  (marker, temporary write, rename, Event, insert, `COMMIT`) run covered;
+  the proposal registered them after `put` (§4 step 5).
+- *`afterCommit` signature.* No `{ seq }` argument: the existing
+  abstraction does not need one.
+- *Marker content.* Empty; the name is the whole meaning. The proposal's
+  `{ digest, pid, createdAt }` content was informational only and was
+  dropped.
+- *Report shape.* `RecoveryReport.blobs` is
+  `{ resolvedMarkers, removedBlobs, removedTemporaries, failures[], failureCount, complete }`
+  with failures typed by a closed kind (`enumeration_failed`,
+  `reference_query_failed`, `blob_removal_failed`,
+  `temporary_removal_failed`, `marker_removal_failed`, `unsafe_entry`,
+  `unrecognized_entry`), the digest or a bounded sanitized entry
+  identifier, and the closed failure kind; the list is capped at 64 and
+  the count is complete. `complete` is the success statement. The
+  proposal's `pendingBlobDigests` and `malformedMarkers` were replaced
+  by that shape.
+- *Diagnostics.* `commit_hook_failed`, `blob_marker_cleanup_failed`, and
+  `blob_reconciliation_failed` (closed kinds, digests, safe identifiers).
+  The `blob_marker_malformed` kind was folded into the reconciliation
+  report's `unrecognized_entry` and `unsafe_entry`.
+- *Safety checks.* Beyond the proposal's leaf `lstat`, the implementation
+  refuses a symlink or foreign entry at the pending directory and at the
+  shard directory, creates markers exclusively (`wx`), recognises
+  temporaries by the full protocol name rather than a `.tmp` suffix, and
+  reads exactly one directory. `storage:unsafe_entry` was added to the
+  closed failure kinds for these refusals.
+- *Startup boundary.* The proposal stated that production `main.ts`
+  orders `recover()` before the scheduler starts. It does not: the
+  replacement runtime is not wired into the legacy application, and no
+  production code calls the clean-break `RecoveryService` (the boundary
+  test pins this). The test harnesses model the boundary — recovery
+  first, work refused while `blobs.complete` is false — and the
+  production wiring is the application cutover's (roadmap Phase 9).
+
+**Deliberately excluded.**
+
+- The `durableBarriers` option and every `fsync` (§4 "Operating-system or
+  machine failure"): the accepted guarantee covers process termination
+  only, and the boundary test forbids the option in the new source. A
+  power-loss guarantee, if ever wanted, is a separate decision.
+- Any change to SQLite durability settings.
+- The one-time operator-invoked reconciliation of historical orphans
+  (§2 "Tradeoff"): not authorized; unmarked orphans stay.
+- Any lock service or multi-process claim.
+
+**Evidence.** `server/src/persistence/transactions.test.ts`,
+`blob-store.test.ts`, `stores/artifacts.test.ts`,
+`server/src/execution/recovery-service.test.ts`,
+`data-access-crash.test.ts`, and the protocol case of
+`persistence/boundaries.test.ts`.
 
 ## 1. The gap
 
@@ -100,9 +194,11 @@ correct in both cases.
 - **Exclusive ownership.** Assumed, as today: one runtime process opens
   the database file and its blob store (migration-contract §4). Recovery
   runs once at process start before any provider or scheduler work is
-  admitted (`main.ts` orders `recover()` before the scheduler starts; the
-  test harness `withProcess` does the same). The proposal establishes no
-  lock; it inherits the contract and states it.
+  admitted. *Amended:* the test harnesses (`withProcess`, `openProcess`,
+  the crash child) model that order and refuse work after an incomplete
+  reconciliation; no production entrypoint invokes the clean-break
+  `RecoveryService` yet — that wiring is the application cutover's. The
+  proposal establishes no lock; it inherits the contract and states it.
 - **When recovery is complete enough.** New work is admitted only after
   `recover()` returns. `reconcilePendingBlobs()` runs inside `recover()`,
   so no `write_artifact` can race a marker that a dead process left.
@@ -172,13 +268,10 @@ Distinguish three failure classes:
   file operation that returned may not be on stable storage. Without
   barriers, the marker may vanish while the blob survives (the protocol
   then misses that orphan) or the rename may survive while the marker
-  does not. To cover this class the protocol needs, after step 2, an
-  `fsync` of the marker file and of `.pending/`, and, after step 4, an
-  `fsync` of the renamed file's directory — the same discipline SQLite
-  applies to its journal. These barriers are a configuration of the
-  `FileBlobStore` (`durableBarriers: boolean`) so tests and hosts without
-  ordered metadata can opt out explicitly; the guarantee statement in §7
-  is conditional on them.
+  does not. *Excluded:* the `durableBarriers` option and its `fsync`s
+  proposed here were not authorized and are not implemented; the
+  accepted guarantee is for process termination only and makes no
+  power-loss claim.
 - **Storage durability assumptions.** `.pending/` and the blob tree are on
   one local filesystem with POSIX `rename` atomicity (Windows NTFS
   `MoveFileEx` with replace is equivalent); directory entries are
@@ -364,11 +457,11 @@ root; `.pending/` on the same filesystem as the blob tree; no external
 process writes the blob root; the reference check's index
 (`artifacts_digest`) is present (it is).
 
-**Authorization required to implement:** (1) the marker protocol and the
-`.pending/` layout as specified; (2) the `Transactor.afterCommit` hook;
-(3) the recovery-service integration and the extended report; (4) the
-`durableBarriers` option and its default (proposed default: on in
-production, off in the in-memory test harness); (5) a separate decision on
-pre-existing orphans: leave them, or authorize a one-time,
-operator-invoked, dry-run-first reconciliation. Until then, execution-model
-§2.1 remains as written and Phase 2G-A remains unaccepted on this point.
+**Authorization outcome (2026-09-01):** (1) the marker protocol and the
+`.pending/` layout — authorized and implemented, with the reuse amendment
+above; (2) `Transactor.afterCommit` — authorized and implemented without
+the `{ seq }` argument; (3) the recovery-service integration and the
+report — authorized and implemented with the amended report shape; (4)
+`durableBarriers` — not authorized, not implemented; (5) pre-existing
+orphans — left in place, no reconciliation command. Execution-model §2.1
+now states the implemented guarantee.
