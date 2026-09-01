@@ -3,8 +3,18 @@ import type Database from "better-sqlite3";
 /** Compensation for an external side effect, run after the root transaction has rolled back. */
 export type RollbackHook = (cause: unknown) => void;
 
+/** Completion work for an external side effect, run once after the root transaction has committed. */
+export type CommitHook = () => void;
+
 /** A rollback hook threw; reported without replacing the transaction's canonical error. */
 export interface RollbackHookFailure {
+  /** Position of the hook in execution order (0 = the first hook run). */
+  index: number;
+  message: string;
+}
+
+/** A commit hook threw; reported without affecting the committed result. */
+export interface CommitHookFailure {
   /** Position of the hook in execution order (0 = the first hook run). */
   index: number;
   message: string;
@@ -13,6 +23,8 @@ export interface RollbackHookFailure {
 export interface TransactorOptions {
   /** Receives every rollback-hook failure. Defaults to a no-op; the failures are also attached to the thrown error. */
   onRollbackHookFailure?: (failure: RollbackHookFailure) => void;
+  /** Receives every commit-hook failure. Defaults to a no-op; a sink that throws is ignored, so the committed result is always returned. */
+  onCommitHookFailure?: (failure: CommitHookFailure) => void;
 }
 
 /**
@@ -40,18 +52,33 @@ export interface TransactorOptions {
  * failure is reported to `onRollbackHookFailure` and attached to the
  * thrown error as the non-enumerable `rollbackHookFailures`. Hooks are
  * cleared when the root transaction ends and cannot leak into the next.
+ *
+ * Completion. `afterCommit` registers a hook on the root transaction (from
+ * any nesting depth) to finish an external side effect once the mutation
+ * is durable, such as removing the pending marker of a newly published
+ * Artifact blob. Hooks run exactly once, only after a successful `COMMIT`,
+ * after the transactor has settled its bookkeeping and left the
+ * transaction (a hook that opens a new `write` starts a new root), in
+ * registration order; they never run after a rollback or a failed
+ * `COMMIT`, whose hooks are discarded with the transaction. A hook that
+ * throws is reported to `onCommitHookFailure` and the remaining hooks
+ * still run; neither a failing hook nor a failing sink changes the
+ * committed result, which `write` returns as if every hook had succeeded.
  */
 export class Transactor {
   #depth = 0;
   #rollbackOnly: { cause: unknown } | null = null;
   #hooks: RollbackHook[] = [];
+  #commitHooks: CommitHook[] = [];
   readonly #onHookFailure: (failure: RollbackHookFailure) => void;
+  readonly #onCommitHookFailure: (failure: CommitHookFailure) => void;
 
   constructor(
     private readonly sqlite: Database.Database,
     options: TransactorOptions = {},
   ) {
     this.#onHookFailure = options.onRollbackHookFailure ?? (() => {});
+    this.#onCommitHookFailure = options.onCommitHookFailure ?? (() => {});
   }
 
   get inTransaction(): boolean {
@@ -81,6 +108,19 @@ export class Transactor {
     this.#hooks.push(hook);
   }
 
+  /**
+   * Registers completion work for an external side effect made during the
+   * current root transaction, run only after the root has committed. Only
+   * valid while a write transaction is active; the hook belongs to the root
+   * even when registered by a nested store call.
+   */
+  afterCommit(hook: CommitHook): void {
+    if (this.#depth === 0) {
+      throw new Error("afterCommit requires an active write transaction");
+    }
+    this.#commitHooks.push(hook);
+  }
+
   #nested<T>(work: () => T): T {
     this.#depth += 1;
     try {
@@ -98,6 +138,7 @@ export class Transactor {
     this.#depth = 1;
     this.#rollbackOnly = null;
     this.#hooks = [];
+    this.#commitHooks = [];
     let result: T | undefined;
     let failure: { cause: unknown } | null = null;
     try {
@@ -114,7 +155,9 @@ export class Transactor {
       }
     }
     if (failure === null) {
+      const committed = this.#commitHooks;
       this.#reset();
+      this.#runCommitHooks(committed);
       return result as T;
     }
     try {
@@ -133,6 +176,21 @@ export class Transactor {
     this.#depth = 0;
     this.#rollbackOnly = null;
     this.#hooks = [];
+    this.#commitHooks = [];
+  }
+
+  #runCommitHooks(hooks: CommitHook[]): void {
+    hooks.forEach((hook, index) => {
+      try {
+        hook();
+      } catch (error) {
+        try {
+          this.#onCommitHookFailure({ index, message: error instanceof Error ? error.message : String(error) });
+        } catch {
+          // The diagnostic sink is best effort: its failure never replaces the committed result.
+        }
+      }
+    });
   }
 
   #runRollbackHooks(hooks: RollbackHook[], cause: unknown): void {

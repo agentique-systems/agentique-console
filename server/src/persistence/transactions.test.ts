@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { openHarness, seedRun } from "./test-support.ts";
+import { Transactor } from "./transactions.ts";
 
 const encode = (text: string) => new TextEncoder().encode(text);
 
@@ -239,5 +240,140 @@ describe("Transactor", () => {
     } finally {
       h.close();
     }
+  });
+
+  describe("afterCommit", () => {
+    it("runs commit hooks once, in registration order, from every nesting depth, after the transaction has been left, and never for a rollback", () => {
+      const h = openHarness();
+      try {
+        const s = seedRun(h);
+        const calls: string[] = [];
+        const settled: boolean[] = [];
+        const message = h.ctx.tx.write(() => {
+          h.ctx.tx.afterCommit(() => {
+            calls.push("root-1");
+            settled.push(h.ctx.tx.inTransaction);
+          });
+          h.ctx.tx.afterRollback(() => calls.push("never-rollback"));
+          return h.ctx.tx.write(() => {
+            h.ctx.tx.afterCommit(() => calls.push("nested-1"));
+            h.ctx.tx.write(() => h.ctx.tx.afterCommit(() => calls.push("nested-2")));
+            const posted = h.stores.conversations.postMessage({ conversationId: s.conversation.id, author: "operator", content: "hi", runId: s.run.id, invocationId: null });
+            h.ctx.tx.afterCommit(() => calls.push("root-2"));
+            // Not yet: the hooks run only after COMMIT.
+            expect(calls).toEqual([]);
+            return posted;
+          });
+        });
+        expect(h.stores.conversations.listMessages(s.conversation.id)).toEqual([message]);
+        expect(calls).toEqual(["root-1", "nested-1", "nested-2", "root-2"]);
+        // Bookkeeping is settled before the hooks run: the hook observed no open transaction.
+        expect(settled).toEqual([false]);
+        expect(h.ctx.tx.inTransaction).toBe(false);
+        expect(h.diagnostics).toEqual([]);
+        // Hooks are cleared with the root: a later transaction runs only its own, and a rolled-back one runs none.
+        h.ctx.tx.write(() => h.ctx.tx.afterCommit(() => calls.push("second-tx")));
+        expect(calls).toEqual(["root-1", "nested-1", "nested-2", "root-2", "second-tx"]);
+        expect(() =>
+          h.ctx.tx.write(() => {
+            h.ctx.tx.afterCommit(() => calls.push("never-after-rollback"));
+            h.ctx.tx.write(() => {
+              throw new Error("nested failure");
+            });
+          }),
+        ).toThrow("nested failure");
+        expect(calls).toHaveLength(5);
+        h.ctx.tx.write(() => {});
+        expect(calls).toHaveLength(5);
+      } finally {
+        h.close();
+      }
+    });
+
+    it("never runs commit hooks after a failed COMMIT, whose rollback hooks run instead", () => {
+      const h = openHarness();
+      try {
+        const calls: string[] = [];
+        h.database.sqlite.pragma("defer_foreign_keys = ON");
+        expect(() =>
+          h.ctx.tx.write(() => {
+            h.ctx.tx.afterCommit(() => calls.push("committed"));
+            h.ctx.tx.afterRollback(() => calls.push("compensated"));
+            h.database.sqlite
+              .prepare("INSERT INTO conversations (id, workspace_id, title, active_run_id, created_at, updated_at) VALUES (?, ?, NULL, NULL, ?, ?)")
+              .run("cv_000000000000000000000000", "ws_000000000000000000000000", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+          }),
+        ).toThrow(/FOREIGN KEY/);
+        expect(calls).toEqual(["compensated"]);
+        expect(h.ctx.tx.inTransaction).toBe(false);
+        // The discarded hooks do not leak into the next successful transaction.
+        h.ctx.tx.write(() => {});
+        expect(calls).toEqual(["compensated"]);
+      } finally {
+        h.close();
+      }
+    });
+
+    it("a throwing commit hook is reported, later hooks still run, and the committed result is returned", () => {
+      const h = openHarness();
+      try {
+        const s = seedRun(h);
+        const calls: string[] = [];
+        const message = h.ctx.tx.write(() => {
+          h.ctx.tx.afterCommit(() => calls.push("first"));
+          h.ctx.tx.afterCommit(() => {
+            throw new Error("hook exploded");
+          });
+          h.ctx.tx.afterCommit(() => calls.push("third"));
+          return h.stores.conversations.postMessage({ conversationId: s.conversation.id, author: "operator", content: "kept", runId: s.run.id, invocationId: null });
+        });
+        expect(message.content).toBe("kept");
+        expect(h.stores.conversations.listMessages(s.conversation.id)).toEqual([message]);
+        expect(calls).toEqual(["first", "third"]);
+        expect(h.diagnostics).toEqual([{ kind: "commit_hook_failed", index: 1, message: "hook exploded" }]);
+        expect(h.ctx.tx.inTransaction).toBe(false);
+      } finally {
+        h.close();
+      }
+    });
+
+    it("a throwing diagnostic sink never replaces the committed result, and a hook may open a new transaction", () => {
+      const h = openHarness();
+      try {
+        const tx = new Transactor(h.database.sqlite, {
+          onCommitHookFailure: () => {
+            throw new Error("sink is broken");
+          },
+        });
+        const calls: string[] = [];
+        const result = tx.write(() => {
+          tx.afterCommit(() => {
+            throw new Error("hook exploded");
+          });
+          tx.afterCommit(() => {
+            // The transactor has left the transaction: this write is a new root of its own.
+            expect(tx.inTransaction).toBe(false);
+            tx.write(() => calls.push("new root inside hook"));
+          });
+          h.database.sqlite.prepare("INSERT INTO workspaces (id, name, root_path, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run("ws_000000000000000000000001", "w", "/w", "directory", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+          return "committed";
+        });
+        expect(result).toBe("committed");
+        expect(calls).toEqual(["new root inside hook"]);
+        expect(tx.inTransaction).toBe(false);
+        expect(h.database.sqlite.prepare("SELECT count(*) AS n FROM workspaces WHERE id = ?").get("ws_000000000000000000000001")).toEqual({ n: 1 });
+      } finally {
+        h.close();
+      }
+    });
+
+    it("rejects commit-hook registration outside a transaction", () => {
+      const h = openHarness();
+      try {
+        expect(() => h.ctx.tx.afterCommit(() => {})).toThrow(/requires an active write transaction/);
+      } finally {
+        h.close();
+      }
+    });
   });
 });

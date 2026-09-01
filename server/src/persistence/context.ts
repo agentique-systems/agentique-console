@@ -13,7 +13,8 @@ import { Transactor } from "./transactions.ts";
  */
 export type PersistenceDiagnostic =
   | { kind: "blob_cleanup_failed"; digest: string; message: string }
-  | { kind: "rollback_hook_failed"; index: number; message: string };
+  | { kind: "rollback_hook_failed"; index: number; message: string }
+  | { kind: "commit_hook_failed"; index: number; message: string };
 
 export type DiagnosticSink = (diagnostic: PersistenceDiagnostic) => void;
 
@@ -47,6 +48,7 @@ const defaultDiagnostics: DiagnosticSink = (diagnostic) => {
       console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.message} (digest ${diagnostic.digest})`);
       return;
     case "rollback_hook_failed":
+    case "commit_hook_failed":
       console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.message} (hook ${diagnostic.index})`);
       return;
   }
@@ -61,6 +63,7 @@ export function createPersistenceContext(
   const diagnostics = options.diagnostics ?? defaultDiagnostics;
   const tx = new Transactor(database.sqlite, {
     onRollbackHookFailure: (failure) => diagnostics({ kind: "rollback_hook_failed", ...failure }),
+    onCommitHookFailure: (failure) => diagnostics({ kind: "commit_hook_failed", ...failure }),
   });
   return {
     db: database.db,
