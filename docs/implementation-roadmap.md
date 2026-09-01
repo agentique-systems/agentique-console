@@ -133,8 +133,16 @@ immutable Events.
 `retry-policy.ts`, `continuation-policy.ts`, `invocation-lifecycle.ts`,
 `recovery-service.ts`, `workspace-cleanup.ts`, `decision-requests.ts`,
 `handoff-routing.ts`, `join.ts`, `task-projection.ts`, `pattern
-positions` on Invocations, and the runtime-tool call boundary
-(`runtime-tools.ts`). The per-item evidence is in the exit checklist below.
+positions` on Invocations, the runtime-tool call boundary
+(`runtime-tools.ts`), and the operator Run-control boundary
+(`run-control.ts`: cancel, pause `soft`/`hard`, resume; the shared
+cancellation convergence `run-cancellation.ts`; the persisted
+`operatorPause` on `runs` with its database invariants; the one admission
+rule `runAdmitsNewWork` revalidated by the scheduler, the executor's
+preparation, dispatch, and finalization, the runners, the Gate and
+completion engines, the join settler, the Invocation preparation service,
+and the Decision continuation). The per-item evidence is in the exit
+checklist below.
 
 **Evidence.** Injected ports and test doubles for provider and Workspace
 behaviour (`ScriptedProvider`, `Fake*Workspace`); real execution for
@@ -143,38 +151,44 @@ persistence (file-backed restart suites: `*-restart.test.ts`,
 death (`data-access-crash.test.ts`, a real child process killed with
 `SIGKILL` over a real SQLite file and `FileBlobStore`).
 
-**Remaining (evidence-backed, finite).**
-
-1. **Operator cancellation of a Run** — execution-model §14 "Operator
-   cancels a Run" (every Attempt interrupted, every node `cancelled`,
-   every reservation released, Integration Workspace left in place, Run
-   `cancelled`). Propagation primitives exist and are tested (node removal
-   by plan revision cancels running nodes, `plan-revision-service.ts`; an
-   Invocation's cancellation settles its node, `patterns/support.ts`; Task
-   cancellation, `task-proposals.ts`, `gates.ts`; Completion Request
-   cancellation, `completion.ts`), but no operation performs the Run-wide
-   cancellation; tests cancel a Run through store transitions directly
-   (`data-access-test-support.ts` `cancelRun`).
-2. **Operator pause and resume** — execution-model §14 "Operator pauses a
-   Run" (`soft`: the scheduler starts nothing new; `hard`: running Attempts
-   interrupted; Run `waiting` with reason `operator`; resume clears it).
-   The canonical state exists (`RUN_WAIT_REASONS` includes `operator`,
-   `core/src/runs.ts`) and the scheduler already waits and resumes a Run on
-   every other reason from rows; no operation sets or clears the `operator`
-   reason and the scheduler has no `hard` interruption path.
-
-Both are Run-lifecycle operations of the engine (execution-model §3, §14),
-not API work: the API of Phase 9 will call them, but the operations and
-their restart tests belong here.
+**Operator control (the two exit rows that were open).** Both are
+Run-lifecycle operations of the engine (execution-model §3, §14), not API
+work: the API of Phase 9 will call them. Cancellation
+(`run-control.test.ts`): a durable barrier from every nonterminal status,
+paused ones included; convergence of executing, prepared, waiting,
+blocked, removed-membership, Coordinator, and chain work with terminal
+history preserved, Usage retained once, reservations and leases settled
+once by their owners, the Integration Workspace kept, late provider
+results discarded, repeated cancels replayed, ended Runs refused. Pause
+and resume (`run-control-pause.test.ts`, `persistence/stores/run-control.test.ts`,
+`core/src/runs.test.ts`): the state/operation matrix with closed outcomes
+and refusals; a soft pause that drains admitted Attempts without
+starting, settling, or integrating anything and leaves other Runs
+untouched; a hard pause that interrupts into the ordinary `interrupted`
+class with identity, Task ownership, limits, and the deadline kept; the
+prepared-but-undispatched boundary; runtime-tool and capability refusal
+under a hard pause with replay kept; and a resume that recomputes
+readiness from rows across Decisions, budget waits, chains, parallel
+items, Coordinator Workers, completion verification, and signoff.
+Races (`run-control-races.test.ts`) are driven by deterministic barriers
+in both orders; the restart windows (`run-control-restart.test.ts`) are
+file-backed. The earlier wording of this section overstated one
+primitive: node removal by plan revision cancels only unstarted removed
+nodes (`plan-revision-service.ts`, `planNodeIsUnstarted`); a running,
+waiting, or terminal node that leaves the membership keeps its state and
+finishes its own work (`settle_removed_node`) — the Run-wide cancellation
+is what ends such a node, with reason `run_cancelled`.
 
 **Dependencies.** Phase 1.
 
 **Completion condition.** Every row of the exit checklist below is
 *implemented and verified* or *superseded* with its replacement verified.
-Not yet met: the two rows above.
+Met.
 
-**Status: partial** — the generic engine is implemented and verified for
-everything but operator cancellation and pause/resume.
+**Status: implemented and verified** — with the evidence qualification
+above: provider and Workspace behaviour are injected ports and test
+doubles (the engine's contracts with them are proven, no production
+adapter is), persistence and process death are real execution.
 
 ### Original Phase 2 exit checklist
 
@@ -183,8 +197,8 @@ everything but operator cancellation and pause/resume.
 | Plan validation, node readiness, dependencies, fan-in | implemented and verified | `compiler/compile.test.ts` (every §4.4 rule and rejection), `plan-revision-service.test.ts` (reconciliation, started-node conflicts), `readiness.test.ts` (pure evaluator over the current graph plus condition facts), `join.test.ts` (`require_all` / `require_any`, index order), `pattern-positions.test.ts`. |
 | Deterministic scheduling and duplicate-execution protection | implemented and verified | `scheduler.test.ts` (membership order, `maxActions`, closed stop reasons, concurrent callers share one pass), `scheduler-restart.test.ts`; at most one non-terminal Invocation per node and position enforced by a unique index (`persistence/schema.ts`); Handoff keys unique per Run (`handoff-routing.test.ts`); runtime-tool replay by digest (`decision-requests.test.ts`, `artifact-writes.test.ts`). |
 | Concurrency and capacity | implemented and verified | `governor.test.ts` (deterministic leases, structured refusals, `provider_capacity` wait), `patterns/parallel.test.ts` (Run, node, and governor limits), `plan-node-capacity.test.ts`, `budget-increases.test.ts`. |
-| Pause/resume | **partial** (canonical equivalent accepted: Run `waiting` with a reason, resumed from rows) | Waiting and resumption on `decision`, `budget`, `provider_capacity`, and `integration_conflict` are implemented and verified (`scheduler.test.ts`, `decision-blocking.test.ts`, `budget-increases.test.ts`, `integration-service.test.ts`). The `operator` reason and the `hard` interruption path are not implemented (Phase 2 remaining work 2). |
-| Cancellation and propagation | **partial** | Propagation is implemented and verified at every level the engine drives itself (node removal, Invocation cancellation, Task and Completion Request cancellation; `plan-revision-service.test.ts`, `patterns/*.test.ts`, `completion.test.ts`); the operator's Run-wide cancellation is not implemented (Phase 2 remaining work 1). |
+| Pause/resume | implemented and verified (superseded wording: the pause is the persisted `operatorPause` mode on a `waiting`/`operator`, `verifying`, or `awaiting_signoff` Run, never a Run status; automatic waits are the same `waiting` state with their own reasons, resumed from rows) | Automatic waiting and resumption on `decision`, `budget`, `provider_capacity`, and `integration_conflict` (`scheduler.test.ts`, `decision-blocking.test.ts`, `budget-increases.test.ts`, `integration-service.test.ts`); operator `soft` and `hard` pause, escalation, resume, the matrix, and the admission rule (`run-control-pause.test.ts`, `run-control-races.test.ts`, `run-control-restart.test.ts`, `persistence/stores/run-control.test.ts`, `core/src/runs.test.ts`, the boundary guard in `persistence/boundaries.test.ts`). |
+| Cancellation and propagation | implemented and verified | Propagation at every level the engine drives itself (unstarted-node removal by plan revision, Invocation cancellation, Task and Completion Request cancellation; `plan-revision-service.test.ts`, `patterns/*.test.ts`, `completion.test.ts`); the operator's Run-wide cancellation and its convergence, interruption, late-result, restart, and race behaviour (`run-control.test.ts`, `run-control-races.test.ts`, `run-control-restart.test.ts`, `recovery-service.test.ts`). |
 | Retry classification, Attempt creation, retry limits, timeout behaviour | implemented and verified (superseded wording: "timeout" is the persisted Invocation-wide wall-clock deadline of execution-model §7.6 — no timer) | `retry-policy.ts`, `attempt-executor.test.ts` (closed failure classes, `initial`/`retry`, `fresh`/`resumed`), `wall-clock.test.ts` (deadline derived from persisted facts), `continuation.test.ts`, `allocation-recovery.test.ts`. |
 | Durable waiting | implemented and verified (superseded wording: no timers or scheduled resumptions; the scheduler reports the resumption time from rows and the clock) | `scheduler.test.ts` (retry and deadline resumption times, never polls), `decision-blocking.test.ts`, `decision-recovery.test.ts`, `budget-increases.test.ts`; the boundary test forbids `setTimeout`/`setInterval`/polling in the engine. |
 | Crash recovery | implemented and verified | `recovery-service.test.ts` (interrupted Attempts, released leases, `allocation_exhausted`, resumed retries), the file-backed restart suites for every Pattern, Gate, completion, signoff, publication, budget, and Decision window, `workspace-cleanup.test.ts`, and `data-access-crash.test.ts` (six `write_artifact` death windows plus recovery-death, cross-Run reference, restoration, same-transaction, unmarked-content, lost-response, and failed-cleanup cases with a real child process). |
@@ -504,14 +518,12 @@ where it belongs:
 | Operator supersession of a policy-resolved Decision | Phase 4 |
 | Workspace-file Agent Definitions | Phase 4 |
 | First real end-to-end single-agent path | Phase 5 |
-| Operator Run cancellation; operator pause/resume | Phase 2 (engine exit work) |
 
 ## Next unfinished deliverable
 
-The earliest unfinished original-phase deliverable is Phase 2's operator
-Run cancellation and pause/resume (the two remaining exit rows). After
-those, the earliest is Phase 3 item 1, the production provider adapter,
-which Phase 5's real end-to-end path and Phase 9's cutover both depend on.
+The earliest unfinished original-phase deliverable is Phase 3 item 1, the
+production provider adapter, which Phase 5's real end-to-end path and
+Phase 9's cutover both depend on. Phase 2 is complete.
 
 ## Revision history
 
@@ -519,3 +531,8 @@ which Phase 5's real end-to-end path and Phase 9's cutover both depend on.
   Phase 2G-A (pending-write markers, `afterCommit`, reconciliation at the
   clean-break recovery boundary); every status above reflects the tree at
   that commit.
+- 2026-09-01 — Phase 2 closed: two blob-protocol corrections (owned-path
+  safety against symlinks and junctions; bounded, handle-releasing pending
+  enumeration), operator Run cancellation, and operator pause/resume with
+  the persisted `operatorPause`; the plan-revision overstatement in this
+  section corrected; the next unfinished deliverable is Phase 3 item 1.

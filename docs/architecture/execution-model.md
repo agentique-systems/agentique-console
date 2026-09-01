@@ -313,11 +313,16 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   only an approved ordinary Budget Increase can make it fundable, §7.6),
   `provider_capacity` (the resource governor has no lease to
   grant), `integration_conflict` (a Changeset conflict Task is open, §9.2),
-  `operator` (the operator paused the Run). The scheduler records the
-  Run `waiting` only when no action remains, no Attempt is executing, and
-  no ready node is merely held back by the concurrency limit; the reason
-  is the earliest waiting node's reason, and the Run resumes through an
-  explicit `resume_run` action when that exact reason has cleared.
+  `operator` (the operator paused the Run, §14 "Operator pauses a Run":
+  the one reason no pass records or clears — it is written by the
+  operator's pause, holds precedence over every automatic wait, and
+  clears only through the operator's explicit resume; a soft pause is the
+  explicit case in which a Run waits while its admitted Attempts drain).
+  The scheduler records the Run `waiting` only when no action remains, no
+  Attempt is executing, and no ready node is merely held back by the
+  concurrency limit; the reason is the earliest waiting node's reason,
+  and the Run resumes through an explicit `resume_run` action when that
+  exact automatic reason has cleared.
 - `verifying`: the root Orchestrator's accepted Completion Request (§6.4)
   has begun: its requesting turn settled and integrated, and one
   transaction pinned the integration Snapshot, the current Requirement
@@ -328,7 +333,10 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   the last two funded from the final reserve. A failed Gate returns the
   Run to `running` with exactly one remediation Task for the root's
   batched `gate_result` turn; no ordinary work starts meanwhile and no
-  ordinary Invocation can be prepared.
+  ordinary Invocation can be prepared. An operator pause (§14) holds a
+  `verifying` Run in `verifying` beside its recorded pause: no completion
+  action is projected until the resume, which continues the same cycle
+  where it stood.
 - `awaiting_signoff`: the `run_completion` Gate passed, the final-report
   Artifact exists, and the `operator_signoff` Gate is open with its one
   `operator_required` `signoff` Decision. The runtime performs nothing:
@@ -341,7 +349,9 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   returns it to `running` with one follow-up root Orchestrator turn.
   Each is recorded as one canonical Signoff Resolution; neither is
   inferred from Conversation text, an Orchestrator result, a model
-  summary, or an unresolved Decision.
+  summary, or an unresolved Decision. An operator pause (§14) holds the
+  Run in `awaiting_signoff` beside its recorded pause; both signoff
+  operations are refused (`run_paused`) until the resume.
 - `completed`: the operator accepted the verified final Snapshot. Terminal.
   A completed Run carries exactly its two final references,
   `finalSnapshotId` (the signoff Gate's verified Snapshot, by reference)
@@ -356,7 +366,48 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   permitted Attempts with a permanent failure), or the Orchestrator
   returned a result declaring the Run infeasible with Evidence. Budget
   exhaustion never produces `failed` by itself. Terminal.
-- `cancelled`: the operator cancelled. Terminal.
+- `cancelled`: the operator cancelled (§14 "Operator cancels a Run"):
+  reachable from every nonterminal status, paused ones included; the
+  Run's work converges to its cancellation states with terminal history
+  preserved, its capacity is released once by its owners, and its
+  Integration Workspace stays. Terminal.
+
+**Operator control** (§14). The operator's three Run operations —
+cancel, pause (`soft` or `hard`), and resume — are internal execution
+services (`server/src/execution/run-control.ts`) with strict typed inputs
+and closed outcomes; none is an agent tool, none drives the scheduler,
+and none creates a message. Each commits the operator's intent on the
+Run row in one short transaction before anything external happens, and
+that row is the durable admission barrier every preparation, dispatch,
+settlement, continuation, Gate, completion, integration, and readiness
+transition revalidates inside its own transaction (`runAdmitsNewWork`:
+the Run has not ended and is not paused). The pause is the persisted
+`operatorPause` mode, never a status of its own: a `running` Run becomes
+`waiting` with reason `operator`; a `waiting` Run's reason becomes
+`operator` (the superseded automatic reason is journaled, never
+restored); a `verifying` or `awaiting_signoff` Run keeps its status and
+holds the pause beside it. No automatic transition moves a paused Run
+(database-enforced beside the Run store's refusal); only cancellation,
+which clears the pause with the Run. The state/operation matrix:
+
+| Run status | cancel | pause `soft` | pause `hard` | resume |
+|---|---|---|---|---|
+| `created` | `cancelled` | refused `not_started` | refused `not_started` | `not_paused` |
+| `running` | `cancelled`; executing Attempts interrupted | `waiting`/`operator` (`paused`); admitted Attempts drain | `waiting`/`operator` (`paused`); executing Attempts interrupted | `not_paused` |
+| `waiting`, automatic reason | `cancelled` | reason → `operator` (`paused`) | reason → `operator` (`paused`), plus the interruption | `not_paused` |
+| `waiting`/`operator` | `cancelled` (the pause cleared) | `unchanged` | `escalated` from `soft`; `unchanged` when already `hard` | `running` (`resumed`); readiness recomputed by the next pass |
+| `verifying` | `cancelled` | status kept (`paused`) | status kept (`paused`); the completion Invocation interrupted | status kept (`resumed`); the cycle continues |
+| `awaiting_signoff` | `cancelled` | status kept (`paused`); signoff refused `run_paused` | status kept (`paused`) | status kept (`resumed`) |
+| `completed`, `failed` | refused `run_terminal` | refused `run_terminal` | refused `run_terminal` | refused `run_terminal` |
+| `cancelled` | replayed, nothing written | refused `run_terminal` | refused `run_terminal` | refused `run_terminal` |
+
+A repeated pause of the same or a weaker mode is `unchanged` (a hard
+pause is never weakened; a repeated hard pause re-delivers its
+interruption to whatever still executes, never twice to the same
+Attempt); a repeated resume is `not_paused`; a repeated cancel replays.
+Every outcome is derived from the committed rows, so repeated,
+concurrent, and retried requests converge, and a lost response is
+answered by the same rows on the retry.
 
 Terminal states are final. There is no resume. A new Run in the same
 Conversation starts from the Conversation's current Requirements, Decisions,
@@ -2505,6 +2556,27 @@ runtime component with two entry points and no timer, loop, or interval:
   of any kind; a Run whose root node's turn fails is `failed` with
   `root_node_failed`.
 
+**Admission and operator control** (§3, §14). A paused Run projects no
+action whatever its rows imply: the projection reports the Run waiting on
+`operator`, the Attempts still executing in this process, and nothing
+else; `resume_run` is projected for an automatic wait reason only, never
+for `operator`, and its transaction revalidates that exactly that reason
+still holds and no pause was recorded meanwhile. Every mutating action
+revalidates the Run's admission inside its own transaction — the Pattern
+runners and the Gate engine through their revalidation (the typed
+`not_admitted` outcome), the root support, the join settler, the
+completion engine, the readiness transitions, the Decision continuation,
+the Invocation preparation service, and the Attempt executor at its three
+boundaries (preparation refuses with `run_paused` or `run_terminal`; a
+prepared Attempt is dispatched to the provider only while the Run still
+admits work, otherwise it ends interrupted without a provider call;
+finalization reads the Run row again) — so a projection computed before
+a pause or cancellation performs nothing afterwards. A soft pause lets
+the Attempts a pass had already admitted finish: the pass drains them,
+reports the Run `waiting`, and starts nothing, and their results are
+settled by the first pass after the resume. The scheduler stays the sole
+driver: the control services drive no pass.
+
 ### 7.2 Retries
 
 - An Invocation has a maximum Attempt count from its allocation (default 2:
@@ -2513,8 +2585,9 @@ runtime component with two entry points and no timer, loop, or interval:
   (retry after backoff), `provider_permanent` (no retry), `result_invalid`
   (retry with the validation error in the manifest rendering, the manifest
   itself unchanged), `allocation_exhausted` (no retry), `interrupted`
-  (retry only if the interruption was not a cancellation), `tool_failure`
-  (retry once).
+  (retry only if the interruption was not a cancellation; a hard operator
+  pause is an interruption, retried once the Run is resumed),
+  `tool_failure` (retry once).
 - A retry is a new Attempt of `kind: retry`, started `fresh` or `resumed`
   under §6.6. The failed Attempt's transcript Artifact remains. When the
   permitted Attempts are exhausted the Invocation is `failed`.
@@ -2523,7 +2596,13 @@ runtime component with two entry points and no timer, loop, or interval:
   capped, from an injected clock and without randomness; a tool failure
   is retried once (a second consecutive tool failure refuses with
   `tool_failure_retried`); an interruption caused by cancellation refuses
-  with `cancelled`; a transient failure, invalid result, or interruption
+  with `cancelled`; an interruption caused by a hard operator pause
+  (`operator_pause`, §14) is the ordinary `interrupted` class — the
+  Attempt is consumed, its Usage recorded once, whatever the provider
+  reported afterwards discarded, and the retry permitted under the same
+  Attempt allocation and Invocation-wide deadline once the Run is
+  resumed, so an interrupted last Attempt or one interrupted past the
+  deadline keeps that consequence; a transient failure, invalid result, or interruption
   whose Usage has already exhausted the cost or token allocation is
   classified `allocation_exhausted` and refused; an `approval_required`
   capability call ends the Attempt `failed` (`tool_failure`) with the
@@ -2564,7 +2643,8 @@ allocation is exhausted under policy
 `wait` or `extend` with no capacity available, when the resource governor
 has no lease to grant, when its Changeset conflicted on integration and
 the conflict Task is open (`integration_conflict`, §9.2), or when the
-operator has paused the Run. Waiting is
+operator has paused the Run (§14: the Run's `operator` wait, which no
+automatic condition clears). Waiting is
 a recorded state with a recorded reason. An Invocation `waiting` before
 its provider execution started (capacity, Budget, operator) is the same
 Invocation once the wait clears. An Invocation whose provider execution
@@ -3977,8 +4057,10 @@ mechanism, if ever added, is a new feature with its own design.
 | Provider fails after an approval claim | The use stays committed; the retry receives the same manifest but the grant is refused; repeating the call needs a new `side_effect_approval` Decision. |
 | Crash after an approval claim, before the external call | The approval is conservatively consumed (recovery repairs nothing); the retry cannot repeat the call under the original Decision and intercepts it again for a new approval. |
 | Server restart | Recovery (`server/src/execution/recovery-service.ts`) runs once at startup in one transaction: every `pending` or `running` Attempt of the previous process is marked `interrupted` with its consumed Attempt kept and its durable retry decision recorded; every stale lease is released and the governor is rebuilt from canonical lease state; an Invocation with no Attempt remaining is `failed` with `allocation_exhausted` (its Task failing likewise); every other interrupted Invocation is left `running` with durable retry eligibility under the same Invocation-wide deadline (§7.6), `resumed` only where §6.6 permits and `fresh` when the payload is absent or invalid. After that transaction recovery retries, outside any transaction, every worktree cleanup obligation still `pending` on a terminal Invocation (§9.1), and then reconciles the Artifact blob store's pending area (§2.1): every marker a death left is resolved by the committed references, unreferenced protocol-published blobs and temporaries are removed, and the report states whether every obligation was resolved; a process admits no new work while that reconciliation is incomplete. Recovery is idempotent, reads no transcript and no provider message, and executes nothing: recoverable work is returned for an explicit execution call, which the scheduler drives. The worktree of a retry-eligible Invocation is preserved and reattached by Invocation id; reservations are read as persisted. |
-| Operator cancels a Run | All Attempts interrupted, all nodes `cancelled`, all reservations released, Integration Workspace left in place, Run `cancelled`. |
-| Operator pauses a Run | The scheduler stops starting Attempts for that Run; running Attempts are allowed to finish (`soft`) or interrupted (`hard`); Run `waiting` with reason `operator`. Other Runs are unaffected. |
+| Operator cancels a Run | Every nonterminal Run ends `cancelled` in one transaction (`server/src/execution/run-control.ts`): its pause cleared, the Conversation's active-Run slot released, and — in the same transaction (`run-cancellation.ts`) — every Invocation with no executing Attempt `cancelled`, every unfinished Task `cancelled` through its legal path (a running Task blocked then cancelled), every non-terminal Plan Node whose Invocations have ended `cancelled` with reason `run_cancelled` (root, current members, and nodes that left the membership alike), and every pending Handoff `cancelled`. Then, outside every transaction, the Attempts executing in this process receive the `cancelled` signal and the ended Invocations' worktrees are released. An Attempt whose provider ignores the signal, or that was prepared between the commit and the delivery, is still ended `cancelled` by its own finalization from the Run row — no result, no Changeset, its Usage recorded once, nothing refunded — after which the work it held back converges. Succeeded, failed, skipped, and cancelled nodes, completed and failed Tasks, blocked Invocations, open Decisions, Gates, and Completion Requests stay as history; nothing is fabricated for them and nothing continues from them. Reservations and leases are released once by their owners; the Integration Workspace stays. A repeated cancel replays; a `completed` or `failed` Run is refused (`run_terminal`). |
+| Operator pauses a Run | `soft`: the Run stops admitting work — no preparation, dispatch, retry, continuation, integration, verification, Gate, completion step, or readiness transition — while every admitted Attempt finishes with its Usage and legitimate result (its runtime-tool calls, a Decision request, and a Completion Request from the draining turn included); the Run is `waiting`/`operator` (a `verifying` or `awaiting_signoff` Run keeps its status) and stays paused when that work finishes. `hard`: additionally every executing Attempt is interrupted with `operator_pause` and classified `interrupted` with a permitted retry (the Attempt consumed, its Usage recorded once, limits and the Invocation-wide deadline unchanged, a late provider result not a result); further capability and runtime-tool calls of the Attempt are refused (`interrupted`, `run_not_executing`) while a committed call still replays, and a committed blocking `request_decision` remains the turn's boundary. A soft pause escalates to hard; a hard pause is never weakened. Other Runs are unaffected. A `created` Run is refused (`not_started`); an ended one (`run_terminal`). |
+| Operator resumes a Run | Only the pause is cleared: a `waiting` Run returns to `running` and the next pass recomputes readiness from rows — an open Decision keeps it waiting on `decision`, an unfunded `wait` node on `budget` (a Budget Increase alone never enlarges it), an open conflict Task on `integration_conflict`; a `verifying` or `awaiting_signoff` Run continues its existing cycle; finished work is never repeated; a Decision resolved while paused continues in exactly one successor only now; no relay turn is created. A Run that is not paused is `not_paused`. |
+| Operator control across a restart | The committed Run row is what recovery honours: an Attempt of a cancelled Run that a dead process left active ends `cancelled` with a refused retry and the Run's remaining work converges in recovery's transaction; an Attempt of a paused Run is interrupted like any other and left retry-eligible, the pause remains, and nothing but the operator's resume clears it; the worktree of an Invocation a cancellation ended is released by recovery when the dying process did not release it. |
 
 ## 15. Invariants
 
@@ -4212,6 +4294,25 @@ by a test.
     crash window converges from rows (database-enforced where a row
     expresses it).
 
+29. **Operator control is durable intent with one admission rule.** Cancel,
+    pause (`soft` | `hard`), and resume are internal execution services
+    with closed outcomes, never agent tools; each commits its intent on
+    the Run row before any interruption is delivered or any worktree is
+    released, and the abort signal is delivery only. `runAdmitsNewWork` is
+    the one rule every preparation, dispatch, settlement, continuation,
+    Gate, completion, integration, and readiness transition revalidates in
+    its own transaction; a paused Run projects no action and no pass
+    clears its pause; a soft pause drains admitted Attempts with their
+    Usage and results; a hard pause interrupts them into the ordinary
+    `interrupted` class, retried after the resume under unchanged limits;
+    a cancellation converges every kind of Run-owned work to its legal
+    cancellation state with terminal history preserved, Usage retained
+    once, and nothing refunded or fabricated; late provider results of an
+    interrupted Attempt are never results; the pause is the persisted
+    `operatorPause` mode (database-enforced), never a Run status; and
+    every repeated, concurrent, retried, or restart-crossing request
+    converges from rows.
+
 ## 16. Non-goals
 
 - No benchmark or evaluation harness for orchestration quality. The
@@ -4224,5 +4325,6 @@ by a test.
   compiled flat.
 - No long-lived Invocation: an Invocation never receives new logical input
   after creation.
-- No global pause product state; backpressure is the resource governor.
+- No global pause product state; backpressure is the resource governor,
+  and the operator pauses individual Runs (§14).
 - No runtime behaviour selected by a feature flag.

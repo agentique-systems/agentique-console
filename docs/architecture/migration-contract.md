@@ -103,8 +103,9 @@ Phase 1 and remain after cutover:
   Pattern runners with the root-node support, the deterministic join
   settler, the pure Task projection, the runtime-tool call executor with
   the Task proposal service, the deterministic Acceptance Criterion check
-  service, the bounded scheduler, the Gates, the completion engine, and
-  the signoff service. It
+  service, the bounded scheduler, the Gates, the completion engine, the
+  signoff service, and the operator Run-control service (cancel, pause,
+  resume) with its shared cancellation convergence. It
   imports only `@agentique-console/core`, the persistence boundary, `zod`,
   the provider-neutral adapter contract under `server/src/provider/`, and
   the narrow capability ports it declares under `ports/`
@@ -325,7 +326,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `workspaces` | operator via API | mutable |
 | `conversations` | runtime | one per operator thread; mutable title/policy |
 | `conversation_messages` | runtime | append-only per Conversation |
-| `runs` | runtime (Run creation service) | one per Run; state, Target, base/integration/final Snapshot ids, final Changeset id (both final references exactly when `completed`, immutable afterwards), Run Budget limits, persisted final reserve (immutable) |
+| `runs` | runtime (Run creation service) | one per Run; state, wait reason, the operator's pause mode (`operator_pause`: `soft` or `hard`, held only by a `waiting`, `verifying`, or `awaiting_signoff` Run; a Run waits on `operator` exactly when it is paused — both database-enforced), Target, base/integration/final Snapshot ids, final Changeset id (both final references exactly when `completed`, immutable afterwards), Run Budget limits, persisted final reserve (immutable) |
 | `execution_plan_revisions` | runtime (plan-revision service; revision 1 by Run creation) | append-only per Run; accepted revisions only, numbered consecutively |
 | `plan_nodes` | plan-revision service (compiler); root by Run creation | one per compiled node; `kind`, `pattern`, immutable `shape`, creating revision, status, allocation; definition immutable from insertion |
 | `plan_revision_nodes` | plan-revision service; revision 1 by Run creation | immutable ordered membership, one row per (Run, revision, Plan Node); root first in every revision |
@@ -658,8 +659,12 @@ is one or more commits; each commit keeps `npm run typecheck` and
    the Coordinator's cancel) and operator supersession of a
    policy-resolved Decision are existing acceptance commitments owned by
    the roadmap's original Phases 4 and 5; their deferral waives none of
-   them. Still open under this step: operator Run cancellation and
-   pause/resume (roadmap Phase 2 exit work), the production provider
+   them. Operator Run cancellation and pause/resume are implemented under
+   this step as internal execution services
+   (`server/src/execution/run-control.ts`, `run-cancellation.ts`; the
+   `runs.operator_pause` column of the regenerated baseline; execution-model
+   §3, §14) and are not agent tools or routes — the API of the cutover
+   calls them. Still open under this step: the production provider
    adapter built in `server/src/provider/` by extraction and rewrite from
    `server/src/sdk/` where rule 7 permits (roadmap Phase 3), and the real
    Workspace adapters for the six ports (roadmap Phase 4). Everything the
@@ -720,6 +725,25 @@ the passing total alone.
   nothing is read from a transcript. A variant truncates the continuation
   index and payload store first and asserts the same outcome with every
   Attempt `fresh`.
+- Operator control tests: cancellation from every nonterminal Run status
+  (paused ones included) and its refusal for ended Runs; convergence of
+  executing, prepared, waiting, blocked, removed-membership, Coordinator,
+  and chain work with terminal history preserved, Usage retained once,
+  and reservations and leases settled once; soft pause draining an
+  admitted Attempt without starting, settling, or integrating anything;
+  hard pause interrupting into the ordinary `interrupted` class with the
+  Invocation's identity, Task ownership, limits, and deadline kept; the
+  prepared-but-undispatched boundary; resume recomputing readiness from
+  rows (open Decision, unfunded `wait` node, verification cycle, signoff)
+  without restoring a stale reason or repeating finished work; races
+  driven by deterministic barriers in both orders (pause versus
+  preparation and dispatch, cancel and hard pause versus provider
+  completion, stale projections, repeated and lost requests, Decision
+  resolution and completion or signoff advancement under a pause); and
+  file-backed restart windows (pause committed before delivery,
+  interruption recorded before resume, cancellation committed before
+  cleanup, soft-paused work completed before the restart, resume committed
+  before its response, control from two connections).
 - Provider resumption tests: an Attempt is `resumed` only when the fake
   adapter reports support, safety, an unexpired index row whose payload is
   present and matches its digest, and allocation headroom; each missing

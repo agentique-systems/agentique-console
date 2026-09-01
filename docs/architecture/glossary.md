@@ -103,7 +103,17 @@ reaches `awaiting_signoff` only through a passed `run_completion` Gate
 a completed Run carries exactly its **final Snapshot** (`finalSnapshotId`,
 the signoff Gate's verified Snapshot by reference) and its **final
 Changeset** (`finalChangesetId`, its one `final` Changeset), and no other
-Run carries either (execution-model §9.3).
+Run carries either (execution-model §9.3). The operator controls a Run
+through three internal operations (execution-model §3, §14): **cancel**
+ends any nonterminal Run `cancelled`, its work converged to its legal
+cancellation states with terminal history preserved; **pause** withholds
+new work — `soft` lets the admitted Attempts drain with their Usage and
+results, `hard` interrupts them for a retry after the resume — and is
+the persisted **operator pause** mode (`operatorPause`), held by a
+`waiting` Run with reason `operator` or beside a `verifying` or
+`awaiting_signoff` status, never a status of its own; **resume** clears
+only that pause and lets the next scheduler pass recompute readiness
+from rows.
 
 - Id prefix: `run_`
 - Owned by: the runtime
@@ -1206,8 +1216,9 @@ carried a specific legacy meaning: `lane`, `roster`, `commission`,
 `checkpoint` (as in continuation checkpoint), `continuation` (as a
 subsystem; provider continuation metadata is the one permitted use),
 `trusted` / `trust` (as a definition flag or table), `deferrable`,
-`pause` (as a system-wide state; a Run may be `waiting` with reason
-`operator`), `turn` (as an Attempt kind or a long-lived Invocation; a
+`pause` (as a system-wide state; the operator pauses one Run, which is
+`waiting` with reason `operator` or holds its `operatorPause` beside
+`verifying` or `awaiting_signoff`), `turn` (as an Attempt kind or a long-lived Invocation; a
 logical turn is a new Invocation), `in_progress` (as a Task state; use
 `running`).
 
