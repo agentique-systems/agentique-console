@@ -939,7 +939,10 @@ turn replays a recorded call by digest instead of repeating its effect,
 and an accepted `request_decision` ends the logical turn. A
 `write_artifact` row's safe result names the created Artifact's id,
 media type, digest, byte size, and title; the content lives only in the
-Artifact Store. It never holds the call's raw input.
+Artifact Store. It never holds the call's raw input. Replay is not read
+authorization: the row makes its Artifact readable through
+`read_artifact` to the exact Invocation that recorded it (any Attempt),
+never to an approval successor that replays it.
 
 - Id prefix: `rtc_`
 - Owned by: the runtime

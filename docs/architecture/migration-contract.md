@@ -608,13 +608,20 @@ is one or more commits; each commit keeps `npm run typecheck` and
    contract (strict closed schemas, per-role canonical scopes over the
    caller's immutable manifest and rows, execution outside every
    transaction, deterministic canonical order, the stateless keyset
-   cursor with default 25 and maximum 100, the 64 KiB response bound
-   with the typed oversized-record reference, refusal of malformed and
-   foreign cursors, no stored cursor or read receipt); `read_artifact`
-   as the one content-returning tool (manifest or own-logical-turn
-   producer authorization, Artifact-Store-verified bytes, 16 KiB default
-   and 64 KiB maximum pages, UTF-8-boundary-safe `utf8` and
-   decoded-byte-paged `base64`, closed missing/corrupt failures); the
+   cursor with default 25 and maximum 100 over bounded keyset store
+   queries whose visibility predicates run in the database, Decision
+   projections filtered to the caller's canonical scope, the plan's
+   canonical edge order, the 64 KiB serialized-outcome ceiling with the
+   typed oversized-record reference, refusal of malformed, foreign,
+   other-view, superseded-revision, and left-scope cursors, no stored
+   cursor or read receipt); `read_artifact` as the one content-returning
+   tool (manifest or exact-current-Invocation `write_artifact`
+   authorization validated before any byte loads — never the logical
+   turn's replay scope — Artifact-Store-verified bytes, 16 KiB default and
+   64 KiB maximum pages with `maxBytes` an upper bound under the
+   serialized ceiling, UTF-8-boundary-safe `utf8` and decoded-byte-paged
+   `base64`, closed missing/corrupt failures); infrastructure failures
+   reported by closed failure kind, never thrown text; the
    executable `write_artifact` mutation (runtime-derived id, digest,
    size, and producer ownership; 200-byte title and media type, 48 KiB
    decoded per call, 32 calls and 1 MiB per logical turn from accepted
@@ -626,7 +633,11 @@ is one or more commits; each commit keeps `npm run typecheck` and
    Coordinator cancellation `update_task`, `request_completion`, and
    `request_decision`; the `final_synthesis` turn reads only); and
    restart safety across every write-replay, rollback, routing,
-   corruption, and Evaluator-Evidence window. The remaining
+   corruption, and Evaluator-Evidence window, and the abrupt-death
+   windows verified with a real child process over a real SQLite file
+   and `FileBlobStore` — which leave a safe unreferenced blob that
+   recovery does not remove (execution-model §2.1; no orphan-free
+   recovery is claimed for this phase). The remaining
    permitted-but-not-executable tools of execution-model §6.4
    (`create_tasks`, `record_decision`, `propose_requirements`,
    `revise_execution_plan`, `update_task` beyond the Coordinator's
@@ -959,21 +970,47 @@ the passing total alone.
 - Runtime data-access tests: every read tool returns a typed projection
   with no Event, `runtime_tool_calls` row, Usage row, or stored cursor;
   paging is deterministic with default and maximum limits, stateless
-  keyset continuation, refused malformed and foreign cursors, the 64 KiB
-  response bound, and the typed oversized-record reference; reads are
-  refused inside a transaction, after the caller stopped running, and
-  after the logical turn ended; results repeat identically across a
-  file-backed reopen; the scope matrix covers every read tool for the
-  root Orchestrator, a Coordinator, a Worker, and an Evaluator — exact
-  in-scope records, foreign Run, Workspace, and Conversation records,
-  same-Run-but-out-of-scope records, pinned versus current Requirement
-  revisions, replacement history, and pagination that cannot enumerate
-  beyond scope. `read_artifact` covers complete and multi-page
-  boundary-safe UTF-8 reads, invalid-UTF-8 refusal, base64 paging over
-  decoded bytes, zero-byte Artifacts, maximum pages, offsets at and
-  beyond the end, missing and corrupt blobs as closed typed failures,
-  and the absence of content bytes in Events, diagnostics, manifests,
-  rows, and errors. `write_artifact` covers every permitted role,
+  keyset continuation, refused malformed, foreign, other-view,
+  superseded-revision, and left-scope cursors, the 64 KiB
+  serialized-outcome ceiling measured in UTF-8 bytes, and the typed
+  oversized-record reference in list and keyset pages alike; bounded
+  retrieval is proven by statement and row observation of the store (at
+  most `limit + 1` rows of the collection per page, batched page-local
+  lookups, one row for the current Requirement revision, never an
+  enumeration of a Conversation's Decisions, a Run's Tasks, or every
+  Agent Definition revision); plan edges page in the canonical order
+  with ids minted to sort otherwise and pages crossing target-node
+  boundaries; reads are refused inside a transaction, after the caller
+  stopped running, and after the logical turn ended; results repeat
+  identically across a file-backed reopen; the scope matrix covers every
+  read tool for the root Orchestrator, a Coordinator, a Worker, and an
+  Evaluator — exact in-scope records, foreign Run, Workspace, and
+  Conversation records, same-Run-but-out-of-scope records, pinned versus
+  current Requirement revisions, replacement history, pagination that
+  cannot enumerate beyond scope, one mixed-scope Decision projected to
+  each role's exact references, and two Runs of one Conversation sharing
+  Requirement identities with the other Run's Decision visible only
+  where the manifest names it. `read_artifact` covers complete and
+  multi-page boundary-safe UTF-8 reads, invalid-UTF-8 refusal, base64
+  paging over decoded bytes, zero-byte Artifacts, maximum pages, offsets
+  at and beyond the end, missing and corrupt blobs as closed typed
+  failures, the absence of content bytes in Events, diagnostics,
+  manifests, rows, and errors, and the serialized ceiling over
+  runtime-created fixtures of 64 KiB and more listed on a node
+  (binary as base64, large ASCII, multibyte Unicode, heavily escaped
+  text, maximal metadata, exact boundaries with one-more-unit checks,
+  complete reconstruction, malformed UTF-8, undersized requests); the
+  visibility matrix separates the same Invocation's same and retried
+  Attempts, an agent-requested Decision successor, one- and two-link
+  approval successors (replay of the predecessor's write without
+  content access), a Handoff-routed predecessor output, another
+  Worker's output, a same-Invocation Artifact without an accepted write
+  row, transcript and captured-call Artifacts, and a foreign Run's
+  Artifact, asserting refusal before any byte loads; failure sanitization
+  injects content, path, storage-key, and raw-input text into store and
+  blob failures and asserts only ids, digests, and closed kinds reach
+  outcomes and diagnostics, with a cleanup failure reported beside the
+  canonical failure. `write_artifact` covers every permitted role,
   Evaluator Evidence Artifacts admitted by result validation, malformed
   and non-canonical content, invalid media types, the per-call,
   per-turn-count, and cumulative-byte bounds, exact and concurrent
@@ -984,7 +1021,16 @@ the passing total alone.
   canonical routing, and file-backed restart windows (lost-response
   replay of the same Artifact id, rollback after the blob write, routed
   and unrouted visibility after reopen, corruption staying typed, an
-  Evaluator's Evidence settling once).
+  Evaluator's Evidence settling once), the 96 KiB request ceiling versus
+  the 48 KiB decoded ceiling (maximal base64 with maximal metadata fits,
+  heavily escaped text is refused without a write or allowance, the same
+  bytes as base64 succeed), and the abrupt-death windows with a real
+  child process over a real SQLite file and `FileBlobStore`, driven by
+  IPC barriers and exit notifications: death after the blob write, death
+  after the Artifact row and Event, death after the commit with the
+  response lost, a deduplicated blob referenced by committed metadata,
+  and on-disk corruption in a fresh process — each inspecting rows and
+  blob files immediately after death and again after recovery.
 - Task proposal tests: every rule of execution-model §5.5.1 rejects the
   whole batch with its closed code and persists nothing; an accepted
   batch creates every Task, dependency, and reservation atomically;

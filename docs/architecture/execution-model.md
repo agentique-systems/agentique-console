@@ -102,8 +102,23 @@ re-entrant over one SQLite connection:
   blob is never removed); a process or machine crash between the blob
   write and the database commit can leave a safe, unreferenced blob behind
   — never committed metadata pointing at content the operation did not
-  write — and reads always verify digest and size. There is no garbage
-  collector in Phase 1.
+  write — and reads always verify digest and size.
+  Three states are distinct and each is tested as itself: after an
+  ordinary synchronous failure (an exception, a failed COMMIT) the
+  compensation has run and the newly written blob is gone; immediately
+  after an abrupt death (the process killed between the blob write and
+  the commit, verified with a real child process over a real file and a
+  `FileBlobStore`) the uncommitted rows are gone and the blob file
+  remains, unreferenced; after startup recovery that blob still remains —
+  recovery repairs rows and leases and removes no blob, and the retried
+  call reuses the content-addressed file rather than writing it again.
+  There is no garbage collector in Phase 1, so "no orphan after recovery"
+  is not a guarantee of this phase. A compensation failure never replaces
+  the transaction's canonical error: it is reported as the
+  `blob_cleanup_failed` diagnostic naming the digest and the closed
+  failure kind (never the cleanup exception's text, which may name a
+  path), and it claims neither that the blob was removed nor that no
+  orphan remains.
 - **Ownership.** A database file and its blob store are owned by exactly
   one runtime process at a time. Compensation and reference checks assume
   that single owner; multi-process cleanup safety is neither implemented
@@ -1840,21 +1855,51 @@ in `core/src/runtime-reads.ts`):
   no `runtime_tool_calls` row, no Usage row, and no receipt, access log,
   or stored cursor of any kind; repeated reads are harmless and return
   the same canonical result for the same database state;
-- every list is in a deterministic canonical order (Requirement tree
-  order, ledger id order, plan membership order, edge id order) and is
-  paged by a stateless keyset cursor `{ after?, limit? }` (default 25,
-  maximum 100) reconstructible from persisted rows; a malformed,
-  foreign, or invalid cursor is rejected (`cursor_invalid`);
-- the total serialized result is bounded at 64 KiB: a page returns the
-  largest complete prefix that fits with the next cursor, and a single
-  record that alone exceeds the bound is returned as a typed
-  `record_too_large` reference (id and serialized size) that the next
-  cursor skips — never a truncated JSON object or a silently dropped
-  record;
+- every list is in a deterministic canonical order — Requirement tree
+  order, Decision and Task id order, Agent Definition revision id order,
+  plan membership order for nodes, and for edges the plan's own order
+  (target membership position, then fan-in position: the order
+  `PlanStore.listEdges` and the scheduler read, never generated id
+  order) — and is paged by a stateless keyset cursor `{ after?, limit? }`
+  (default 25, maximum 100) reconstructible from persisted rows; a
+  cursor is the id of the last record of the previous page and is valid
+  exactly while that record is in the caller's visible set of the
+  current revision and requested view — a malformed cursor, one of
+  another view, one of a superseded plan revision, one naming a record
+  that left the visible set (a Task since superseded, a node a revision
+  dropped), or one naming any record outside the visible set is rejected
+  (`cursor_invalid`), never treated as an empty page;
+- a page is retrieved bounded: ownership and visibility are predicates
+  the store evaluates in the database (`page`/`contains` keyset queries
+  for Decisions, Tasks, executable Agent Definition revisions, plan
+  members, and plan edges) so at most `limit + 1` rows of the collection
+  are read per page, page-local references (dependencies, replacements,
+  statuses, criteria, definitions, scope membership) are batched
+  lookups over the page, and no read materializes a Conversation's
+  Decision history, a Run's whole Task ledger, every Agent Definition or
+  revision, or the whole graph for one page; the one whole-value read is
+  a Requirement revision's tree — one immutable JSON row, at most
+  `REQUIREMENT_TREE_MAX_ENTRIES` (1,000) entries, enforced by the core
+  tree schema at revision creation — whose page is projected from its
+  window alone, and the current revision is one row, never the
+  Conversation's revision history;
+- the total serialized response is bounded at 64 KiB, measured as the
+  UTF-8 bytes of the provider-facing read outcome (`{ kind: "read",
+  tool, result }`) and enforced on every result, Artifact pages included:
+  a structured page returns the largest complete prefix that fits with
+  the next cursor, and a single record that alone exceeds the bound is
+  returned as a typed `oversizedRecord` reference (id and serialized
+  size) that the next cursor skips — never a truncated JSON object or a
+  silently dropped record;
 - no result embeds a transcript, Event history, provider message,
   continuation payload, storage key, worktree path, credential, raw
   tool-call input, or unrelated Artifact content; errors and diagnostics
-  carry bounded identifiers and closed failure kinds only;
+  carry bounded identifiers and closed failure kinds only — an
+  infrastructure failure of a read or a `write_artifact` call reports the
+  tool, the caller's ids, the call digest, and the closed failure kind
+  (the error's class name and token-shaped code), never the thrown text,
+  which may embed a path, a storage key, raw input, or content;
+  truncating such text does not make it safe;
 - authorization is canonical ownership plus the caller's manifest scope;
   a supplied id authorizes nothing, and an exactly named record outside
   the caller's scope is refused (`record_out_of_scope`) without
@@ -1877,7 +1922,26 @@ Decisions its manifest names. A record carries the bounded question,
 ordered options, recommendation, resolution policy and facts, affected
 ids, supersession references, and the typed subject — which for a
 `side_effect_approval` names the tool, digest, and call Artifact id and
-never the proposed call's bytes. **`read_tasks`** — the root Orchestrator
+never the proposed call's bytes. A visible Decision does not authorize
+the entities it references: the projected `affects` keeps exactly the
+Requirement, Task, and Plan Node ids inside the caller's canonical scope
+(the same sets its `read_requirements`, `read_tasks`, and
+`read_execution_plan` expose — for the Orchestrator the current
+revision's Requirements, the Run's current Tasks, and the current graph;
+for a Coordinator its pinned leaves, its node's ledger, and its node; for
+a Worker its manifest Requirements, its own Tasks with their direct
+dependencies, and its node; for an Evaluator its manifest's Requirements,
+its Gate candidate's Tasks, and its node), the canonical row is
+unchanged, and exact-id and paginated reads project identically. A
+reference in the typed subject (a call Artifact id, an Evidence Artifact
+id) grants no Artifact-content access. Another Run's Decision is visible
+to a scoped caller only when the caller's immutable manifest names it —
+the assembler delivers the earlier Runs' Decisions that reference the
+caller's Requirements, validated to the same Conversation (§6.2) — and
+through no other route: a Requirement id shared by two Runs of one
+Conversation never makes the other Run's Decision visible by itself;
+Conversation-level Decisions (no Run) and the caller's own Run's
+Decisions travel the affects and requester routes. **`read_tasks`** — the root Orchestrator
 sees the Run's current (non-superseded) Tasks; a Coordinator its node's
 complete ledger, superseded rows included; a Worker exactly its assigned
 Tasks and their direct dependencies; an Evaluator exactly the Tasks its
@@ -1888,9 +1952,11 @@ inspects the current accepted graph of its own Run, as separately paged
 node membership and edges: the revision number, node identity, kind,
 Pattern, status, source path, title, a bounded shape summary, the
 Requirement scope ids, allocation policy and bounded allocation metadata,
-and typed edge records — never a historical revision, a source proposal,
-compiler intermediate state, a rejected proposal, or full nested plan
-JSON. **`read_agent_definitions`** — bounded metadata of the executable
+and typed edge records in the plan's canonical order (nodes in
+membership order; edges by target membership position, then fan-in
+position, exactly as the scheduler reads them) — never a historical
+revision, a source proposal, compiler intermediate state, a rejected
+proposal, or full nested plan JSON. **`read_agent_definitions`** — bounded metadata of the executable
 revisions relevant to the Run's Workspace and Conversation (the latest
 executable revision per definition plus any older revision the current
 graph, the verification policy, or the caller still references): identity,
@@ -1900,32 +1966,52 @@ instruction text, credentials, file contents, or a foreign Workspace's or
 Conversation's definition.
 
 **`read_artifact`** is the only runtime tool that returns Artifact
-content. An Artifact is readable exactly when the caller's immutable
-manifest lists it (a Handoff, Task input, Gate candidate, Decision
-resolution, optimizer, completion, or explicitly listed Artifact), or
-when the caller's own logical turn produced it through `write_artifact`
-(the Invocation or its approval predecessors, by canonical producer
-ownership — never by mutating the manifest or process memory). A later
-Invocation gains visibility only through normal canonical routing (Task
+content. Replay identity and content visibility are different rules: a
+logical turn (an Invocation plus its approval predecessors) replays its
+accepted mutations by digest, but an Artifact is readable through exactly
+two routes — the caller's immutable manifest lists it (a Handoff, Task
+input, Gate candidate, Decision resolution, optimizer, completion, or
+explicitly listed Artifact), or the exact current Invocation created it
+through an accepted `write_artifact` call: the Artifact's metadata names
+this Run and this Invocation as producer and an accepted
+`runtime_tool_calls` row of this Invocation names the Artifact, so any
+Attempt of the Invocation reads it. An approval successor holds the
+replayed Artifact id and reads nothing by it: its predecessor's
+production is never automatically visible, and a later Invocation of any
+kind gains visibility only through normal canonical routing (Task
 output, Handoff, typed manifest input, Gate candidate, explicit
-reference); a predecessor's production is never automatically visible,
-and no role can read every Artifact of the Run. The runtime loads the
-metadata, validates authorization and Run ownership, verifies blob
-existence, byte size, and digest through the canonical Artifact Store,
-slices the verified bytes, and binds the bounded content into the tool
-response — the provider boundary never imports the store. Paging is over
-the Artifact's bytes: `offset` (default 0) and `maxBytes` (default
-16 KiB, maximum 64 KiB) select a range; `utf8` never splits a UTF-8
-sequence (the page end is pulled back to a boundary, an offset inside a
-sequence is refused, and invalid UTF-8 is a typed refusal recommending
-`base64`, never a silent replacement); `base64` pages over decoded bytes
-with the returned text representing exactly the selected range. The
-result names the Artifact, media type, digest and total byte size (always
-of the complete Artifact), offset, returned byte count, encoding,
-content, `nextOffset`, and `eof`. Missing or corrupt content is a closed
-typed failure (`artifact_content_missing`, `artifact_content_corrupt`) —
-never "not found", never a filesystem path, and never bytes in an Event
-or diagnostic.
+reference — an approval successor's manifest lists exactly the resolved
+call's Artifact). A runtime-created Artifact that names an Invocation (a
+transcript, a captured call, a Changeset diff, an index) is not "produced
+through `write_artifact`" and is unreadable through that route; an id
+learned from a replayed result or a Decision subject is not a grant; and
+no role can read every Artifact of the Run. On every path the runtime
+loads the metadata and validates authorization and Run ownership before
+any byte is loaded, then verifies blob existence, byte size, and digest
+through the canonical Artifact Store, slices the verified bytes, and
+binds the bounded content into the tool response — the provider boundary
+never imports the store. Paging is over the Artifact's bytes: `offset`
+(default 0) and `maxBytes` (default 16 KiB, maximum 64 KiB) select a
+range, and `maxBytes` is an upper bound: four quantities stay distinct —
+decoded Artifact bytes (what `offset`, `byteCount`, and `nextOffset`
+measure), encoded content length, serialized JSON bytes (the content with
+its escaping inside the result), and the provider-facing outcome — and
+the 64 KiB ceiling binds the last, so a page holds the largest complete
+range of the requested one whose serialized outcome fits (the envelope,
+with the media type at its bounded width, is measured exactly). `utf8`
+never splits a UTF-8 sequence (the page end is pulled back to a boundary,
+an offset inside a sequence is refused, and invalid UTF-8 is a typed
+refusal recommending `base64`, never a silent replacement) and shrinks
+the page by whole code points when JSON escaping — quotes, backslashes,
+control characters — would exceed the ceiling; `base64` pages over
+decoded bytes in whole groups with the returned text representing
+exactly the selected range; every non-final page makes progress. The
+result names the Artifact, media type, digest and total byte size
+(always of the complete Artifact), offset, returned byte count, encoding,
+content, `nextOffset`, and `eof`, all exact. Missing or corrupt content
+is a closed typed failure (`artifact_content_missing`,
+`artifact_content_corrupt`) — never "not found", never a filesystem
+path, and never bytes in an Event or diagnostic.
 
 **`write_artifact`.** A running Invocation of any role but the
 `final_synthesis` turn creates one canonical Artifact through the
@@ -1951,9 +2037,20 @@ diagnostic; the safe result carries `artifactId`, `mediaType`, `digest`,
 `byteSize`, and `title` only. An identical call of the same logical turn
 replays the same Artifact id; distinct requests create distinct Artifact
 metadata over safely deduplicated content-addressed blobs; concurrent
-identical calls converge; a provider retry duplicates nothing. The
-created Artifact is immediately readable by the same logical turn through
-`read_artifact` (producer ownership); Evaluators may call
+identical calls converge; a provider retry duplicates nothing. Two
+ceilings are distinct: the 48 KiB decoded-content ceiling bounds the
+Artifact, and the 96 KiB canonical request ceiling
+(`WRITE_ARTIFACT_CALL_MAX_BYTES`) bounds the call's serialized bytes —
+sized so 48 KiB of content as base64 (65,536 characters) with a
+200-byte title and a 200-byte media type always fits, while `utf8` text
+whose JSON escaping (quotes, backslashes, control characters) inflates the
+call beyond it is refused typed (`invalid_input`, before any transaction,
+consuming no allowance) and is submitted as base64 instead; decoded size,
+the accepted-call count, and the cumulative bytes of the turn are three
+independent bounds, and a refused call counts toward none. The created
+Artifact is immediately readable through `read_artifact` by the exact
+Invocation that recorded the call, in any of its Attempts; a replayed id
+in a successor grants nothing (above); Evaluators may call
 `write_artifact` for a bounded Evidence report — result validation admits
 a same-Invocation Artifact as Evidence under the existing Evidence
 rules — while creating no Changeset, mutating no Task, and holding no
@@ -3765,7 +3862,7 @@ mechanism, if ever added, is a new feature with its own design.
 | Crash during a Gate cycle (between opening, a check, the Evaluator, settlement, the remediation turn, or a reopened cycle) | Every step is one transaction or one external step recorded once; the next pass finds the open Gate, the recorded checks, the existing Evaluator or Task, or the closed Gate, and repeats nothing (§10). |
 | Deterministic check cannot run (timeout, abort, lost view, lost output, failed start) | Infrastructure failure: nothing recorded, no Evaluation fabricated, the pass stops typed (`verification_failed`); the next pass reruns exactly the unrecorded checks (§10.1). |
 | Crash between a check's command and its record | The command reruns in a fresh view (the stale one is discarded); the output Artifact and its Evaluation are recorded once, in one transaction. |
-| Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` with a bounded message and one `runtime_tool_call_failed` diagnostic; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). |
+| Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` naming the tool and the closed failure kind, with one `runtime_tool_call_failed` diagnostic carrying the ids, the digest, and that kind — never the thrown text; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). A crash between a `write_artifact` blob write and its commit leaves a safe unreferenced blob that recovery does not remove and the retry reuses (§2.1). |
 | `request_decision` refused (a kind with another owner, an out-of-scope or inaccessible id, invalid or over-bound input, an unbound role or purpose, a non-running or Gate-owned caller, a second request of the turn) | Rejected typed inside the call's transaction; nothing is written; the turn continues (§6.4). |
 | Provider misbehaves after an accepted `request_decision` (returns a result, attempts a further call, throws, fails transiently, ends on an approval-required call) | Ignored: the Attempt ends `failed` with class `decision_requested` and a refused retry, the Invocation `blocked` on the Decision, Usage recorded once for whatever the provider reported; no result, Changeset, approval, or second Decision is recorded (§8.2). |
 | Crash between an accepted `request_decision` and the Attempt's settlement | The Decision and its call row are the record; recovery marks the Attempt `interrupted` with the refused `decision_requested` retry and settles the Invocation `blocked` on the Decision, without a provider call; the Attempt's and the Invocation's settlement are one transaction, so neither exists without the other. |
