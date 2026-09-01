@@ -339,6 +339,27 @@ Execution Plan, never the Requirement. The id is stable across revisions.
 - Store: `requirements`, `requirement_revisions`, `requirement_status_changes`
 - Related: Acceptance Criterion, Task, Evidence, Decision, Gate
 
+### Requirement Proposal
+
+The canonical record of one accepted `propose_requirements` call
+(execution-model §8.1): the proposed tree exactly as accepted (entries by
+proposal-local key with parent, composition, statement, the Acceptance
+Criteria to author, and the id of an existing Requirement an entry
+keeps), the rationale, the Orchestrator Invocation that proposed it, and
+its life — `proposed` until the operator approves it (creating the
+Requirement revision it names, verbatim or edited), rejects it, or a
+newer proposal of the Run supersedes it. A Run has at most one `proposed`
+proposal. Its id is the proposal's identity in the tool result, the
+operator boundary, and the `requirement_proposal_resolution` input the
+Orchestrator's next turn receives. It never changes a Requirement by
+itself; only the approval does, in the same transaction as its
+resolution.
+
+- Id prefix: `rqp_`
+- Owned by: the Orchestrator (proposal) and the operator (resolution)
+- Store: `requirement_proposals`
+- Related: Requirement, Acceptance Criterion, Orchestrator Input, Invocation
+
 ### Acceptance Criterion
 
 A concrete, checkable condition attached to a Requirement or a Task that
@@ -934,7 +955,8 @@ approval, and executing the call again needs a new Decision.
 
 The canonical, append-only record that the runtime executed one mutating
 runtime-tool call (`propose_tasks`, `update_task`, `request_completion`,
-`request_decision`, or `write_artifact`) on behalf of a running
+`request_decision`, `write_artifact`, `create_tasks`, `record_decision`,
+`propose_requirements`, or `revise_execution_plan`) on behalf of a running
 Invocation: the Run, Plan Node, Invocation, the first Attempt
 that committed it, the tool, the digest of the canonicalized call, the
 safe result, and the commit time. It is written by the runtime-tool
@@ -960,6 +982,23 @@ never to an approval successor that replays it.
 - Owned by: the runtime
 - Store: `runtime_tool_calls`
 - Related: Invocation, Attempt, Task, Context Manifest, Coordinator, Completion Request
+
+### Orchestrator Input
+
+One queued, typed input of the Orchestrator's next logical turn
+(execution-model §4.6): an `operator_message` the operator posted through
+the steering service, a superseding `decision_resolution`, or a
+`requirement_proposal_resolution`. Queued when the operator acts, never
+injected into an active provider session, and delivered by exactly one
+later Orchestrator Invocation whose Context Manifest lists it (the row
+records that Invocation and the delivery time). Ended nodes' `node_result`
+inputs are not queued rows: the root derives them from the current graph
+and the root turns' manifests.
+
+- Id prefix: `oin_`
+- Owned by: the runtime, from the operator's operations
+- Store: `orchestrator_inputs`
+- Related: Invocation, Context Manifest, Conversation, Decision, Requirement Proposal
 
 ### Completion Request
 

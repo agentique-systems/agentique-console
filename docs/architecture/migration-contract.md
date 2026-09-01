@@ -637,10 +637,11 @@ is one or more commits; each commit keeps `npm run typecheck` and
    rows; blob-compensated one-transaction commit; digest replay of the
    same Artifact id; its own 96 KiB canonical call bound) with Evaluator
    Artifact creation for bounded Evidence reports and immediate
-   same-turn visibility; the post-phase executable handler set
-   (the read tools and `write_artifact` beside `propose_tasks`, the
-   Coordinator cancellation `update_task`, `request_completion`, and
-   `request_decision`; the `final_synthesis` turn reads only); and
+   same-turn visibility; the complete executable handler set (the read
+   tools, `write_artifact`, `propose_tasks`, `update_task` in full,
+   `request_completion`, `request_decision`, `create_tasks`,
+   `record_decision`, `propose_requirements`, `revise_execution_plan`;
+   the `final_synthesis` turn reads only); and
    restart safety across every write-replay, rollback, routing,
    corruption, and Evaluator-Evidence window. Phase 2G-A correction
    (done): the pending-write marker protocol of the blob store, the
@@ -653,21 +654,29 @@ is one or more commits; each commit keeps `npm run typecheck` and
    and temporary the protocol published, keeps every blob committed
    metadata references, and resolves every marker (execution-model §2.1;
    process death only, no power-loss claim, unmarked historical orphans
-   excluded). The remaining permitted-but-not-executable tools of
-   execution-model §6.4 (`create_tasks`, `record_decision`,
-   `propose_requirements`, `revise_execution_plan`, `update_task` beyond
-   the Coordinator's cancel) and operator supersession of a
-   policy-resolved Decision are existing acceptance commitments owned by
-   the roadmap's original Phases 4 and 5; their deferral waives none of
-   them. Operator Run cancellation and pause/resume are implemented under
+   excluded). The authoring tools of execution-model §6.4
+   (`create_tasks`, `record_decision`, `propose_requirements`,
+   `revise_execution_plan`, `update_task` in full), operator supersession
+   of a policy-resolved Decision, service-level operator steering through
+   the canonical root input queue, and the Orchestrator's `node_result`
+   turns are implemented (`server/src/execution/task-authoring.ts`,
+   `decision-records.ts`, `requirement-proposals.ts`,
+   `orchestrator-inputs.ts`, `decision-requests.ts`, `patterns/root.ts`;
+   roadmap Phases 4 and 5). Operator Run cancellation and pause/resume are implemented under
    this step as internal execution services
    (`server/src/execution/run-control.ts`, `run-cancellation.ts`; the
    `runs.operator_pause` column of the regenerated baseline; execution-model
    §3, §14) and are not agent tools or routes — the API of the cutover
-   calls them. Still open under this step: the production provider
-   adapter built in `server/src/provider/` by extraction and rewrite from
-   `server/src/sdk/` where rule 7 permits (roadmap Phase 3), and the real
-   Workspace adapters for the six ports (roadmap Phase 4). Everything the
+   calls them. The production provider adapter
+   (`server/src/provider/claude-adapter.ts` over the Claude Agent SDK,
+   with the hook-enforced authorization boundary, the in-process MCP
+   runtime-tool server, native session resumption, Usage from the SDK's
+   per-model figures, the redacted transcript, and the filtered
+   subprocess environment; roadmap Phase 3) and the real Workspace
+   adapters for the six ports over git and plain-directory Workspaces
+   (`server/src/workspace-state/`; roadmap Phase 4) are implemented, and
+   `server/src/composition/` wires them with every service for
+   production use. Everything the
    original wording of this step listed as future — Runs, Execution Plan
    source validation and the compiler, Plan Nodes of both kinds
    (`pattern`, `join`), Plan Edges, Plan Node Requirement scope, the
@@ -684,9 +693,11 @@ is one or more commits; each commit keeps `npm run typecheck` and
    Tool Policy interception, Snapshots, Changesets, the Integration
    Workspace, and publishing. Status: implemented and verified against
    the declared Workspace ports and their fake implementations under the
-   Phase 2 subphase labels; the production Workspace adapters,
-   Workspace-file Agent Definitions, and operator supersession of a
-   policy-resolved Decision remain (roadmap Phase 4).
+   Phase 2 subphase labels; the production Workspace adapters
+   (`server/src/workspace-state/`), Workspace-file Agent Definitions read
+   from a pinned Snapshot with the native-field acceptance rule
+   (`server/src/agents/`), and operator supersession of a policy-resolved
+   Decision are implemented (roadmap Phase 4).
 5. **API and web.** Routes, event stream, views. Status: not started
    (roadmap Phase 9), together with the rewritten entrypoints that open
    the database, run recovery, and start the scheduler.
@@ -1199,8 +1210,17 @@ the passing total alone.
   continues across a `side_effect_approval` Decision, and converges from
   every durable boundary across six process lifetimes without repeating
   provider calls, Invocations, Handoffs, Attempts, or integrations.
-- No live-provider tests in the default suite. A live smoke test may exist
-  behind an explicit opt-in environment variable and is not a benchmark.
+- No live-provider tests in the default suite. Two live smoke tests exist
+  behind `AGENTIQUE_LIVE_SMOKE=1` and are not benchmarks: one bounded
+  read-only Attempt through the real adapter
+  (`provider/claude-live.test.ts`) and the fourteen-step coding Run over
+  the production composition on a disposable fixture repository
+  (`composition/coding-run.live.test.ts`, also runnable as
+  `npm run verify:coding-run --workspace server`). The same fourteen steps
+  run in the default suite over real files, git, subprocess checks, and
+  SQLite with the SDK fixture (`composition/coding-run.e2e.test.ts`). A
+  live test never prints a credential, changes login or billing state, or
+  publishes anywhere but the fixture Target it created.
 
 ## 9. Acceptance
 

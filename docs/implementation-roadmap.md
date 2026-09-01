@@ -26,12 +26,12 @@ Two numbering schemes coexist in the history and both are kept:
 | 0 Clean-break contract | 1 Architecture documents | — (commits `4043e52`, `21a7309`, `6fd8dfc`) |
 | 1 Domain and persistence model | 2 Domain and schema | Phase 1 (`ab2cd7d`) |
 | 2 Durable generic execution engine | 3 Runtime core | 2A, 2B, 2C (scheduler), 2F-A, 2F-B (blocking boundary), 2G-A correction (this document's first revision) |
-| 3 Execution adapters, context, Artifact delivery | 3 Runtime core | 2B (manifest, adapter contract, scripted fake), 2G-A (`read_artifact`, `write_artifact`) |
-| 4 Workspaces, Changesets, tools, verification gates | 3 and 4 | 2A (preparation port), 2B (execution-workspace port, authorization), 2C (integration), 2D-B1 (runtime-tool boundary), 2D-B2 (checks), 2E-A/B/C/D (Gates, completion, signoff, publication), 2G-A (reads, writes) |
-| 5 Single-agent Pattern and Orchestrator | 3 | 2B (Run start, root turn), 2C (`single`, root settlement), 2E-B/C (completion, signoff turns), 2F-B (`request_decision`) |
+| 3 Execution adapters, context, Artifact delivery | 3 Runtime core | 2B (manifest, adapter contract, scripted fake), 2G-A (`read_artifact`, `write_artifact`); production Claude adapter (`51a78ae`) |
+| 4 Workspaces, Changesets, tools, verification gates | 3 and 4 | 2A (preparation port), 2B (execution-workspace port, authorization), 2C (integration), 2D-B1 (runtime-tool boundary), 2D-B2 (checks), 2E-A/B/C/D (Gates, completion, signoff, publication), 2G-A (reads, writes); Workspace providers (`2933af7`), Workspace-file Agent Definitions (`c289f63`), authoring tools and supersession (`552d655`) |
+| 5 Single-agent Pattern and Orchestrator | 3 | 2B (Run start, root turn), 2C (`single`, root settlement), 2E-B/C (completion, signoff turns), 2F-B (`request_decision`); authoring, steering (`552d655`), `node_result` turns (`48947c9`), composition and the real end-to-end path (`0839a21`) |
 | 6 Chain, routing, parallel Patterns | 3 | 2C (`chain`), 2D-A (`route`, `parallel`, `join`) |
 | 7 Evaluator-optimizer | 3 | 2D-B2 |
-| 8 Coordinator-worker and Pattern selection | 3 | 2D-B1 (runner), 2A (compiler selects Patterns from the plan source) |
+| 8 Coordinator-worker and Pattern selection | 3 | 2D-B1 (runner), 2A (compiler selects Patterns from the plan source), `revise_execution_plan` (`552d655`) |
 | 9 Complete application cutover | 5 and 6 | not started |
 | 10 Eradicate legacy and harden | 6 and 7 | not started |
 
@@ -223,34 +223,52 @@ for every Pattern position); Artifact delivery by manifest listing and by
 `fake.test.ts`), the continuation service and payload stores
 (`provider/continuation.ts`, `continuation-store.ts`).
 
-**Evidence.** Injected ports and test doubles: every Attempt in the suite
-runs against `ScriptedProvider`. Real execution: none for a production
-provider.
+**Implemented (`51a78ae`, `0839a21`).** The production adapter
+`provider/claude-adapter.ts` over the Claude Agent SDK (`claude-sdk.ts`
+is the narrow surface the adapter uses; `claude-sdk-binding.ts` the real
+binding): the rendered manifest as the one user message under a fixed
+protocol system prompt; native tools exposed exactly per the effective
+capability set (`native-tools.ts`, with the SDK's own tool list pinned by
+a tripwire test); every native call authorized by a `PreToolUse` hook
+against the runtime's authorization port with a fail-closed `canUseTool`
+behind it (`approval_required` ends the turn, a denial is a denied call,
+`settingSources: []`, `strictMcpConfig`, `permissionMode: default`, no
+skills); the runtime tools as an in-process MCP server whose handlers call
+the runtime-tool port, with `return_result` ending the Attempt and a
+blocking `request_decision` stopping the turn; structured results;
+complete Usage from the SDK's per-model figures (`modelUsage`) with the
+fallbacks recorded as such; interruption through the abort signal
+(cancellation, pause, deadline); native continuation through session
+resumption with a fresh fallback once when the session is gone; failure
+classification (`failure-classifier.ts`, twelve closed kinds, secrets
+redacted); the filtered subprocess environment (`env.ts`: host coupling
+and feature flags stripped, retries and updater pinned); a bounded,
+redacted JSONL transcript. Verified by the deterministic
+`claude-adapter.test.ts` over `FakeClaudeSdk`
+(`claude-sdk-test-support.ts`), which applies the SDK's exact tool path
+(unknown tool → hooks → permission evaluation → execution) so the tests
+prove the hook, not the SDK's defaults, decides; `native-tools.test.ts`,
+`env.test.ts`, `failure-classifier.test.ts`, `runtime-tool-shapes.test.ts`
+(the MCP input shapes through the real `createSdkMcpServer` and an MCP
+client). The boundary test applies the provider rules to the adapter.
 
-**Remaining.**
+**Evidence.** Real execution: the opt-in live smoke `claude-live.test.ts`
+(one read-only Attempt through the real SDK: authorized reads, a returned
+typed result, measured Usage, a redacted transcript, no credential in any
+output) and the live coding Run of Phase 5; deterministic suites over the
+SDK fixture for every path.
 
-1. **Production provider adapter(s)** under `server/src/provider/`,
-   extracted and rewritten from `server/src/sdk/` where contract rule 7
-   permits (protocol handling, message mapping, usage normalization,
-   failure classification, environment setup), depending only on core and
-   `server/src/provider/*`; the fake keeps proving the engine.
-2. **Provider-neutral boundary verification against the real adapter**:
-   the boundary test's provider rules (no Run, Plan, Pattern, Invocation,
-   Task, Requirement, Decision, Budget, or retry decision in an adapter)
-   applied to the production adapter, and a live smoke test behind an
-   explicit opt-in (contract §8, last bullet).
+**Remaining.** Nothing.
 
-**Dependencies.** Phase 2 (the executor and the adapter contract are
-fixed).
+**Dependencies.** Phase 2.
 
-**Completion condition.** One Attempt of a root Orchestrator Invocation
-executes against a production provider through the adapter contract with
-Usage, transcript Artifact, result validation, and tool-call authorization
-recorded exactly as with the fake, behind the opt-in smoke test; the
-boundary test covers the adapter. Not met.
+**Completion condition.** Met: one Attempt of a root Orchestrator
+Invocation executes against the production provider through the adapter
+contract with Usage, transcript Artifact, result validation, and tool-call
+authorization recorded exactly as with the fake, behind the opt-in smoke
+test; the boundary test covers the adapter.
 
-**Status: partial** — context and delivery implemented and verified;
-production provider execution not implemented.
+**Status: implemented and verified.**
 
 ## Phase 4 — Implement workspaces, Changesets, tools, and verification gates
 
@@ -278,45 +296,60 @@ Coordinator's cancelling `update_task`, `request_completion`,
 `request_decision`, `write_artifact`, and the six read tools), Agent
 Definition resolution (`agent-definitions.ts`, `agent-definitions.test.ts`).
 
-**Evidence.** Injected ports for every Workspace capability
-(`FakeWorkspacePreparation`, `FakeExecutionWorkspace`,
-`FakeIntegrationWorkspace`, `FakeAcceptanceCriterionExecution`,
-`FakeRunFinalizationWorkspace`, `FakePublicationWorkspace` in
-`execution/test-support.ts`, the only implementations in the tree); real
-execution for the content path (real Artifact and blob stores in
-`integration-content.test.ts`, `data-access-crash.test.ts`).
+**Implemented (production side).** `server/src/workspace-state/`
+(`2933af7`): one production implementation of every port over a
+Workspace state root — preparation (`preparation.ts`: the Target Snapshot
+pinned by commit and tree, the Run's integration checkout on
+`agentique/run/<runId>`), execution (`execution.ts`: one worktree per
+Invocation at the integration head, its Changeset collected as a
+binary-safe diff with before and after Snapshot identities), integration
+(`integration.ts`: apply with `--3way` onto the integration branch, drift
+detection, the `Agentique-Changeset` trailer, refs per Changeset,
+conflicts as typed outcomes), checks (`checks.ts`: an isolated view
+worktree per isolation key under the Run directory, the command as a real
+subprocess with a bounded capture, the whole process tree ended at the
+deadline, a filtered environment), finalization (`finalization.ts`: the
+final diff observed between the pinned Target and the integration head),
+and publication (`publish.ts`: prepared staging, byte-equality
+verification of the candidate, fast-forward or merge, an atomic
+`update-ref` transaction with compare-and-swap, receipts, a
+plain-directory kind through a bare shadow repository with content
+digests). Everything under it imports no store, blob store, or database
+module. Workspace-file Agent Definitions (`c289f63`,
+`server/src/agents/`): `.claude/agents/*.md` read from the exact pinned
+Snapshot through `git ls-tree`/`cat-file` (never the working tree), the
+native-field acceptance rule (`native-agent-file.ts`: every field read
+with its native meaning, informational, or rejected by name; the retired
+overlay refused), one revision per content hash with `workspace_file`
+provenance, the built-ins ensured (`builtins.ts`). The remaining tools
+(`552d655`): `update_task` in full (`task-authoring.ts`), `create_tasks`,
+`record_decision` (`decision-records.ts`), `propose_requirements` with
+the operator approve/edit/reject boundary (`requirement-proposals.ts`),
+`revise_execution_plan` through the one plan-revision service. Operator
+supersession of a policy-resolved Decision
+(`decision-requests.ts` `supersede`, `552d655`).
 
-**Remaining.**
+**Evidence.** Real execution: `workspace-state/git-workspace.test.ts`,
+`directory-workspace.test.ts`, `checks.test.ts`, `publish.test.ts`,
+`capabilities.test.ts` over real repositories, worktrees, and
+subprocesses; `agents/definitions.test.ts` over a real repository with
+committed symlink objects and later commits; the composition end-to-end
+(`composition/coding-run.e2e.test.ts`) over every port at once. Tools and
+supersession: `execution/authoring-tools.test.ts`,
+`requirement-proposals.test.ts`, `decision-supersession.test.ts`
+(continuation before and after work proceeded, replays, refusals).
 
-1. **Real Workspace adapters** implementing the six ports over the
-   Workspace's version control (git worktrees, Snapshot identities,
-   Changeset capture and application, isolated check views, final-diff
-   observation, publication candidates and receipts) under a final
-   location that imports no store, blob store, or database module (the
-   boundary test already pins that rule for the ports).
-2. **Remaining runtime tools** (see "Deferred tools" below): full
-   `update_task`, `create_tasks`, `record_decision`,
-   `propose_requirements`, `revise_execution_plan`.
-3. **Operator supersession of a policy-resolved Decision** (execution-model
-   §8.2): the operation, its Event, and its restart test.
-4. **Agent Definitions from Workspace files** (execution-model §11,
-   contract §6): reading `.claude/agents/*.md` at a Snapshot with the
-   native-field acceptance rule; only the builtin and Conversation
-   provenances are exercised today.
+**Remaining.** Nothing.
 
-**Dependencies.** Phase 2 (the engine drives the ports); item 1 also
-depends on nothing in Phase 3 (the ports are provider-neutral).
+**Dependencies.** Phase 2.
 
-**Completion condition.** Every port has one production implementation
-exercised by an integration test over a real repository, the remaining
-tools are executable at their bound positions with replay and restart
-tests, supersession is implemented and tested, and Workspace-file Agent
-Definitions are read and pinned. Not met.
+**Completion condition.** Met: every port has one production
+implementation exercised over a real repository, the remaining tools are
+executable at their bound positions with replay tests, supersession is
+implemented and tested, and Workspace-file Agent Definitions are read and
+pinned.
 
-**Status: partial** — verification, integration, publication, and the
-runtime-tool boundary implemented and verified against injected ports;
-adapters, the remaining tools, supersession, and Workspace-file
-definitions not implemented.
+**Status: implemented and verified.**
 
 ## Phase 5 — Implement the single-agent Pattern and Orchestrator
 
@@ -334,29 +367,53 @@ proposals through the Coordinator path, `request_decision` and
 over `single` and `chain` nodes across six process lifetimes
 (contract §8 "End-to-end tests").
 
-**Evidence.** Injected ports and test doubles throughout; no real
-provider, no real Workspace.
+**Implemented (`552d655`, `48947c9`, `0839a21`).** The authoring tools
+from the root turn (`revise_execution_plan`, `propose_requirements`,
+`create_tasks`, `record_decision`, full `update_task`; Phase 4 above).
+Service-level operator steering: `orchestrator-inputs.ts` posts an
+operator message to the Run's Conversation and queues it as a typed
+input (`orchestrator_inputs`); the root advises one turn from rows once
+the latest turn is settled, the scheduler's `prepare_root_turn` prepares
+it with every queued input, and nothing is ever injected into an active
+provider session. The Orchestrator's `node_result` turns
+(`patterns/root.ts`): an ended current node whose result no root turn
+received is delivered as a typed input of one batched turn, so the
+Orchestrator acts on planned work (requests completion, revises the plan)
+through canonical turns. The production composition
+(`server/src/composition/console-runtime.ts`) and the first real
+end-to-end path: `coding-run.e2e.test.ts` (default suite; real files,
+git, subprocess checks, SQLite, blob and continuation stores, the SDK
+fixture on the SDK's exact tool path) and `coding-run.live.test.ts` /
+`npm run verify:coding-run --workspace server` (opt-in; the real SDK)
+walk the fourteen steps — Workspace and Conversation, pinned
+Workspace-file definition, operator Requirement and deterministic
+criterion, Run creation and start, plan revision by tool, an isolated
+Worker change, real integration, the `node_result` turn requesting
+completion, the completion check as a real subprocess, final synthesis,
+operator signoff with real finalization, a separately authorized
+publication onto the fixture Target, then a restart and replays that
+change nothing.
 
-**Remaining.**
+**Evidence.** Real execution for the whole path with the SDK fixture in
+the default suite; real provider Attempts behind the opt-in — the live
+verification ran on 2026-09-02 with `claude-haiku-4-5-20251001` at low
+effort and completed all fourteen steps (root turns `operator_input`,
+`node_result`, `final_synthesis`; one `revise_execution_plan` and one
+`request_completion` call; the Worker's `Edit` in its worktree; the check
+passed as a runtime Evaluation; the fixture Target fast-forwarded; about
+0.11 USD); steering, node results, and supersession in
+`operator-steering.test.ts`, `patterns/root-node-results.test.ts`,
+`decision-supersession.test.ts`.
 
-1. **Orchestrator authoring tools** — `revise_execution_plan` (the
-   Orchestrator's route into the existing plan-revision service),
-   `propose_requirements`, `create_tasks`, `record_decision`, full
-   `update_task` (see "Deferred tools").
-2. **The first real end-to-end single-agent path** — one Run with a
-   `single` node executed by the production provider adapter (Phase 3) in
-   a real Workspace (Phase 4 adapters) behind the opt-in smoke test.
+**Remaining.** Nothing.
 
-**Dependencies.** Phase 3 item 1 and Phase 4 item 1 for the real path;
-Phase 4 item 2 for authoring.
+**Dependencies.** Phases 3 and 4.
 
-**Completion condition.** The authoring tools are executable from the root
-turn with replay and restart tests, and the real end-to-end path runs
-once behind the opt-in. Not met.
+**Completion condition.** Met: the authoring tools are executable from the
+root turn with replay tests, and the real end-to-end path runs behind the
+opt-in (and, over the SDK fixture, in the default suite).
 
-**Status: partial** — the Pattern, the root turns, and the end-to-end fake
-path implemented and verified; authoring tools and the real path not
-implemented.
+**Status: implemented and verified.**
 
 ## Phase 6 — Implement chain, routing, and parallel Patterns
 
@@ -419,19 +476,19 @@ and the six runners are complete.
 
 **Evidence.** Injected ports and test doubles.
 
-**Remaining.** The Orchestrator's route to selecting Patterns at runtime is
-`revise_execution_plan` (Phase 5 item 1 / deferred tools); the compiler
-needs nothing further.
+**Remaining.** Nothing: the Orchestrator selects Patterns at runtime
+through `revise_execution_plan` (`552d655`, credited here from Phase 5's
+authoring work), exercised from the root turn in
+`execution/authoring-tools.test.ts` and in the end-to-end coding Run.
 
 **Dependencies.** Phase 6, Phase 7.
 
-**Completion condition.** Every rule of execution-model §5.5 has a test and
-every Coordinator window converges across a restart (met); the
-Orchestrator can revise a plan through its tool (not met — tracked under
-Phase 5).
+**Completion condition.** Met: every rule of execution-model §5.5 has a
+test, every Coordinator window converges across a restart, and the
+Orchestrator revises a plan through its tool.
 
-**Status: partial** — the Pattern implemented and verified; runtime
-Pattern selection by the Orchestrator waits on `revise_execution_plan`.
+**Status: implemented and verified** (against injected ports for the
+Pattern; the tool over the real composition).
 
 ## Phase 9 — Perform the complete application cutover
 
@@ -444,11 +501,17 @@ admitted, the scheduler as the one driver), operator operations exposed
 through the API (Run creation, cancel, pause/resume, Decision resolution,
 Budget Increase, signoff, publication).
 
-**Implemented.** Nothing. `server/src/main.ts`, `app.ts`, and `boot.ts`
-still build the legacy application over `server/src/db/`; no production
-code calls the clean-break `RecoveryService` (the boundary test pins this:
-its only callers are the test harnesses `execution/test-support.ts`,
-`recovery-test-support.ts`, and the crash child).
+**Implemented.** The reusable wiring only: `server/src/composition/`
+composes the runtime for production (database under the migration
+contract, file blob and continuation stores, the production adapter, the
+six Workspace ports, Agent Definitions, every service) and offers
+`advanceRunUntil` and the verification entrypoint; the API, the web
+application, and the entrypoints are not written. `server/src/main.ts`,
+`app.ts`, and `boot.ts` still build the legacy application over
+`server/src/db/`; no entrypoint calls the clean-break `RecoveryService`
+(its callers are the composition, the test harnesses
+`execution/test-support.ts`, `recovery-test-support.ts`, and the crash
+child).
 
 **Evidence.** None.
 
@@ -487,43 +550,44 @@ in force).
 
 **Status: not implemented.**
 
-## Deferred tools and behaviour
+## Formerly deferred tools and behaviour
 
-The runtime-tool contract (`core/src/runtime-tools.ts`) lists these tools
-as permitted-but-not-executable: the manifest may grant them, no handler
-exists, and the boundary test forbids binding them early. Each is an
-**existing acceptance commitment** of execution-model §6.4 — the label
-"later subphase" waives nothing.
+Every tool the runtime-tool contract (`core/src/runtime-tools.ts`) once
+listed as permitted-but-not-executable is now executable at exactly its
+bound positions; the boundary test pins the complete handler set and that
+each authoring tool binds to the Orchestrator's authoring purposes alone.
 
-| Deliverable | Owner in the original roadmap | Commitment | Notes |
+| Deliverable | Owner in the original roadmap | Delivered in | Where |
 |---|---|---|---|
-| Full `update_task` (beyond the Coordinator's `cancel`) | Phase 4 (tools), used by Phase 5 authoring | existing (§6.4, §7.9) | Today: `update_task: [{ role: "coordinator", purposes: ["decompose", "replan"] }]` with the one `cancel` operation. |
-| `create_tasks` | Phase 5 (Orchestrator authoring) | existing (§6.4) | Orchestrator-created Tasks outside a Coordinator node; the Task store and projection already accept `origin: "orchestrator"`. |
-| `record_decision` | Phase 5 (Orchestrator authoring) | existing (§6.4, §8.2) | Records a Decision the Orchestrator made; can never create or resolve a `requirement_waiver` (contract §8 "Requirement tests"). |
-| `propose_requirements` | Phase 5 (Orchestrator authoring) | existing (§6.4, §8.1) | Proposes a Requirement revision for operator approval; the Requirement stores and revision pinning exist. |
-| `revise_execution_plan` | Phase 5 (Orchestrator authoring), enabling Phase 8 Pattern selection | existing (§4.5, §6.4) | The plan-revision service with reconciliation exists and is tested; the tool is the Orchestrator's route into it. |
-| Operator supersession of a policy-resolved Decision | Phase 4 (verification and Decisions) | existing (§8.2) | Decisions carry `supersedesDecisionId`; the operator operation, its Event, and its restart test are not implemented. |
+| Full `update_task` (`cancel`, `add_evidence`, `add_outputs`) | Phase 4 (tools), used by Phase 5 authoring | `552d655` | `execution/task-authoring.ts`, `TaskStore.recordEvidence`; `authoring-tools.test.ts` |
+| `create_tasks` | Phase 5 (Orchestrator authoring) | `552d655` | `execution/task-authoring.ts`; `authoring-tools.test.ts` |
+| `record_decision` | Phase 5 (Orchestrator authoring) | `552d655` | `execution/decision-records.ts` (the Orchestrator's `orchestrator_choice`, never a waiver); `authoring-tools.test.ts` |
+| `propose_requirements` | Phase 5 (Orchestrator authoring) | `552d655` | `execution/requirement-proposals.ts`, `requirement_proposals` table; `requirement-proposals.test.ts` |
+| `revise_execution_plan` | Phase 5 (Orchestrator authoring), enabling Phase 8 Pattern selection | `552d655` | `execution/runtime-tools.ts` through `PlanRevisionService`; `authoring-tools.test.ts`, the coding Run |
+| Operator supersession of a policy-resolved Decision | Phase 4 (verification and Decisions) | `552d655` | `DecisionRequestService.supersede`; `decision-supersession.test.ts` |
 
-## Where the "Phase 2" label still carries unfinished work
+## The "Phase 2" label carries no unfinished work
 
-Contract §7 step 3 ("Runtime core", the Phase 2 subphases) has been the
-label under which Phases 2–8 were built. What remains under that label and
-where it belongs:
+Contract §7 step 3 ("Runtime core", the Phase 2 subphases) was the label
+under which Phases 2–8 were built. Everything that remained under it has
+been delivered under its original phase:
 
-| Unfinished item carrying a Phase 2 subphase label | Original phase |
-|---|---|
-| Production provider adapter(s) extracted from `server/src/sdk/` | Phase 3 |
-| Real Workspace adapters for the six ports | Phase 4 |
-| Remaining runtime tools (table above) | Phases 4 and 5 |
-| Operator supersession of a policy-resolved Decision | Phase 4 |
-| Workspace-file Agent Definitions | Phase 4 |
-| First real end-to-end single-agent path | Phase 5 |
+| Item once carrying a Phase 2 subphase label | Original phase | Delivered in |
+|---|---|---|
+| Production provider adapter | Phase 3 | `51a78ae` |
+| Real Workspace adapters for the six ports | Phase 4 | `2933af7` |
+| Remaining runtime tools (table above) | Phases 4 and 5 | `552d655` |
+| Operator supersession of a policy-resolved Decision | Phase 4 | `552d655` |
+| Workspace-file Agent Definitions | Phase 4 | `c289f63` |
+| First real end-to-end single-agent path | Phase 5 | `0839a21` |
 
 ## Next unfinished deliverable
 
-The earliest unfinished original-phase deliverable is Phase 3 item 1, the
-production provider adapter, which Phase 5's real end-to-end path and
-Phase 9's cutover both depend on. Phase 2 is complete.
+The earliest unfinished original-phase deliverable is Phase 9, the
+complete application cutover (the API, the web application, the rewritten
+entrypoints over `server/src/composition/`, with the startup order *open
+database → recover → start the scheduler*), followed by Phase 10.
+Phases 0–8 are complete.
 
 ## Revision history
 
@@ -536,3 +600,19 @@ Phase 9's cutover both depend on. Phase 2 is complete.
   enumeration), operator Run cancellation, and operator pause/resume with
   the persisted `operatorPause`; the plan-revision overstatement in this
   section corrected; the next unfinished deliverable is Phase 3 item 1.
+- 2026-09-02 — Phases 3, 4, 5, and 8 closed: two lifecycle corrections
+  (`055a001`: a cancelled Run's interrupted Attempt settles as
+  `cancelled`, and recovery cancels the work of a Run cancelled while its
+  Attempt was blocked); the production Claude adapter (`51a78ae`); the
+  Workspace providers for all six ports over git and plain-directory
+  Workspaces (`2933af7`); Snapshot-pinned Workspace-file Agent
+  Definitions and the built-ins (`c289f63`); the authoring tools,
+  Requirement proposals with the operator boundary, operator steering
+  through the canonical root input queue, and operator supersession of
+  a policy-resolved Decision (`552d655`); the Orchestrator's
+  `node_result` turns (`48947c9`); the production composition, the
+  end-to-end coding Run over real files, git, subprocess checks, and
+  SQLite, and the live verification entrypoint (`0839a21`). The baseline
+  migration was regenerated for `requirement_proposals`,
+  `orchestrator_inputs`, the `xhigh` effort, and an Orchestrator's own
+  `orchestrator_choice`. The next unfinished deliverable is Phase 9.

@@ -950,7 +950,21 @@ There is never more than one active Orchestrator Invocation for a Run.
 Inputs that arrive while one is active are queued; when it ends, the
 runtime creates exactly one new Invocation whose Context Manifest carries
 every queued input and whose `purpose` is the first in the table order
-above that applies. Routine progress — an Invocation starting, a Task
+above that applies. The queue is canonical: operator steering and
+operator resolutions are rows of `orchestrator_inputs` (an
+`operator_message`, a superseding `decision_resolution`, a
+`requirement_proposal_resolution`), each delivered by exactly one later
+Orchestrator Invocation whose manifest lists it, and an operator message
+is posted to the Run's Conversation and queued through the
+orchestrator-input service — never injected into an active provider
+session. Ended nodes' results are derived, not queued: a current non-root
+node that reached a terminal state and whose result no Orchestrator turn
+has received as a `node_result` input is pending until one turn carries
+it. The idle root advises the turn from rows alone; queued operator inputs
+make the turn at once, while node results alone are batched like Gate
+remediation — prepared only when nothing else in the pass can act, so the
+nodes that ended together share one `node_result` turn — funded from the
+root's ordinary allocation like every root turn. Routine progress — an Invocation starting, a Task
 changing state, Usage accruing, a lease being granted — never creates an
 Orchestrator Invocation. Each Orchestrator Invocation records
 `continuedFromInvocationId` pointing at the previous one; its initial
@@ -1384,6 +1398,43 @@ its dependencies, and its reservation in that one transaction. The rules:
 Cancellation through `update_task` (`{ kind: "cancel" }`) is accepted
 only for a `pending`, `ready`, or `blocked`, non-superseded Task of the
 caller's node (`task_not_cancellable`); it releases the Task's reservation.
+
+**`update_task` in full.** The tool's operations are closed: `cancel`
+(above; the Orchestrator may also cancel the Run's own `pending`,
+`ready`, or `blocked` current Tasks — never a Coordinator's, whose ledger
+its Coordinator owns — releasing any reservation), `add_evidence`
+(Evidence associated with a Task), and `add_outputs` (output Artifacts
+associated with a Task). No operation changes a Task's status other than
+cancellation: a Task completes through its Invocation's result, never
+through the tool. The handler enforces, per call and from rows:
+*visibility* — the Orchestrator sees the Run's current Tasks, a
+Coordinator its node's, a Worker exactly the Tasks assigned to its
+Invocation, and a superseded Task is history (`task_not_visible`);
+*ownership* — a Worker never cancels (`caller_not_permitted`);
+*terminal immutability* — a `completed`, `failed`, or `cancelled` Task
+accepts nothing (`task_terminal`); *Evidence scope* — an Artifact must be
+readable by the caller (its manifest or its own production) and of the
+Run, a Snapshot or Evaluation must be the Run's, `url` Evidence is free
+text, and `command` Evidence is the runtime's alone
+(`evidence_out_of_scope`); *output provenance* — an output Artifact must
+be readable by the caller, of the Run, not produced for another Task, and
+not already another Task's output (`artifact_provenance_invalid`). A
+repeated association writes nothing; the store records only additions
+(`task.evidence_recorded`).
+
+**`create_tasks`.** The Orchestrator creates Run-level Tasks in the same
+bounded batch form as a Coordinator's proposal (keys, subjects,
+Requirement ids, input Artifacts, required outputs, dependencies by key
+and by id, replacements). The runtime owns every fact it already knows:
+origin `orchestrator`, no owning node (the source Execution Plan binds
+Tasks to operations), the Conversation's current Requirement revision,
+ids, timestamps. Requirement scope is that revision's live leaves
+(`requirement_out_of_scope`, `requirement_retired`); dependencies and
+replacements name the Run's current Tasks (`foreign_dependency`,
+`invalid_replacement`); a Coordinator's Task is never replaced from the
+root; the resulting dependency graph is acyclic (`dependency_cycle`). No
+Task reservation is made — the operation that later runs a Task is funded
+by its own node.
 
 ### 5.6 `evaluator_optimizer`
 
@@ -1895,27 +1946,33 @@ particular `record_decision` cannot create or resolve a
    purpose — a `synthesize` turn has neither `propose_tasks` nor
    `update_task`; a `final_synthesis` turn has no mutating runtime tool
    at all);
-3. the tools the runtime **can execute** in this phase — the handler
-   bindings in `core/src/runtime-tools.ts`: the six read tools
-   (`read_requirements`, `read_decisions`, `read_tasks`, `read_artifact`,
-   `read_execution_plan`, `read_agent_definitions`), for every role at
-   every purpose of that role; `write_artifact`, for every role except
-   the read-only `final_synthesis` turn; `propose_tasks` and the
-   cancelling `update_task`, for a Coordinator with purpose `decompose`
-   or `replan`; `request_completion`, for the root Orchestrator's
-   ordinary turns (every Orchestrator purpose but `final_synthesis`) and
-   for no other role, node, or purpose; and `request_decision`, for an
-   Orchestrator turn of any purpose but `final_synthesis`, a Coordinator's
-   `decompose`, `replan`, and `synthesize` turns, and a Worker's `step` or
-   `task` — never an Evaluator, a Gate evaluation, a Run completion
-   evaluation, or a final-synthesis turn; and
+3. the tools the runtime **can execute** — the handler bindings in
+   `core/src/runtime-tools.ts`, one per executable tool: the six read
+   tools (`read_requirements`, `read_decisions`, `read_tasks`,
+   `read_artifact`, `read_execution_plan`, `read_agent_definitions`), for
+   every role at every purpose of that role; `write_artifact`, for every
+   role except the read-only `final_synthesis` turn; `propose_tasks`, for
+   a Coordinator with purpose `decompose` or `replan`; `update_task`, for
+   an Orchestrator turn of any purpose but `final_synthesis`, a
+   Coordinator's `decompose` and `replan` turns, and a Worker's `step` or
+   `task` (the handler enforces each role's visibility and ownership,
+   §5.5.1); `create_tasks`, `record_decision`, `propose_requirements`,
+   and `revise_execution_plan`, for an Orchestrator turn of any purpose
+   but `final_synthesis` and for no other role; `request_completion`, for
+   the root Orchestrator's ordinary turns (every Orchestrator purpose but
+   `final_synthesis`) and for no other role, node, or purpose; and
+   `request_decision`, for an Orchestrator turn of any purpose but
+   `final_synthesis`, a Coordinator's `decompose`, `replan`, and
+   `synthesize` turns, and a Worker's `step` or `task` — never an
+   Evaluator, a Gate evaluation, a Run completion evaluation, or a
+   final-synthesis turn; and
 4. the **effective callable set** exposed to a provider execution: the
    intersection of the manifest's tools, the runtime handlers, and the
-   validity of the caller's role and purpose. A tool that is permitted
-   but not executable (`create_tasks`, `record_decision`,
-   `propose_requirements`, `revise_execution_plan`, and every
-   `update_task` operation beyond the Coordinator's cancel) is not
-   exposed as callable; `request_decision` is exposed exactly when all
+   validity of the caller's role and purpose. `revise_execution_plan`
+   is additionally exposed only when the executor was composed with the
+   plan-revision service its handler compiles through (the production
+   composition always is); a tool without its configured handler is not
+   callable. `request_decision` is exposed exactly when all
    three layers admit it, at every Pattern position bound to a Worker or
    Coordinator role and at every Orchestrator purpose but
    `final_synthesis`, and never at an Evaluator position
@@ -1931,7 +1988,9 @@ The Attempt executor binds one `RuntimeToolCallPort` (`tools`, `call`)
 per Attempt, fixed to that Attempt, Invocation, manifest, role, purpose,
 Run, and Plan Node; the adapter receives the port and nothing else. A
 call is a closed discriminated request (`propose_tasks`, `update_task`,
-`request_completion`, `request_decision`),
+`request_completion`, `request_decision`, `write_artifact`,
+`create_tasks`, `record_decision`, `propose_requirements`,
+`revise_execution_plan`),
 parsed strictly, canonicalized (sorted-key JSON of `{ tool, input }`),
 bounded at 65,536 bytes, and digested; its outcome is a closed union —
 `accepted` (call id, digest, `replayed`, the tool's typed result),
@@ -3067,10 +3126,30 @@ or `failed` Task is never described as in progress; only `running` is.
 ### 8.1 Requirements
 
 - The Orchestrator proposes a Requirement tree with Acceptance Criteria
-  through `propose_requirements`. The operator approves, edits, or rejects.
-  Approval creates a Requirement revision. Plan Nodes pin the revision
-  their expressions named (§4.7); the root node's manifests carry the
-  current revision.
+  through `propose_requirements`: a bounded tree of entries addressed by
+  proposal-local keys — parent key, composition (non-null exactly for
+  parents), statement, the Acceptance Criteria to author, and optionally
+  the id of an existing live Requirement the entry keeps — with a
+  rationale. The accepted call records a **Requirement Proposal**
+  (`requirement_proposals`), whose id is the proposal's canonical identity
+  in the tool result, the operator boundary, and the Orchestrator's later
+  input; a Run has at most one `proposed` proposal, and a newer accepted
+  proposal supersedes the open one (`superseded`, naming its superseder).
+  The proposal changes no Requirement by itself. The operator approves,
+  edits, or rejects through the requirement-proposal service: approval
+  (verbatim, or with the operator's edited tree, which is validated like
+  the proposal) creates the Requirement revision in the same transaction
+  — kept Requirements keep their ids, new ones are minted, Requirements
+  the tree drops are retired by the revision, and the proposed Acceptance
+  Criteria are authored in the new revision — and records the resolution
+  (`approved`, the revision, whether it was edited, the rationale);
+  rejection records `rejected` and creates nothing. Either resolution is
+  queued as a typed `requirement_proposal_resolution` input of the
+  Orchestrator's next turn (§4.6). A repeated approval or rejection
+  replays; approving a rejected or superseded proposal, or resolving one
+  of a terminal Run, is refused typed. Plan Nodes pin the revision their
+  expressions named (§4.7); the root node's manifests carry the current
+  revision.
 - A Requirement revision represents a change to an intended outcome or
   constraint: a statement's meaning, its composition, its Acceptance
   Criteria, or which Requirements exist. Changes to how the work is carried
@@ -3177,8 +3256,27 @@ without that Event, and a policy resolution is shown in the Conversation
 like any other. A Decision that ends without a resolution is
 `superseded` with a closed **supersession reason**: `superseding_decision`
 (a later Decision, named by id) or `requirement_waiver_stale` (the runtime,
-below); an operator path that supersedes a policy resolution with a later
-Decision is not built in this phase.
+below).
+
+**Operator supersession of a policy resolution.** The operator may
+supersede a requested `operator_choice` that the runtime resolved by its
+default policy, through the decision-request service (`supersede`), never
+through a tool: a new `operator_choice` Decision requested by the operator
+— the same question, options, and affected ids — is recorded as the
+explicit superseder (`supersedesDecisionId`) and resolved by the operator
+to the chosen option in the same transaction; the original stays in
+history as `superseded` (`superseding_decision`, naming the superseder),
+its policy resolution intact. Nothing is undone, rerun, duplicated, or
+reallocated: when the requester still awaits its continuation, the one
+successor the scheduler prepares carries both resolutions (the original
+as history, the superseding one as the answer); when work already
+proceeded on the policy choice, the superseding resolution is queued as a
+typed `decision_resolution` input of the Orchestrator's next turn (§4.6),
+and the Orchestrator acts on it through canonical turns. A repeat with
+the same option replays; a different option, an operator-resolved
+Decision (`not_policy_resolved`), the option the policy already chose
+(`option_unchanged`), another kind (`not_supersedable`), or a terminal Run
+is refused typed.
 
 **Agent-requested Decisions.** `operator_choice` and `requirement_waiver`
 are the only kinds an agent may request, through `request_decision`
