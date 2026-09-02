@@ -14,7 +14,10 @@
  *
  * Every subscriber has one bounded outbound buffer; a subscriber that stays
  * behind it is closed (a client reconnects from its last sequence number).
- * `close` releases everything a subscription holds.
+ * Replay pages are handed over one event-loop turn apart, so the transport
+ * drains between pages and the bound measures the backlog a peer has not
+ * taken — not the size of the replay itself. `close` releases everything a
+ * subscription holds.
  */
 import type { AttemptId, Event, EventStreamFrame, InvocationId, RunId } from "@agentique-console/core";
 import { EVENT_REPLAY_PAGE } from "@agentique-console/core";
@@ -136,6 +139,13 @@ export class EventStream {
     this.#unsubscribe();
   }
 
+  /** Ends every subscription (reason `stream`) while the stream stays open: each client reconnects from its last sequence. Returns how many were ended. */
+  disconnectAll(): number {
+    const entries = [...this.#entries.values()];
+    for (const entry of entries) this.end(entry, "stream");
+    return entries.length;
+  }
+
   private routeOf(attemptId: AttemptId) {
     const cached = this.#routes.get(attemptId);
     if (cached) return cached;
@@ -186,7 +196,8 @@ export class EventStream {
             entry.cursor = Math.max(entry.cursor, this.ctx.journal.lastSeq());
             break;
           }
-          await Promise.resolve();
+          // One event-loop turn between pages: the transport's writes complete and the peer reads before the next page is queued.
+          await new Promise<void>((resolve) => setImmediate(resolve));
         }
         if (!announcedCaughtUp && entry.open) {
           announcedCaughtUp = true;

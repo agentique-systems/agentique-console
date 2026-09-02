@@ -10,6 +10,7 @@ import path from "node:path";
 import type { ApiErrorBody, ApiRouteName } from "@agentique-console/core";
 import { apiPath } from "@agentique-console/core";
 import { createApp, type App } from "../app.ts";
+import type { SseOptions } from "./events.ts";
 import { bootApp, shutdownApp } from "../boot.ts";
 import { loadConfig, type Config } from "../config.ts";
 import { FakeClaudeSdk } from "../provider/claude-sdk-test-support.ts";
@@ -24,6 +25,8 @@ export interface TestAppOptions {
   boot?: boolean;
   /** Test barriers of the publication port. */
   publicationHooks?: PublicationHooks;
+  /** The event stream's outbound bounds. */
+  events?: SseOptions;
 }
 
 export interface TestApp {
@@ -65,7 +68,7 @@ export async function openTestApp(options: TestAppOptions = {}): Promise<TestApp
   const dir = options.dir ?? newAppDirectory();
   const config = loadConfig(testEnv(dir, options.env ?? {}), dir);
   const sdk = options.sdk ?? new FakeClaudeSdk();
-  const app = createApp({ config, sdk, ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }) });
+  const app = createApp({ config, sdk, ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }), ...(options.events === undefined ? {} : { events: options.events }) });
   if (options.boot !== false) await bootApp(app);
   await app.server.ready();
   const raw: TestApp["raw"] = async (method, url, body) => {

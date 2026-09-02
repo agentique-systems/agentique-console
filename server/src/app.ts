@@ -14,6 +14,7 @@ import { buildServer } from "./api/server.ts";
 import { composeConsoleRuntime, DEFAULT_PLANNING_CONFIG, type ConsoleRuntime } from "./composition/console-runtime.ts";
 import type { Config } from "./config.ts";
 import type { Logger } from "./context.ts";
+import { type SseOptions } from "./api/events.ts";
 import { EventStream } from "./events/stream.ts";
 import type { ExecutionDiagnostic } from "./execution/workspace-cleanup.ts";
 import type { RecoveryReport } from "./execution/recovery-service.ts";
@@ -33,6 +34,8 @@ export interface CreateAppOptions {
   log?: Logger;
   /** Test barriers of the publication port; production passes none. */
   publicationHooks?: PublicationHooks;
+  /** The event stream's outbound bounds (the buffer bound, the heartbeat); tests lower them to reach backpressure deterministically. */
+  events?: SseOptions;
 }
 
 export type AppDiagnostic = { at: Timestamp; source: "persistence"; diagnostic: PersistenceDiagnostic } | { at: Timestamp; source: "execution"; diagnostic: ExecutionDiagnostic } | { at: Timestamp; source: "host"; diagnostic: RunHostDiagnostic };
@@ -71,6 +74,8 @@ export interface App {
   runtime: ConsoleRuntime;
   host: RunHost;
   events: EventStream;
+  /** The bounds `GET /api/events` subscriptions run with. */
+  eventStreamOptions: SseOptions;
   admission: AdmissionGate;
   workspaces: WorkspaceService;
   launch: RunLaunchService;
@@ -148,6 +153,7 @@ export function createApp(options: CreateAppOptions): App {
     runtime,
     host,
     events,
+    eventStreamOptions: options.events ?? {},
     admission,
     workspaces,
     launch,

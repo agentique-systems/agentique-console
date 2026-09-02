@@ -27,7 +27,7 @@ function collector(options: { accept?: (frame: EventStreamFrame) => boolean } = 
   return { frames, subscriber, closed: () => closedReason, events: () => frames.filter((f): f is Extract<EventStreamFrame, { kind: "event" }> => f.kind === "event").map((f) => f.event.seq) };
 }
 
-const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
 
 describe("EventStream", () => {
   it("replays from a sequence in bounded pages, announces caught_up, then delivers live committed Events exactly once each", async () => {

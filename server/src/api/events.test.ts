@@ -8,10 +8,19 @@
  * subscription at once; opening and closing subscriptions never writes
  * anything; and a stopping console refuses new subscriptions.
  *
+ * Under transport pressure — a client that stops reading its socket while
+ * the replay is large — the subscriber is closed for backpressure once its
+ * outbound backlog crosses the bound, the response ends, the subscription
+ * is released, and the client resumes from the last frame it received with
+ * no lost committed Event, no duplicate, and no mutation caused by any
+ * connect, close, or reconnect.
+ *
  * Invariants 3 and 21 (committed-only, sequence-ordered projection).
  */
+import net from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Event, EventStreamFrame } from "@agentique-console/core";
+import type { SseEndReason } from "./events.ts";
 import { openTestApp, removeAppDirectory, type TestApp } from "./test-support.ts";
 
 interface Frame {
@@ -51,6 +60,33 @@ async function readFrames(response: Response, accept: (frames: Frame[]) => boole
 }
 
 const events = (frames: Frame[]) => frames.filter((f): f is Frame & { frame: { kind: "event"; event: Event } } => f.frame.kind === "event");
+
+/** Decodes a raw HTTP/1.1 chunked response as far as it is complete: the body bytes of every whole chunk, and whether the terminating chunk arrived. */
+function dechunk(raw: Buffer): { body: Buffer; terminated: boolean } {
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  if (headerEnd < 0) return { body: Buffer.alloc(0), terminated: false };
+  const parts: Buffer[] = [];
+  let at = headerEnd + 4;
+  for (;;) {
+    const lineEnd = raw.indexOf("\r\n", at);
+    if (lineEnd < 0) break;
+    const size = Number.parseInt(raw.subarray(at, lineEnd).toString("ascii"), 16);
+    if (!Number.isFinite(size)) break;
+    if (size === 0) return { body: Buffer.concat(parts), terminated: true };
+    const start = lineEnd + 2;
+    if (raw.length < start + size + 2) break;
+    parts.push(raw.subarray(start, start + size));
+    at = start + size + 2;
+  }
+  return { body: Buffer.concat(parts), terminated: false };
+}
+
+/** The ids of the complete SSE event blocks in a body (a trailing partial block is not a frame a client received). */
+function completeIds(body: Buffer): number[] {
+  const text = body.toString("utf8");
+  const complete = text.slice(0, text.lastIndexOf("\n\n") + 2);
+  return complete.split("\n\n").flatMap((block) => [...block.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1])));
+}
 
 describe("GET /api/events", () => {
   let t: TestApp;
@@ -146,6 +182,85 @@ describe("GET /api/events", () => {
     again.controller.abort();
     expect(t.app.events.lastSeq()).toBe(seqBefore);
   });
+
+  it("closes a subscriber whose socket stops draining during the replay, releases it, and lets the client resume from the last frame it received without loss, duplication, or mutation", async () => {
+    const ends: SseEndReason[] = [];
+    const pressured = await openTestApp({ events: { maxBufferedBytes: 262_144, onEnd: (reason) => ends.push(reason) } });
+    try {
+      const listening = await pressured.app.server.listen({ port: 0, host: "127.0.0.1" });
+      const port = Number(new URL(listening).port);
+      // A journal larger than every socket buffer between the server and a client that stops reading: the replay must back up in the server.
+      const workspace = await pressured.call<{ workspace: { id: string } }>("createWorkspace", { body: { rootPath: `${pressured.dir}\\pressure`, create: true } });
+      const conversation = await pressured.call<{ conversation: { id: string } }>("createConversation", { body: { workspaceId: workspace.body.workspace.id, title: "pressure" } });
+      const filler = "x".repeat(1_000);
+      for (let i = 0; i < 1_200; i += 1) await pressured.call("postConversationMessage", { params: { conversationId: conversation.body.conversation.id }, body: { content: `${i} ${filler}` } });
+      const lastSeq = pressured.app.events.lastSeq();
+      expect(lastSeq).toBeGreaterThan(1_200);
+      // The raw client reads the first bytes, then stops reading entirely.
+      const socket = net.connect(port, "127.0.0.1");
+      const received: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        socket.once("error", reject);
+        socket.once("connect", () => {
+          socket.write("GET /api/events?afterSeq=0 HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n");
+          socket.once("data", (chunk: Buffer) => {
+            received.push(chunk);
+            socket.pause();
+            resolve();
+          });
+        });
+      });
+      // The server's backlog crosses the bound: the subscription is closed for backpressure and released while the client still holds its socket.
+      const deadline = Date.now() + 30_000;
+      while (pressured.app.events.subscriptions !== 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+      expect(pressured.app.events.subscriptions).toBe(0);
+      expect(ends).toEqual(["backpressure"]);
+      // The client drains what the server had written before ending the response: a contiguous prefix of the replay, then the end of the
+      // response (the terminating chunk) and the socket closing behind it.
+      const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+      socket.on("data", (chunk: Buffer) => {
+        received.push(chunk);
+      });
+      socket.resume();
+      await Promise.race([closed, new Promise<void>((_, reject) => setTimeout(() => reject(new Error("the response did not end")), 30_000))]);
+      const { body, terminated } = dechunk(Buffer.concat(received));
+      expect(terminated).toBe(true);
+      const ids = completeIds(body);
+      expect(ids.length).toBeGreaterThan(0);
+      expect(ids.length).toBeLessThan(lastSeq);
+      expect(ids).toEqual(ids.map((_, i) => ids[0]! + i));
+      // The client resumes from the last frame it received, as the web application does, until it is caught up: every connection
+      // continues exactly after the previous one's last id (a connection the bound cuts again is resumed the same way), and the
+      // union is the whole remaining journal, contiguous, without a duplicate.
+      let last = ids.at(-1)!;
+      const resumed: number[] = [];
+      let caughtUp: EventStreamFrame | null = null;
+      for (let connection = 0; connection < 50 && caughtUp === null; connection += 1) {
+        const controller = new AbortController();
+        const response = await fetch(`${listening}/api/events`, { headers: { "last-event-id": String(last) }, signal: controller.signal });
+        const frames = await readFrames(response, (f) => f.some((x) => x.frame.kind === "caught_up"), 30_000);
+        const seqs = events(frames).map((e) => e.frame.event.seq);
+        expect(seqs[0]).toBe(last + 1);
+        resumed.push(...seqs);
+        last = seqs.at(-1) ?? last;
+        caughtUp = frames.find((f) => f.frame.kind === "caught_up")?.frame ?? null;
+        controller.abort();
+      }
+      expect(caughtUp).toEqual({ kind: "caught_up", seq: lastSeq });
+      expect(resumed[0]).toBe(ids.at(-1)! + 1);
+      expect(resumed.at(-1)).toBe(lastSeq);
+      expect(resumed).toEqual(resumed.map((_, i) => ids.at(-1)! + 1 + i));
+      // Nothing about connecting, backing up, closing, or resuming wrote anything; every subscription was released.
+      expect(pressured.app.events.lastSeq()).toBe(lastSeq);
+      while (pressured.app.events.subscriptions !== 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+      expect(pressured.app.events.subscriptions).toBe(0);
+      expect(ends[0]).toBe("backpressure");
+      expect(ends.every((reason) => reason === "backpressure" || reason === "client")).toBe(true);
+    } finally {
+      await pressured.close();
+      removeAppDirectory(pressured.dir);
+    }
+  }, 120_000);
 
   it("rejects a malformed query and refuses a new subscription while the console is stopping", async () => {
     const bad = await fetch(`${url}/api/events?afterSeq=-1`);
