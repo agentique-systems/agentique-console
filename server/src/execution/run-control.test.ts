@@ -17,6 +17,8 @@ import { activeCapacity, attemptsOf, chain, delayed, eventsAfter, executing, inv
 import { awaitSignoff } from "./signoff-test-support.ts";
 import { COMPLETED_RESULT, openRuntimeHarness, planNodes, seedPlanningRuntime, seedRuntime, startRun } from "./test-support.ts";
 
+// Operator control is durable intent with one admission rule (invariant 29): cancel, pause, and resume are rows the
+// scheduler reads; nothing else decides admission.
 describe("Run cancellation", () => {
   it("cancels a Run from every nonterminal status — paused ones included — once, releasing its capacity and its Conversation slot, and refuses ended Runs with run_terminal", () => {
     const h = openRuntimeHarness();

@@ -36,6 +36,7 @@ function successorAfter(h: RuntimeHarness, s: ReturnType<typeof seedRuntime>, bl
   });
 }
 
+// Side-effect approval is exact-digest and at-most-once (invariant 24).
 describe("side-effect approval", () => {
   it("atomically records the failed Attempt, the call Artifact, the open Decision, the blocked Invocation, blocked Tasks, and the released reservation", async () => {
     const h = openRuntimeHarness();

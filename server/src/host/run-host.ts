@@ -225,7 +225,8 @@ export class RunHost {
   private async pass(runId: RunId, state: RunState): Promise<void> {
     let outcome: SchedulerOutcome;
     try {
-      outcome = await this.deps.scheduler.advanceRun(runId, this.maxActionsPerPass === undefined ? {} : { maxActions: this.maxActionsPerPass });
+      // A stopping host ends the pass before the next action: nothing new is admitted once the shutdown began.
+      outcome = await this.deps.scheduler.advanceRun(runId, { stopRequested: () => this.#stopped, ...(this.maxActionsPerPass === undefined ? {} : { maxActions: this.maxActionsPerPass }) });
     } catch (error) {
       this.failed(runId, state, error instanceof Error ? error.message : String(error));
       return;

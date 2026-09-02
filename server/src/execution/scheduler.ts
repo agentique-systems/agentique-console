@@ -550,21 +550,23 @@ export class RunScheduler {
 
   /**
    * Performs the Run's canonical actions until it is quiescent, waiting,
-   * terminal, at `maxActions`, or stopped
-   * by an infrastructure failure. A concurrent call for the same Run joins
-   * the pass in progress and receives its outcome.
+   * terminal, at `maxActions`, asked to stop by the caller (`stopRequested`,
+   * consulted before each action: a stopping host admits nothing new and the
+   * pass ends as `action_limit` with the Run's work intact), or stopped by an
+   * infrastructure failure. A concurrent call for the same Run joins the
+   * pass in progress and receives its outcome.
    */
-  advanceRun(runId: RunId, options: { maxActions?: number; correlationId?: string | null } = {}): Promise<SchedulerOutcome> {
+  advanceRun(runId: RunId, options: { maxActions?: number; correlationId?: string | null; stopRequested?: () => boolean } = {}): Promise<SchedulerOutcome> {
     const existing = this.#passes.get(runId);
     if (existing) return existing;
-    const pass = this.#pass(runId, options.maxActions ?? this.config.maxActions, { correlationId: options.correlationId ?? null }).finally(() => {
+    const pass = this.#pass(runId, options.maxActions ?? this.config.maxActions, { correlationId: options.correlationId ?? null }, options.stopRequested ?? (() => false)).finally(() => {
       this.#passes.delete(runId);
     });
     this.#passes.set(runId, pass);
     return pass;
   }
 
-  async #pass(runId: RunId, maxActions: number, meta: WriteOptions): Promise<SchedulerOutcome> {
+  async #pass(runId: RunId, maxActions: number, meta: WriteOptions, stopRequested: () => boolean): Promise<SchedulerOutcome> {
     const actions: PerformedAction[] = [];
     const executed: AttemptId[] = [];
     const batch = new Map<AttemptId, Promise<ExecutionOutcome>>();
@@ -618,7 +620,7 @@ export class RunScheduler {
         }
         return finish(projection.stop);
       }
-      if (actions.length >= maxActions) return finish("action_limit");
+      if (actions.length >= maxActions || stopRequested()) return finish("action_limit");
       try {
         const outcome = await this.#perform(runId, projection, action, batch, executed, meta);
         actions.push({ action, outcome });

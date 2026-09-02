@@ -45,7 +45,7 @@ export type FakeSdkStep =
    * directory: a test stands in for the tool's own side effect (a `Write` creating a file in the worktree) without the fake
    * inventing tool semantics of its own.
    */
-  | { kind: "tool_use"; name: string; input: Record<string, unknown>; id?: string; result?: string; error?: string; usage?: Partial<FakeCallUsage>; messageId?: string; effect?: (context: { cwd: string }) => void | Promise<void> }
+  | { kind: "tool_use"; name: string; input: Record<string, unknown>; id?: string; result?: string; error?: string; usage?: Partial<FakeCallUsage>; messageId?: string; effect?: (context: { cwd: string }) => void | Promise<void>; /** Derives the input from the in-process MCP calls made so far (their result text included), replacing `input`. */ inputFrom?: (calls: FakeSdkCapture["mcpCalls"]) => Record<string, unknown> }
   | { kind: "api_retry"; attempt?: number; maxRetries?: number; status?: number | null; error?: SDKAssistantMessageError }
   /** An assistant message that carries an error and no content. */
   | { kind: "assistant_error"; error: SDKAssistantMessageError }
@@ -223,11 +223,13 @@ export class FakeClaudeSdk implements ClaudeSdk {
               totals.cacheRead += usage.cacheRead;
               totals.output += usage.output;
             }
-            const toolUseId = step.kind === "tool_use" ? (step.id ?? `toolu_${(this.#counter += 1)}`) : null;
-            const content = step.kind === "text" ? [{ type: "text", text: step.text }] : [{ type: "tool_use", id: toolUseId, name: step.name, input: step.input }];
+            // A step may derive its input from the calls before it (an id a runtime tool returned), as a model would.
+            const resolved = step.kind === "tool_use" && step.inputFrom !== undefined ? { ...step, input: step.inputFrom(this.captured.mcpCalls) } : step;
+            const toolUseId = resolved.kind === "tool_use" ? (resolved.id ?? `toolu_${(this.#counter += 1)}`) : null;
+            const content = resolved.kind === "text" ? [{ type: "text", text: resolved.text }] : [{ type: "tool_use", id: toolUseId, name: resolved.name, input: resolved.input }];
             yield this.assistant(messageId, model, content, usage, sessionId, uuid());
-            if (step.kind === "tool_use") {
-              const handled = await this.#toolPath(step, toolUseId!, options, available, mcp, sessionId, signal);
+            if (resolved.kind === "tool_use") {
+              const handled = await this.#toolPath(resolved, toolUseId!, options, available, mcp, sessionId, signal);
               for (const message of handled.messages) yield { ...message, uuid: uuid() as never, session_id: sessionId } as SDKMessage;
               if (handled.denial !== null) denials.push(handled.denial);
               stopped = handled.stop;
