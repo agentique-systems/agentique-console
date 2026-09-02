@@ -116,7 +116,7 @@ export interface ScriptedProviderOptions {
 
 function causeOf(signal: AbortSignal): InterruptionCause {
   const reason = signal.reason as unknown;
-  return reason === "cancelled" || reason === "operator_pause" || reason === "deadline" ? reason : "provider";
+  return reason === "cancelled" || reason === "operator_pause" || reason === "deadline" || reason === "shutdown" ? reason : "provider";
 }
 
 export class ScriptedProvider implements ProviderAdapter {

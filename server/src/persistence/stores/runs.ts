@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, notInArray } from "drizzle-orm";
 import {
   ConflictError,
   InvariantViolationError,
@@ -18,6 +18,7 @@ import {
   type RunTransition,
   type ChangesetId,
   type SnapshotId,
+  type WorkspaceId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { agentDefinitionRevisions, agentDefinitions, changesets, runs, snapshots } from "../schema.ts";
@@ -146,6 +147,15 @@ export class RunStore {
 
   listByConversation(conversationId: ConversationId): Run[] {
     return this.ctx.db.select().from(runs).where(eq(runs.conversationId, conversationId)).orderBy(asc(runs.createdAt)).all().map(toDomain);
+  }
+
+  listByWorkspace(workspaceId: WorkspaceId): Run[] {
+    return this.ctx.db.select().from(runs).where(eq(runs.workspaceId, workspaceId)).orderBy(asc(runs.createdAt)).all().map(toDomain);
+  }
+
+  /** Every Run that has not ended: what a restarted host reconstructs its work from. */
+  listNonterminal(): Run[] {
+    return this.ctx.db.select().from(runs).where(notInArray(runs.status, ["completed", "failed", "cancelled"])).orderBy(asc(runs.createdAt)).all().map(toDomain);
   }
 
   /**

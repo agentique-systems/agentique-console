@@ -67,12 +67,14 @@ export function classifyAttempt(input: ClassificationInput): ClassifiedAttempt {
     return { status: "timed_out", failureClass: "interrupted", detail: detail("wall-clock limit reached"), result: null };
   }
   const exhausted = !allocationFits(input.consumed, { ...input.allocation, attempts: Number.MAX_SAFE_INTEGER });
-  if (input.runtimeInterruption === "operator_pause") {
-    // A hard operator pause (execution-model §14): the Attempt is consumed and its Usage recorded; whatever the provider then reported —
-    // a late result included — is not a result. The classification is the ordinary `interrupted` one, so the retry policy permits the
-    // resumed Run to retry from the durable rows; an allocation the Attempt exhausted keeps its consequence.
-    if (exhausted) return { status: "failed", failureClass: "allocation_exhausted", detail: detail("interrupted by an operator pause (allocation exhausted)"), result: null };
-    return { status: "interrupted", failureClass: "interrupted", detail: detail("interrupted by an operator pause"), result: null };
+  if (input.runtimeInterruption === "operator_pause" || input.runtimeInterruption === "shutdown") {
+    // A hard operator pause or an orderly process shutdown (execution-model §14): the Attempt is consumed and its Usage recorded;
+    // whatever the provider then reported — a late result included — is not a result. The classification is the ordinary `interrupted`
+    // one, so the retry policy permits the resumed Run (or the next process) to retry from the durable rows; an allocation the Attempt
+    // exhausted keeps its consequence. A shutdown is not a pause: the Run row is untouched and the next process's scheduler retries.
+    const cause = input.runtimeInterruption === "shutdown" ? "a runtime shutdown" : "an operator pause";
+    if (exhausted) return { status: "failed", failureClass: "allocation_exhausted", detail: detail(`interrupted by ${cause} (allocation exhausted)`), result: null };
+    return { status: "interrupted", failureClass: "interrupted", detail: detail(`interrupted by ${cause}`), result: null };
   }
   switch (completion.kind) {
     case "completed":

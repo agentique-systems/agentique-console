@@ -1,0 +1,42 @@
+import { useQuery } from "@tanstack/react-query";
+import { apiPath } from "@agentique-console/core";
+import { api, apiText } from "./client";
+import { keys } from "./keys";
+
+export const useHealth = () => useQuery({ queryKey: keys.health, queryFn: () => api("health"), refetchInterval: false });
+export const useConfig = () => useQuery({ queryKey: keys.config, queryFn: () => api("config"), staleTime: Infinity });
+export const useCapacity = () => useQuery({ queryKey: keys.capacity, queryFn: () => api("capacity") });
+export const useWorkspaces = () => useQuery({ queryKey: keys.workspaces, queryFn: () => api("listWorkspaces", { query: { limit: 200 } }) });
+export const useWorkspace = (workspaceId: string) => useQuery({ queryKey: keys.workspace(workspaceId), queryFn: () => api("getWorkspace", { params: { workspaceId } }) });
+export const useWorkspaceConversations = (workspaceId: string) => useQuery({ queryKey: keys.workspaceConversations(workspaceId), queryFn: () => api("listWorkspaceConversations", { params: { workspaceId }, query: { limit: 200 } }) });
+export const useWorkspaceRuns = (workspaceId: string) => useQuery({ queryKey: keys.workspaceRuns(workspaceId), queryFn: () => api("listWorkspaceRuns", { params: { workspaceId }, query: { limit: 200 } }) });
+export const useWorkspaceAgents = (workspaceId: string) => useQuery({ queryKey: keys.workspaceAgents(workspaceId), queryFn: () => api("listWorkspaceAgentDefinitions", { params: { workspaceId } }) });
+export const useAgentDefinition = (agentDefinitionId: string) => useQuery({ queryKey: keys.agentDefinition(agentDefinitionId), queryFn: () => api("getAgentDefinition", { params: { agentDefinitionId } }) });
+export const useConversation = (conversationId: string) => useQuery({ queryKey: keys.conversation(conversationId), queryFn: () => api("getConversation", { params: { conversationId } }) });
+export const useConversationMessages = (conversationId: string) => useQuery({ queryKey: keys.conversationMessages(conversationId), queryFn: () => api("listConversationMessages", { params: { conversationId }, query: { limit: 200 } }) });
+export const useConversationRequirements = (conversationId: string) => useQuery({ queryKey: keys.conversationRequirements(conversationId), queryFn: () => api("listConversationRequirements", { params: { conversationId } }) });
+export const useConversationRuns = (conversationId: string) => useQuery({ queryKey: keys.conversationRuns(conversationId), queryFn: () => api("listConversationRuns", { params: { conversationId }, query: { limit: 200 } }) });
+export const useRun = (runId: string) => useQuery({ queryKey: keys.run(runId), queryFn: () => api("getRun", { params: { runId } }) });
+export const useRunPlan = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "plan"), queryFn: () => api("getRunPlan", { params: { runId } }) });
+export const useRunTasks = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "tasks"), queryFn: () => api("listRunTasks", { params: { runId } }) });
+export const useRunDecisions = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "decisions"), queryFn: () => api("listRunDecisions", { params: { runId }, query: { limit: 200 } }) });
+export const useRunProposals = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "proposals"), queryFn: () => api("listRunRequirementProposals", { params: { runId }, query: { limit: 200 } }) });
+export const useRunBudget = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "budget"), queryFn: () => api("getRunBudget", { params: { runId } }) });
+export const useRunUsage = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "usage"), queryFn: () => api("getRunUsage", { params: { runId } }) });
+export const useRunGates = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "gates"), queryFn: () => api("listRunGates", { params: { runId }, query: { limit: 200 } }) });
+export const useRunEvaluations = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "evaluations"), queryFn: () => api("listRunEvaluations", { params: { runId }, query: { limit: 200 } }) });
+export const useRunChangesets = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "changesets"), queryFn: () => api("listRunChangesets", { params: { runId }, query: { limit: 200 } }) });
+export const useRunArtifacts = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "artifacts"), queryFn: () => api("listRunArtifacts", { params: { runId }, query: { limit: 200 } }) });
+export const useRunInvocations = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "invocations"), queryFn: () => api("listRunInvocations", { params: { runId }, query: { limit: 200 } }) });
+export const useRunSignoff = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "signoff"), queryFn: () => api("getRunSignoff", { params: { runId } }) });
+export const useRunPublications = (runId: string) => useQuery({ queryKey: keys.runPart(runId, "publications"), queryFn: () => api("getRunPublications", { params: { runId } }) });
+export const usePlanNode = (planNodeId: string) => useQuery({ queryKey: keys.planNode(planNodeId), queryFn: () => api("getPlanNode", { params: { planNodeId } }) });
+export const useInvocation = (invocationId: string | null) => useQuery({ queryKey: keys.invocation(invocationId ?? ""), queryFn: () => api("getInvocation", { params: { invocationId: invocationId! } }), enabled: invocationId !== null });
+export const useAttempt = (attemptId: string | null) => useQuery({ queryKey: keys.attempt(attemptId ?? ""), queryFn: () => api("getAttempt", { params: { attemptId: attemptId! } }), enabled: attemptId !== null });
+export const useArtifact = (artifactId: string | null) => useQuery({ queryKey: keys.artifact(artifactId ?? ""), queryFn: () => api("getArtifact", { params: { artifactId: artifactId! } }), enabled: artifactId !== null });
+export const useArtifactText = (artifactId: string | null, maxBytes = 262_144) =>
+  useQuery({ queryKey: keys.artifactText(artifactId ?? ""), queryFn: () => apiText(apiPath("getArtifactContent", { artifactId: artifactId! }), { maxBytes }), enabled: artifactId !== null });
+export const useTranscript = (attemptId: string | null, maxBytes = 262_144) =>
+  useQuery({ queryKey: keys.transcript(attemptId ?? ""), queryFn: () => apiText(apiPath("getAttemptTranscript", { attemptId: attemptId! }), { maxBytes }), enabled: attemptId !== null });
+export const useFsRoots = () => useQuery({ queryKey: keys.fsRoots, queryFn: () => api("fsRoots"), staleTime: Infinity });
+export const useFsDirs = (path: string | null, showHidden: boolean) => useQuery({ queryKey: keys.fsDirs(path ?? "", showHidden), queryFn: () => api("fsDirs", { query: { path: path!, showHidden: showHidden ? "1" : "0" } }), enabled: path !== null });

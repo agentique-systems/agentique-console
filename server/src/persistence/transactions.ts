@@ -27,6 +27,9 @@ export interface TransactorOptions {
   onCommitHookFailure?: (failure: CommitHookFailure) => void;
 }
 
+/** Notified once after every successful root COMMIT (never after a rollback): what a live projection reads the journal on. */
+export type CommitListener = () => void;
+
 /**
  * Explicit, re-entrant, synchronous write transactions over one SQLite
  * connection.
@@ -70,6 +73,7 @@ export class Transactor {
   #rollbackOnly: { cause: unknown } | null = null;
   #hooks: RollbackHook[] = [];
   #commitHooks: CommitHook[] = [];
+  readonly #commitListeners = new Set<CommitListener>();
   readonly #onHookFailure: (failure: RollbackHookFailure) => void;
   readonly #onCommitHookFailure: (failure: CommitHookFailure) => void;
 
@@ -83,6 +87,18 @@ export class Transactor {
 
   get inTransaction(): boolean {
     return this.#depth > 0;
+  }
+
+  /**
+   * Registers a listener called once after every successful root COMMIT, after the transactor left the transaction and
+   * after the commit hooks ran; a listener that throws is reported like a failing commit hook. Returns the unsubscribe.
+   * Nothing is delivered for a rollback or a failed COMMIT, so a listener only ever observes committed state.
+   */
+  onCommit(listener: CommitListener): () => void {
+    this.#commitListeners.add(listener);
+    return () => {
+      this.#commitListeners.delete(listener);
+    };
   }
 
   /** True once a nested failure has doomed the current root transaction. */
@@ -158,6 +174,7 @@ export class Transactor {
       const committed = this.#commitHooks;
       this.#reset();
       this.#runCommitHooks(committed);
+      this.#notifyCommit();
       return result as T;
     }
     try {
@@ -191,6 +208,22 @@ export class Transactor {
         }
       }
     });
+  }
+
+  #notifyCommit(): void {
+    let index = 0;
+    for (const listener of [...this.#commitListeners]) {
+      try {
+        listener();
+      } catch (error) {
+        try {
+          this.#onCommitHookFailure({ index, message: error instanceof Error ? error.message : String(error) });
+        } catch {
+          // The diagnostic sink is best effort.
+        }
+      }
+      index += 1;
+    }
   }
 
   #runRollbackHooks(hooks: RollbackHook[], cause: unknown): void {

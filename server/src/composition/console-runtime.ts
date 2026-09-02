@@ -40,7 +40,7 @@ import type { TransientOutputSink } from "../provider/adapter.ts";
 import { ClaudeAgentSdkAdapter, CLAUDE_PROVIDER, type ClaudeAdapterConfig } from "../provider/claude-adapter.ts";
 import { ContinuationService } from "../provider/continuation.ts";
 import { FileContinuationPayloadStore } from "../provider/continuation-store.ts";
-import { createWorkspacePorts, type WorkspacePorts } from "../workspace-state/index.ts";
+import { createWorkspacePorts, type PublicationHooks, type WorkspacePorts } from "../workspace-state/index.ts";
 import type { WorkspaceStateLayout } from "../workspace-state/paths.ts";
 
 export interface ConsoleRuntimeConfig {
@@ -72,6 +72,8 @@ export interface ConsoleRuntimeConfig {
   diagnostics?: ExecutionDiagnosticSink;
   /** Transient provider output; dropped when omitted. */
   output?: TransientOutputSink;
+  /** Test barriers of the publication port (a death or a race between its external steps); production passes none. */
+  publicationHooks?: PublicationHooks;
 }
 
 export const DEFAULT_CONSOLE_GOVERNOR: Readonly<GovernorConfig> = Object.freeze({ providers: { [CLAUDE_PROVIDER]: { maxConcurrency: 4 } }, maxProcessConcurrency: 6, maxWorktrees: null });
@@ -129,7 +131,7 @@ export function composeConsoleRuntime(config: ConsoleRuntimeConfig): ConsoleRunt
     const output: TransientOutputSink = config.output ?? (() => {});
     const provider = new ClaudeAgentSdkAdapter(config.provider);
     const layout: WorkspaceStateLayout = { stateRoot: config.stateRoot };
-    const workspace = createWorkspacePorts(layout);
+    const workspace = createWorkspacePorts(layout, config.publicationHooks === undefined ? {} : { publicationHooks: config.publicationHooks });
     const builtins = ensureBuiltinDefinitions(stores, config.agents);
     const loader = new WorkspaceAgentDefinitionLoader(ctx, stores, layout, config.agents);
     const payloads = new FileContinuationPayloadStore(config.continuations.root, sha256Hex);

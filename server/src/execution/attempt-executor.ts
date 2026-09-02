@@ -644,6 +644,20 @@ export class AttemptExecutor {
     return this.inFlightOf(runId).filter((attemptId) => this.interrupt(attemptId, cause));
   }
 
+  /**
+   * An orderly process shutdown (execution-model §14 "Server restart"): every Attempt executing in this process is interrupted with
+   * `shutdown` — classified `interrupted` with a permitted retry, its Usage recorded once, its Invocation left retry-eligible — and
+   * no Run is cancelled or paused by it; the next process's recovery and scheduler continue from the rows. Delivery only.
+   */
+  interruptAll(): AttemptId[] {
+    return this.inFlight().filter((attemptId) => this.interrupt(attemptId, "shutdown"));
+  }
+
+  /** Resolves once every Attempt executing in this process has finalized (or at once when none is). */
+  async settled(): Promise<void> {
+    await Promise.allSettled([...this.#inFlight.values()].map((flight) => flight.executing ?? Promise.resolve()));
+  }
+
   /** Interrupts every in-flight Attempt whose deadline has passed at `now`; driven by the caller's clock, never by a timer. */
   enforceDeadlines(now: Timestamp = this.ctx.clock()): AttemptId[] {
     const expired: AttemptId[] = [];

@@ -18,7 +18,7 @@ import { WorkspaceFinalization } from "./finalization.ts";
 import { WorkspaceIntegration } from "./integration.ts";
 import type { WorkspaceStateLayout } from "./paths.ts";
 import { WorkspaceRunPreparation } from "./preparation.ts";
-import { WorkspacePublication } from "./publish.ts";
+import { WorkspacePublication, type PublicationHooks } from "./publish.ts";
 
 export { WORKSPACE_CAPABILITIES, supportsStrategy, type WorkspaceKindCapabilities } from "./capabilities.ts";
 export { WorkspaceChecks, checkEnvironment } from "./checks.ts";
@@ -28,7 +28,7 @@ export { GitError, gitEnvironment } from "./git.ts";
 export { WorkspaceIntegration } from "./integration.ts";
 export { WorkspaceStateError, integrationDir, runDir, workspaceDir, type WorkspaceStateLayout } from "./paths.ts";
 export { WorkspaceRunPreparation } from "./preparation.ts";
-export { WorkspacePublication, selectStrategy } from "./publish.ts";
+export { WorkspacePublication, selectStrategy, type PublicationHooks } from "./publish.ts";
 export { identitiesEqual } from "./snapshots.ts";
 
 export interface WorkspacePorts {
@@ -40,14 +40,14 @@ export interface WorkspacePorts {
   publication: PublicationWorkspacePort;
 }
 
-/** The six ports over one state root. */
-export function createWorkspacePorts(layout: WorkspaceStateLayout): WorkspacePorts {
+/** The six ports over one state root; `publicationHooks` are the test barriers of the publication port (production passes none). */
+export function createWorkspacePorts(layout: WorkspaceStateLayout, options: { publicationHooks?: PublicationHooks } = {}): WorkspacePorts {
   return {
     preparation: new WorkspaceRunPreparation(layout),
     execution: new WorkspaceExecution(layout),
     integration: new WorkspaceIntegration(layout),
     checks: new WorkspaceChecks(layout),
     finalization: new WorkspaceFinalization(layout),
-    publication: new WorkspacePublication(layout),
+    publication: new WorkspacePublication(layout, options.publicationHooks ?? {}),
   };
 }

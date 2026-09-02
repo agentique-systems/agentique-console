@@ -18,11 +18,14 @@ import {
   RUN_MACHINE,
   runIsRunningOrDraining,
   runtimeToolHandlerBound,
+  type AcceptanceCriterion,
+  type ConversationId,
   type ProposedRequirement,
   type ProposeRequirementsInput,
   type RequirementId,
   type RequirementProposal,
   type RequirementProposalId,
+  type RequirementRevision,
   type RequirementRevisionId,
   type RequirementTreeEntry,
   type Run,
@@ -153,6 +156,40 @@ export class RequirementProposalService {
       this.stores.requirementProposals.reject(proposal.id, { rationale }, meta);
       this.stores.orchestratorInputs.enqueue(run.id, { kind: "requirement_proposal_resolution", proposalId: proposal.id, status: "rejected", requirementRevisionId: null, edited: false, rationale }, { ...meta, causationSeq: this.ctx.journal.lastSeq() });
       return { kind: "rejected", proposalId: proposal.id, replayed: false };
+    });
+  }
+
+  /**
+   * The operator authors a Requirement revision directly (execution-model §8.1): the same tree contract as an approved
+   * proposal — kept Requirements name their id and keep it, new ones are minted, removed ones are retired by the revision
+   * store, and the proposed Acceptance Criteria are authored in the new revision — in one transaction, with no Decision
+   * (an operator-authored revision needs no approval) and no queued Orchestrator input (the operator steers by message).
+   */
+  author(input: { conversationId: ConversationId; entries: ProposedRequirement[]; rationale: string | null }, options: WriteOptions = {}): { revision: RequirementRevision; criteria: AcceptanceCriterion[] } {
+    if (options.actor !== undefined && options.actor.kind !== "operator") throw new RequirementProposalRefusedError("operator_required", `a Requirement revision is authored by the operator, not ${options.actor.kind}`, { conversationId: input.conversationId });
+    const parsed = proposedRequirementTreeSchema.safeParse(input.entries);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new RequirementProposalRefusedError("proposal_invalid", issue?.message ?? "the tree is invalid", { conversationId: input.conversationId, path: issue?.path.map(String).join(".") ?? null });
+    }
+    const entries = parsed.data;
+    return this.ctx.tx.write(() => {
+      const conversation = this.stores.conversations.get(input.conversationId);
+      const live = new Set(this.stores.requirements.listByConversation(conversation.id).filter((r) => r.status !== "retired").map((r) => r.id));
+      for (const [i, entry] of entries.entries()) {
+        if (entry.requirementId !== null && !live.has(entry.requirementId)) throw new RequirementProposalRefusedError("proposal_invalid", `Requirement ${entry.requirementId} is not a live Requirement of this Conversation`, { conversationId: conversation.id, path: `entries.${i}.requirementId` });
+      }
+      const meta: WriteOptions = { actor: OPERATOR_ACTOR, correlationId: options.correlationId ?? conversation.id, causationSeq: options.causationSeq ?? null };
+      const chained = (): WriteOptions => ({ ...meta, causationSeq: this.ctx.journal.lastSeq() });
+      const tree = this.treeOf(entries);
+      const revision = this.stores.requirements.createRevision({ conversationId: conversation.id, tree: tree.map((t) => t.entry), approvedByDecisionId: null }, meta);
+      const criteria: AcceptanceCriterion[] = [];
+      for (const { proposed, entry } of tree) {
+        for (const check of proposed.acceptanceCriteria) {
+          criteria.push(this.stores.requirements.createAcceptanceCriterion({ conversationId: conversation.id, requirementId: entry.id, requirementRevisionId: revision.id, taskId: null, check }, chained()));
+        }
+      }
+      return { revision, criteria };
     });
   }
 

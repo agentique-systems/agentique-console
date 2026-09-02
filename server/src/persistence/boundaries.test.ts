@@ -1,8 +1,11 @@
 /**
- * Import-boundary and terminology enforcement for the new source
- * (`core/`, `server/src/persistence/`, `server/src/execution/`,
- * `server/src/provider/`), and the independence of the legacy application
- * from it.
+ * Import-boundary and terminology enforcement over the whole source
+ * (migration-contract rules 7 and 10): the permanent boundaries (`core/`,
+ * `server/src/persistence/`, `server/src/execution/`, `server/src/provider/`,
+ * `server/src/workspace-state/`, `server/src/agents/`), the composition, and
+ * the application layer (the API, the event stream, the host, the operator
+ * services, the entrypoints, and the web application) — and, until the last
+ * legacy package is deleted, the independence of what remains of it.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -10,8 +13,15 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents", "server/src/composition"];
-const LEGACY_SOURCE_DIRS = ["shared/src", "server/src", "web/src", "server/scripts", "server/evals"];
+const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents", "server/src/composition", "server/src/api", "server/src/events", "server/src/host", "server/src/operator", "server/src/workspaces"];
+/** The entrypoints: final files at the server root. */
+const NEW_SOURCE_FILES = ["server/src/app.ts", "server/src/boot.ts", "server/src/main.ts", "server/src/config.ts", "server/src/context.ts"];
+/** The application layer above the runtime boundaries. */
+const APPLICATION_DIRS = ["server/src/api", "server/src/events", "server/src/host", "server/src/operator", "server/src/workspaces"];
+/** The web application: new source under the terminology rule; its own import rule is below. */
+const WEB_SOURCE_DIRS = ["web/src", "web/tests"];
+/** Nothing of the legacy application remains; the list stays so the independence test keeps its shape. */
+const LEGACY_SOURCE_DIRS: string[] = [];
 
 function listFiles(dir: string, filter: (file: string) => boolean): string[] {
   const absolute = path.join(repoRoot, dir);
@@ -51,13 +61,12 @@ function resolvesInto(file: string, specifier: string, dir: string): boolean {
   return rel(target).startsWith(`${dir}/`) || rel(target) === dir;
 }
 
-const newFiles = NEW_SOURCE_DIRS.flatMap((dir) => listFiles(dir, isCode));
+const newFiles = [...NEW_SOURCE_DIRS.flatMap((dir) => listFiles(dir, isCode)), ...NEW_SOURCE_FILES.map((f) => path.join(repoRoot, f)).filter((f) => fs.existsSync(f))];
 const legacyFiles = LEGACY_SOURCE_DIRS.flatMap((dir) => listFiles(dir, isCode)).filter((file) => !NEW_SOURCE_DIRS.some((dir) => rel(file).startsWith(`${dir}/`)));
 
 describe("import boundaries", () => {
   it("scans the new source", () => {
     expect(newFiles.length).toBeGreaterThan(20);
-    expect(legacyFiles.length).toBeGreaterThan(50);
   });
 
   it("core imports no other workspace package, no Node built-in, and nothing outside core", () => {
@@ -74,32 +83,10 @@ describe("import boundaries", () => {
     }
   });
 
-  it("persistence, execution, and provider import neither the legacy shared package, server/src/db, nor legacy runtime modules", () => {
+  it("persistence, execution, and provider import neither the legacy shared package, the application layer, nor the composition", () => {
     const forbiddenPackages = /^@agentique-console\/shared/;
-    const forbiddenLegacyDirs = [
-      "server/src/db",
-      "server/src/agent-sessions",
-      "server/src/agent-profiles",
-      "server/src/sessions",
-      "server/src/orchestrator",
-      "server/src/lane-runtime",
-      "server/src/continuation",
-      "server/src/completion",
-      "server/src/compose",
-      "server/src/portfolio",
-      "server/src/timeline",
-      "server/src/system",
-      "server/src/sdk",
-      "server/src/events",
-      "server/src/handoffs",
-      "server/src/tasks",
-      "server/src/capacity",
-      "server/src/workspaces",
-      "server/src/runtime",
-      "server/src/api",
-      "shared/src",
-    ];
-    const forbiddenLegacyFiles = ["server/src/app.ts", "server/src/boot.ts", "server/src/main.ts", "server/src/context.ts", "server/src/recovery.ts", "server/src/test-helpers.ts", "server/src/ids.ts", "server/src/errors.ts", "server/src/paging.ts"];
+    const forbiddenLegacyDirs = [...APPLICATION_DIRS, "server/src/composition", "shared/src"];
+    const forbiddenLegacyFiles = ["server/src/app.ts", "server/src/boot.ts", "server/src/main.ts", "server/src/context.ts", "server/src/config.ts"];
     for (const file of [...listFiles("server/src/persistence", isCode), ...listFiles("server/src/execution", isCode), ...listFiles("server/src/provider", isCode)]) {
       for (const specifier of importsOf(file)) {
         expect(specifier, `${rel(file)} imports ${specifier}`).not.toMatch(forbiddenPackages);
@@ -217,7 +204,66 @@ describe("import boundaries", () => {
     }
   });
 
-  it("the composition layer wires the new boundaries and nothing legacy: it imports core, Node built-ins, and the new server directories only, and no other new directory imports it", () => {
+  it("the application layer (api, events, host, operator, workspaces, entrypoints) depends on core, the runtime boundaries, the composition, and its transport libraries only; no runtime boundary depends on it", () => {
+    const files = [...APPLICATION_DIRS.flatMap((dir) => listFiles(dir, isCode)), ...NEW_SOURCE_FILES.map((f) => path.join(repoRoot, f)).filter((f) => fs.existsSync(f))];
+    expect(files.length).toBeGreaterThan(10);
+    const runtimeDirs = ["server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents", "server/src/composition"];
+    for (const file of files) {
+      const isTest = file.endsWith(".test.ts") || file.endsWith("test-support.ts");
+      for (const specifier of importsOf(file)) {
+        if (isTest && specifier === "vitest") continue;
+        const allowed =
+          specifier === "@agentique-console/core" ||
+          specifier === "zod" ||
+          specifier === "fastify" ||
+          specifier === "@fastify/static" ||
+          specifier.startsWith("node:") ||
+          // The provider SDK's types only (the module itself is loaded by the provider binding alone).
+          (specifier === "@anthropic-ai/claude-agent-sdk" && fs.readFileSync(file, "utf8").split(/\r?\n/).filter((line) => /^\s*(import|export)\b/.test(line) && line.includes(specifier)).every((line) => /^(export type|import type) /.test(line))) ||
+          [...APPLICATION_DIRS, ...runtimeDirs].some((dir) => resolvesInto(file, specifier, dir)) ||
+          NEW_SOURCE_FILES.some((f) => rel(path.resolve(path.dirname(file), specifier)) === f);
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+      }
+      if (isTest) continue;
+      const text = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      // The application layer never re-implements the runtime: no second scheduler, no capacity arithmetic, no transcript coordination, no agent
+      // messaging (Workers do not communicate peer-to-peer: invariant 7).
+      expect(text, rel(file)).not.toMatch(/class \w*(Scheduler|Governor)\b|allocationShortfall\(|reserveOrdinary\(|allocationExtensions\.record\(|budgetIncreases\.record\(|journal\.append\(|TRANSCRIPT_MEDIA_TYPE[^;\n]*read|sendMessage|mailbox|inbox|agent_message/);
+      // No compatibility mechanism: no legacy route, alias, redirect, or flag.
+      expect(text, rel(file)).not.toMatch(/user-sessions|agent-sessions|agent-profiles|X-Console-Compat|\bredirect\(|legacyMode|CONSOLE_USE_/);
+    }
+    for (const dir of runtimeDirs) {
+      for (const file of listFiles(dir, (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+        for (const specifier of importsOf(file)) {
+          for (const application of APPLICATION_DIRS) expect(resolvesInto(file, specifier, application), `${rel(file)} imports ${specifier}`).toBe(false);
+          for (const entry of NEW_SOURCE_FILES) expect(rel(path.resolve(path.dirname(file), specifier)), `${rel(file)} imports ${specifier}`).not.toBe(entry);
+        }
+      }
+    }
+    // The only timers of the process: the host's one cancellable resumption timer and its bounded failure retry, the SSE heartbeat, and the shutdown bound.
+    const timerFiles = files.filter((f) => !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && /setInterval|setTimeout/.test(fs.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""))).map(rel).sort();
+    expect(timerFiles).toEqual(["server/src/api/events.ts", "server/src/boot.ts", "server/src/host/run-host.ts"]);
+    // The host's timer re-notifies the Run and decides nothing; it derives from the scheduler's own resumption time.
+    const host = fs.readFileSync(path.join(repoRoot, "server/src/host/run-host.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(host).not.toMatch(/setInterval|reconcileRun|runAdmitsNewWork|allocationFits|stores\.(invocations|tasks|decisions|plans)\b/);
+    expect(host).toMatch(/if \(outcome\.wakeAt !== null\) this\.arm\(runId, state, outcome\.wakeAt\)/);
+    // Startup order: recovery, then admission, then the reconstruction of runnable work; no route admits work before that.
+    const boot = fs.readFileSync(path.join(repoRoot, "server/src/boot.ts"), "utf8");
+    expect(boot.indexOf("recovery.recover()")).toBeGreaterThan(-1);
+    expect(boot.indexOf("recovery.recover()")).toBeLessThan(boot.indexOf('admission.set("ready")'));
+    expect(boot.indexOf('admission.set("ready")')).toBeLessThan(boot.indexOf("host.reconstruct()"));
+    expect(boot).toMatch(/if \(!recovery\.blobs\.complete\) \{\s*app\.admission\.set\("recovery_incomplete"\)/);
+    const main = fs.readFileSync(path.join(repoRoot, "server/src/main.ts"), "utf8");
+    expect(main.indexOf("await bootApp(app)")).toBeLessThan(main.indexOf("app.server.listen("));
+    // Every mutation of the contract passes the admission gate.
+    for (const file of listFiles("server/src/api/routes", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("support.ts") && !f.endsWith("index.ts"))) {
+      const text = fs.readFileSync(file, "utf8");
+      const mutating = text.match(/^\s{2}(\w+): (?:async )?\(request, ctx\)(?::[^=]+)?=> \{\n\s+(\w+)\(ctx\)/gm) ?? [];
+      for (const m of mutating) expect(m, `${rel(file)}: ${m.split("\n")[0]}`).toMatch(/admit\(ctx\)$/);
+    }
+  });
+
+  it("the composition layer wires the new boundaries and nothing legacy: it imports core, Node built-ins, and the new server directories only, and no runtime boundary imports it", () => {
     const files = listFiles("server/src/composition", isCode);
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
@@ -238,6 +284,9 @@ describe("import boundaries", () => {
     }
     for (const dir of ["server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents"]) {
       for (const file of listFiles(dir, isCode)) for (const specifier of importsOf(file)) expect(resolvesInto(file, specifier, "server/src/composition"), `${rel(file)} imports ${specifier}`).toBe(false);
+    }
+    for (const file of listFiles("server/src/composition", isCode)) {
+      for (const specifier of importsOf(file)) for (const application of APPLICATION_DIRS) expect(resolvesInto(file, specifier, application), `${rel(file)} imports ${specifier}`).toBe(false);
     }
   });
 
@@ -648,7 +697,10 @@ describe("import boundaries", () => {
       .filter((f) => /artifacts\.(read|content)\(/.test(strip(fs.readFileSync(f, "utf8"))))
       .map(rel)
       .sort();
-    expect(contentReaders).toEqual(["server/src/execution/integration-service.ts", "server/src/execution/publication.ts", "server/src/execution/runtime-reads.ts"]);
+    // The application layer reads content for delivery only: the bounded content and download routes, and the publication report the
+    // operator view parses; neither decides anything the runtime owns.
+    expect(contentReaders).toEqual(["server/src/api/routes/records.ts", "server/src/execution/integration-service.ts", "server/src/execution/publication.ts", "server/src/execution/runtime-reads.ts", "server/src/operator/projections.ts"]);
+    expect(strip(fs.readFileSync(path.join(repoRoot, "server/src/operator/projections.ts"), "utf8"))).not.toMatch(/TRANSCRIPT_MEDIA_TYPE|transcriptArtifactId[^;\n]*read\(/);
     // The read service authorizes before it loads: the one content load sits in `readArtifact` after `authorizeArtifact` returned
     // the metadata, and Artifact authorization never consults the logical turn's replay scope.
     expect(reads.match(/artifacts\.content\(/g)).toHaveLength(1);
@@ -795,14 +847,14 @@ describe("import boundaries", () => {
     // 7. The transactor's commit hooks run after its bookkeeping is settled, in registration order, and a throwing hook or sink
     //    never reaches the caller.
     const transactor = read("server/src/persistence/transactions.ts");
-    expect(transactor).toMatch(/const committed = this\.#commitHooks;\s*this\.#reset\(\);\s*this\.#runCommitHooks\(committed\);\s*return result as T;/);
+    expect(transactor).toMatch(/const committed = this\.#commitHooks;\s*this\.#reset\(\);\s*this\.#runCommitHooks\(committed\);\s*this\.#notifyCommit\(\);\s*return result as T;/);
     expect(transactor.slice(transactor.indexOf("#runCommitHooks(hooks"), transactor.indexOf("#runRollbackHooks(hooks"))).not.toMatch(/\.reverse\(\)/);
-    // 8. The clean-break recovery boundary is invoked by no production code yet: the replacement runtime is not wired into the
-    //    legacy bootstrap (`main.ts`, `boot.ts`, `app.ts`), whose rewrite is the application cutover of the roadmap.
+    // 8. The clean-break recovery boundary is invoked by exactly one production caller: the boot (`boot.ts`), before admission opens;
+    //    no runtime boundary, route, or host calls it, and nothing reconciles the pending area elsewhere.
     expect(namers(/\.recover\(/)).toEqual([]);
-    for (const f of ["server/src/main.ts", "server/src/boot.ts", "server/src/app.ts"]) {
-      expect(read(f), f).not.toMatch(/RecoveryService|reconcilePendingBlobs|src\/persistence|src\/execution/);
-    }
+    const recoveryCallers = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts")).filter((f) => /\.recover\(/.test(read(rel(f)))).map(rel).sort();
+    expect(recoveryCallers).toEqual(["server/src/boot.ts"]);
+    expect(namers(/reconcilePendingBlobs\(/)).toEqual(["server/src/execution/recovery-service.ts", "server/src/persistence/stores/artifacts.ts"]);
   });
 
   it("operator Run control is one internal execution boundary: durable intent on the Run row, one admission rule revalidated at every mutation boundary, delivery only through the executor, no timer, polling, messaging, provider persistence, second scheduler, HTTP wiring, or compatibility mechanism (execution-model §14)", () => {
@@ -842,11 +894,30 @@ describe("import boundaries", () => {
     // 6. Not an agent tool and not wired to any route yet: the closed runtime-tool set names no control tool, and no legacy module reaches the service.
     expect(fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8")).not.toMatch(/cancel_run|pause_run|resume_run|run_control/);
     const callers = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.startsWith(path.join(repoRoot, "server", "src", "execution"))).filter((f) => /RunControlService|run-control\.ts/.test(fs.readFileSync(f, "utf8"))).map(rel);
-    // The production composition wires the service for its callers; no route or legacy module does.
+    // The production composition wires the service; the routes dispatch through the composed runtime and construct nothing.
     expect(callers).toEqual(["server/src/composition/console-runtime.ts"]);
   });
 
-  it("legacy code imports neither core nor the new persistence boundary", () => {
+  it("the web application imports core, its own sources, and browser libraries only; a web test may drive the server's test support", () => {
+    const files = WEB_SOURCE_DIRS.flatMap((dir) => listFiles(dir, isCode));
+    expect(files.length).toBeGreaterThan(20);
+    for (const file of files) {
+      const isTest = file.endsWith(".test.ts") || file.endsWith(".test.tsx") || rel(file).startsWith("web/tests/");
+      for (const specifier of importsOf(file)) {
+        if (isTest && (specifier === "vitest" || specifier.startsWith("node:") || specifier.startsWith("@testing-library/") || resolvesInto(file, specifier, "server/src"))) continue;
+        const allowed = specifier === "@agentique-console/core" || specifier.startsWith("@/") || specifier.startsWith("./") || specifier.startsWith("../") || !specifier.startsWith("@agentique-console/");
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+        expect(resolvesInto(file, specifier, "server/src") && !isTest, `${rel(file)} imports the server`).toBe(false);
+      }
+      if (isTest) continue;
+      const text = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      // The web application drives nothing: no polling of the API as an execution driver, no legacy route, no business state from provider text.
+      expect(text, rel(file)).not.toMatch(/refetchInterval: \d|user-sessions|agent-sessions|agent-profiles|EventSource\(/);
+    }
+    expect(fs.existsSync(path.join(repoRoot, "shared"))).toBe(false);
+  });
+
+  it("what remains of the legacy application imports neither core nor the new persistence boundary", () => {
     for (const file of legacyFiles) {
       for (const specifier of importsOf(file)) {
         expect(specifier, `${rel(file)} imports ${specifier}`).not.toMatch(/^@agentique-console\/core/);
@@ -856,10 +927,12 @@ describe("import boundaries", () => {
         expect(resolvesInto(file, specifier, "core/src"), `${rel(file)} imports ${specifier}`).toBe(false);
       }
     }
-    const legacyPackages = [JSON.parse(fs.readFileSync(path.join(repoRoot, "shared/package.json"), "utf8")), JSON.parse(fs.readFileSync(path.join(repoRoot, "web/package.json"), "utf8"))] as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> }[];
-    for (const pkg of legacyPackages) {
-      expect(Object.keys({ ...pkg.dependencies, ...pkg.devDependencies })).not.toContain("@agentique-console/core");
+    // The web package depends on core, never on the deleted shared package; no package names it.
+    for (const pkg of ["package.json", "core/package.json", "server/package.json", "web/package.json"]) {
+      const text = fs.readFileSync(path.join(repoRoot, pkg), "utf8");
+      expect(text, pkg).not.toMatch(/@agentique-console\/shared|"shared"/);
     }
+    expect(JSON.parse(fs.readFileSync(path.join(repoRoot, "web/package.json"), "utf8")).dependencies["@agentique-console/core"]).toBe("*");
   });
 
   it("no runtime path selects between the legacy and the new persistence", () => {
@@ -870,12 +943,12 @@ describe("import boundaries", () => {
     }
   });
 
-  it("the legacy migrations never create a new-schema table, so the legacy application never writes it", () => {
-    const legacySql = listFiles("server/src/db/migrations", (f) => f.endsWith(".sql")).map((f) => fs.readFileSync(f, "utf8")).join("\n");
-    expect(legacySql.length).toBeGreaterThan(0);
-    for (const table of ["schema_info", "runs", "plan_nodes", "plan_edges", "plan_node_requirements", "invocations", "attempts", "provider_continuations", "context_manifests", "budget_reservations", "capacity_leases", "usage", "conversations", "conversation_messages"]) {
-      expect(legacySql, table).not.toMatch(new RegExp(`CREATE TABLE \`?${table}\`? `));
-    }
+  it("the legacy persistence is gone and the baseline migration creates no legacy table", () => {
+    expect(fs.existsSync(path.join(repoRoot, "server/src/db"))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, "server/src/sdk"))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, "server/src/agent-sessions"))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, "server/src/orchestrator"))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, "server/evals"))).toBe(false);
     const newSql = fs.readFileSync(path.join(repoRoot, "server/src/persistence/migrations/0000_orchestration_core.sql"), "utf8");
     for (const table of ["user_sessions", "agent_sessions", "agents", "mailbox_deliveries", "handoff_records", "usage_samples", "provider_entries"]) {
       expect(newSql, table).not.toMatch(new RegExp(`CREATE TABLE \`?${table}\`? `));
@@ -930,7 +1003,7 @@ describe("terminology", () => {
   const ALLOWED_CONTEXT = /(retired|forbid|prohib|never|not |reject|toThrow|expect\(|CHECK|no \w+ table|legacy|\/\/ )/i;
 
   it("is absent from the new source, schema, migration, and tests except where a term is explicitly prohibited", () => {
-    const files = NEW_SOURCE_DIRS.flatMap((dir) => listFiles(dir, isSource));
+    const files = [...NEW_SOURCE_DIRS, ...WEB_SOURCE_DIRS].flatMap((dir) => listFiles(dir, isSource));
     const offences: string[] = [];
     for (const file of files) {
       if (rel(file) === "server/src/persistence/boundaries.test.ts") continue;

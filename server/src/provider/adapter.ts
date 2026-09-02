@@ -135,7 +135,8 @@ export interface AttemptExecutionRequest {
  * retried once the Run resumes), `deadline` (the Invocation-wide wall-clock
  * limit), or `provider` (the provider ended the stream itself).
  */
-export const INTERRUPTION_CAUSES = ["cancelled", "operator_pause", "deadline", "provider"] as const;
+/** Why an Attempt was interrupted: the runtime's cancellation, hard pause, wall-clock deadline, or orderly process shutdown, or the provider's own end. */
+export const INTERRUPTION_CAUSES = ["cancelled", "operator_pause", "deadline", "shutdown", "provider"] as const;
 export type InterruptionCause = (typeof INTERRUPTION_CAUSES)[number];
 
 /** How the provider execution ended, as the runtime's classification input (execution-model §7.2). */
