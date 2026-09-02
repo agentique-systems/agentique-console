@@ -1,4 +1,4 @@
-import { asc, eq, notInArray } from "drizzle-orm";
+import { and, asc, eq, notInArray } from "drizzle-orm";
 import {
   ConflictError,
   InvariantViolationError,
@@ -16,6 +16,7 @@ import {
   type RunId,
   type RunInput,
   type RunTransition,
+  type RunWaitReason,
   type ChangesetId,
   type SnapshotId,
   type WorkspaceId,
@@ -156,6 +157,11 @@ export class RunStore {
   /** Every Run that has not ended: what a restarted host reconstructs its work from. */
   listNonterminal(): Run[] {
     return this.ctx.db.select().from(runs).where(notInArray(runs.status, ["completed", "failed", "cancelled"])).orderBy(asc(runs.createdAt)).all().map(toDomain);
+  }
+
+  /** Every Run recorded `waiting` on exactly `reason`, in creation order: what a committed capacity release re-projects (never a paused Run, whose reason is `operator`). */
+  listWaitingOn(reason: RunWaitReason): Run[] {
+    return this.ctx.db.select().from(runs).where(and(eq(runs.status, "waiting"), eq(runs.waitReason, reason))).orderBy(asc(runs.createdAt), asc(runs.id)).all().map(toDomain);
   }
 
   /**

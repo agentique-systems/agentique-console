@@ -21,7 +21,32 @@ function toDomain(row: typeof capacityLeases.$inferSelect): CapacityLease {
 
 /** Resource Governor grants: one active lease per Attempt, released once. */
 export class CapacityLeaseStore {
-  constructor(private readonly ctx: PersistenceContext) {}
+  readonly #releaseListeners = new Set<() => void>();
+  /** Whether the current root transaction released a lease; read by the commit listener, cleared by it or by the rollback hook. */
+  #releasedInTransaction = false;
+
+  constructor(private readonly ctx: PersistenceContext) {
+    // The committed-release notice rides the transactor's commit listener (as the event stream does), never a commit hook: the
+    // flag says whether this root transaction released anything, and a rollback clears it before any listener could see it.
+    ctx.tx.onCommit(() => {
+      if (!this.#releasedInTransaction) return;
+      this.#releasedInTransaction = false;
+      for (const listener of [...this.#releaseListeners]) listener();
+    });
+  }
+
+  /**
+   * Registers a listener called once after every root COMMIT that released at
+   * least one lease (never after a rollback, never inside the transaction):
+   * the committed fact that capacity may be free. Many releases in one
+   * transaction are one notice. Returns the unsubscribe.
+   */
+  onReleased(listener: () => void): () => void {
+    this.#releaseListeners.add(listener);
+    return () => {
+      this.#releaseListeners.delete(listener);
+    };
+  }
 
   grant(input: CapacityLeaseInput, options?: WriteOptions): CapacityLease {
     const valid = parseOrThrow(capacityLeaseInputSchema, input, "CapacityLease input");
@@ -82,7 +107,17 @@ export class CapacityLeaseStore {
         ...writeMeta(options),
       });
       this.ctx.db.update(capacityLeases).set({ status: "released", releasedAt: next.releasedAt }).where(eq(capacityLeases.id, id)).run();
+      this.noticeRelease();
       return next;
+    });
+  }
+
+  /** One notice per root transaction, delivered by the commit listener only after COMMIT; a rollback discards it with the release. */
+  private noticeRelease(): void {
+    if (this.#releasedInTransaction) return;
+    this.#releasedInTransaction = true;
+    this.ctx.tx.afterRollback(() => {
+      this.#releasedInTransaction = false;
     });
   }
 }

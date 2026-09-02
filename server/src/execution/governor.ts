@@ -94,6 +94,19 @@ export class ResourceGovernor {
     return this.leases.release(leaseId, options);
   }
 
+  /**
+   * The governor's capacity signal (execution-model §7.8, §14 "Provider
+   * capacity refused by the governor"): `listener` is called once after
+   * every committed transaction that released a lease — the only moment
+   * capacity a refused Run waited for can have become grantable without a
+   * retry-after time passing. It carries no decision: the caller re-projects
+   * the waiting Runs from rows and the scheduler asks the governor again.
+   * Returns the unsubscribe.
+   */
+  onCapacityReleased(listener: () => void): () => void {
+    return this.leases.onReleased(listener);
+  }
+
   /** A provider's own report (rate limit, usage window, overload); `retryAfter` clears the refusal automatically once passed. */
   updateProviderAvailability(provider: string, availability: ProviderAvailability): void {
     if (availability.available) this.#availability.delete(provider);

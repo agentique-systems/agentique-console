@@ -3,13 +3,16 @@
  * that stops at its action limit yields and returns, concurrency is bounded
  * and fair, a `wakeAt` arms exactly one cancellable timer that a later
  * notification replaces and `stop` cancels, an infrastructure failure
- * re-notifies with a bounded growing delay and never loops hot, and
+ * re-notifies with a bounded growing delay and never loops hot,
  * reconstruction notifies every nonterminal Run and re-drives every
- * outstanding Publication from rows. No readiness or budget decision is
- * made here: the outcome of a pass is all the host reads.
+ * outstanding Publication from rows, and a committed capacity release
+ * re-projects the Runs the rows record waiting on provider capacity (and
+ * the ones this process saw wait) whether or not they hold a mark. No
+ * readiness or budget decision is made here: the outcome of a pass and the
+ * rows' wait reasons are all the host reads.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PublicationId, Run, RunId, Timestamp } from "@agentique-console/core";
+import type { PlanNodeId, PublicationId, Run, RunId, Timestamp } from "@agentique-console/core";
 import type { PublicationAdvanceOutcome } from "../execution/publication.ts";
 import type { SchedulerOutcome } from "../execution/scheduler.ts";
 import { RunHost, type RunHostDiagnostic } from "./run-host.ts";
@@ -27,6 +30,9 @@ function harness(script: Script, options: { maxConcurrentRuns?: number; nontermi
   const diagnostics: RunHostDiagnostic[] = [];
   const advances: { id: PublicationId; step: number }[] = [];
   const steps = new Map<PublicationId, number>();
+  /** The Runs the rows record `waiting` on `provider_capacity` (a test edits it as the scheduler's wait_run would commit). */
+  const waitingOnCapacity: RunId[] = [];
+  const releaseListeners = new Set<() => void>();
   const host = new RunHost(
     {
       scheduler: {
@@ -46,14 +52,29 @@ function harness(script: Script, options: { maxConcurrentRuns?: number; nontermi
         },
         reconcileOutstanding: async () => [],
       },
-      runs: { listNonterminal: () => (options.nonterminal ?? []).map((id) => ({ id }) as Run) },
+      governor: {
+        onCapacityReleased: (listener) => {
+          releaseListeners.add(listener);
+          return () => {
+            releaseListeners.delete(listener);
+          };
+        },
+      },
+      runs: { listNonterminal: () => (options.nonterminal ?? []).map((id) => ({ id }) as Run), listWaitingOn: (reason) => (reason === "provider_capacity" ? waitingOnCapacity : []).map((id) => ({ id }) as Run) },
       publications: { listNonterminal: () => (options.publications ?? []).map((id) => ({ id }) as never), listPendingCleanup: () => [] },
       clock: () => new Date(now).toISOString() as Timestamp,
     },
     { maxConcurrentRuns: options.maxConcurrentRuns ?? 2, onDiagnostic: (d) => diagnostics.push(d), failureBackoffMaxMs: 8_000 },
   );
-  return { host, passes, diagnostics, advances, advance: (ms: number) => (now += ms) };
+  /** What the governor does after a transaction that released a lease committed. */
+  const releaseCapacity = () => {
+    for (const listener of [...releaseListeners]) listener();
+  };
+  return { host, passes, diagnostics, advances, waitingOnCapacity, releaseCapacity, subscribed: () => releaseListeners.size, advance: (ms: number) => (now += ms) };
 }
+
+const NODE = "pn_aaaaaaaaaaaaaaaaaaaaaaaa" as PlanNodeId;
+const capacityWait = (): Partial<SchedulerOutcome> => ({ stop: "waiting", waiting: [{ nodeId: NODE, reason: "provider_capacity", wakeAt: null }], wakeAt: null });
 
 const RUN_A = "run_aaaaaaaaaaaaaaaaaaaaaaaa" as RunId;
 const RUN_B = "run_bbbbbbbbbbbbbbbbbbbbbbbb" as RunId;
@@ -97,7 +118,7 @@ describe("RunHost", () => {
     await h.host.idle();
     // A's first pass hit the limit: B and C take their turns before A continues; A returns until quiescent.
     expect(order).toEqual(["a1", "b1", "c1", "a2", "a3"]);
-    expect(h.host.snapshot()).toEqual({ stopped: false, queued: [], active: [], armed: [] });
+    expect(h.host.snapshot()).toEqual({ stopped: false, queued: [], active: [], armed: [], capacityWaiters: [] });
   });
 
   it("arms exactly one cancellable timer from the scheduler's wakeAt, replaces it on a later notification, fires it once, and cancels it on stop", async () => {
@@ -180,6 +201,75 @@ describe("RunHost", () => {
     const twice = harness(async () => ({ stop: "quiescent" }), { publicationScript: (id, step) => (step < 2 ? { kind: "verified", publicationId: id, checks: 0 } : { kind: "quiescent", publicationId: id }) });
     await Promise.all([twice.host.notifyPublication(PUB), twice.host.notifyPublication(PUB)]);
     expect(twice.advances.map((a) => a.step)).toEqual([1, 2]);
+  });
+
+  it("re-projects the Runs the rows record waiting on provider capacity when a committed lease release is signalled, whether or not they hold a mark; a Decision or budget waiter is not named; nothing after stop", async () => {
+    // B's pass ends waiting on provider capacity with no resumption time: no mark, no timer, nothing queued — the defect's shape.
+    const h = harness(async (runId, pass) => (runId === RUN_B && pass === 1 ? capacityWait() : { stop: "quiescent" }));
+    expect(h.subscribed()).toBe(1);
+    h.host.notifyRun(RUN_B);
+    await h.host.idle();
+    expect(h.host.snapshot()).toEqual({ stopped: false, queued: [], active: [], armed: [], capacityWaiters: [RUN_B] });
+    expect(vi.getTimerCount()).toBe(0);
+    // The scheduler's wait_run committed: the rows say B waits on capacity. Another Run's finalization releases its lease and commits.
+    h.waitingOnCapacity.push(RUN_B);
+    h.releaseCapacity();
+    await h.host.idle();
+    expect(h.passes.filter((p) => p.runId === RUN_B).map((p) => p.pass)).toEqual([1, 2]);
+    expect(h.diagnostics.filter((d) => d.kind === "capacity_released")).toEqual([{ kind: "capacity_released", runIds: [RUN_B] }]);
+    expect(h.host.snapshot().capacityWaiters).toEqual([]);
+    // B's second pass was quiescent; while the rows still list it (a stale row the next pass would settle) a release re-projects it once more,
+    // and once the rows no longer list it, a release starts nothing: the host decides nothing itself.
+    h.releaseCapacity();
+    await h.host.idle();
+    expect(h.passes.filter((p) => p.runId === RUN_B)).toHaveLength(3);
+    h.waitingOnCapacity.length = 0;
+    h.releaseCapacity();
+    await h.host.idle();
+    expect(h.passes.filter((p) => p.runId === RUN_B)).toHaveLength(3);
+    expect(h.diagnostics.filter((d) => d.kind === "capacity_released")).toHaveLength(2);
+    // A Run whose rows stay `running` (a node held back by its own concurrency limit beside the refused one) is remembered from its pass
+    // alone and re-projected from process memory on the next release; a Run waiting on a Decision or budget is neither listed nor remembered.
+    const memory = harness(async (runId, pass) => (runId === RUN_A && pass === 1 ? capacityWait() : runId === RUN_C ? { stop: "waiting", waiting: [{ nodeId: NODE, reason: "decision", wakeAt: null }] } : { stop: "quiescent" }));
+    memory.host.notifyRun(RUN_A);
+    memory.host.notifyRun(RUN_C);
+    await memory.host.idle();
+    expect(memory.host.snapshot().capacityWaiters).toEqual([RUN_A]);
+    memory.releaseCapacity();
+    await memory.host.idle();
+    expect(memory.passes.map((p) => `${p.runId.slice(4, 5)}${p.pass}`)).toEqual(["a1", "c1", "a2"]);
+    expect(memory.diagnostics.filter((d) => d.kind === "capacity_released")).toEqual([{ kind: "capacity_released", runIds: [RUN_A] }]);
+    // Releases signalled while the waiter's pass is still running coalesce into its one pending mark: one more pass, not one per release.
+    let releaseB!: () => void;
+    const gateB = new Promise<void>((resolve) => (releaseB = resolve));
+    const burst = harness(async (runId, pass) => {
+      if (runId === RUN_B && pass === 1) return capacityWait();
+      if (runId === RUN_B && pass === 2) await gateB;
+      return { stop: "quiescent" };
+    });
+    burst.host.notifyRun(RUN_B);
+    await burst.host.idle();
+    burst.waitingOnCapacity.push(RUN_B);
+    burst.releaseCapacity();
+    await Promise.resolve();
+    expect(burst.host.snapshot().active).toEqual([RUN_B]);
+    burst.releaseCapacity();
+    burst.releaseCapacity();
+    burst.releaseCapacity();
+    releaseB();
+    await burst.host.idle();
+    expect(burst.passes.filter((p) => p.runId === RUN_B).map((p) => p.pass)).toEqual([1, 2, 3]);
+    // Stop drops the signal: a release after shutdown began admits nothing, so no successor or retry starts through a late notification.
+    const stopped = harness(async (runId, pass) => (runId === RUN_B && pass === 1 ? capacityWait() : { stop: "quiescent" }));
+    stopped.host.notifyRun(RUN_B);
+    await stopped.host.idle();
+    stopped.waitingOnCapacity.push(RUN_B);
+    await stopped.host.stop();
+    expect(stopped.subscribed()).toBe(0);
+    stopped.releaseCapacity();
+    await stopped.host.idle();
+    expect(stopped.passes).toHaveLength(1);
+    expect(stopped.host.snapshot()).toEqual({ stopped: true, queued: [], active: [], armed: [], capacityWaiters: [] });
   });
 
   it("re-queues the other marked Runs when a pass ends, so freed capacity reaches them without a timer", async () => {

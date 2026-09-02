@@ -5,11 +5,26 @@
  *
  * What it does:
  * - It is told that a Run may have work (`notifyRun`): after a committed
- *   operator action, after a Publication step, after another Run's pass ended
- *   (capacity may have freed), and at startup for every nonterminal Run
+ *   operator action, after a Publication step, after a committed capacity
+ *   release (below), and at startup for every nonterminal Run
  *   (`reconstruct`). Notifications for one Run coalesce into one pending
  *   mark; the mark is process memory only — the rows are the truth and the
  *   pass re-projects from them.
+ * - **Capacity.** A Run the governor refused waits on `provider_capacity`
+ *   with no resumption time (execution-model §7.8, §14): nothing but a
+ *   released lease can make it runnable, and the release is committed by
+ *   another Run's finalization, by recovery, or by a cancellation. The
+ *   governor signals every committed release once (`onCapacityReleased`);
+ *   the host then notifies every Run the rows record `waiting` on
+ *   `provider_capacity` — whether or not it still holds a mark or sits in
+ *   the queue — plus every Run whose last pass in this process reported a
+ *   capacity wait while the Run row stayed `running` (a node held back by
+ *   the Run's own concurrency limit beside the refused one). Readiness and
+ *   admission stay the scheduler's and the governor's: the notified pass
+ *   asks the governor again from rows, a paused, cancelled, or terminal Run
+ *   projects nothing, and a Decision or budget wait is untouched because
+ *   only capacity waiters are named. Notices coalesce through the same
+ *   marks, dispatch stays bounded and fair, and a stopped host ignores them.
  * - A bounded number of Runs advance concurrently; each pass is bounded by
  *   the scheduler's own action limit, and a Run whose pass stopped at that
  *   limit goes to the back of the queue so no Run starves another.
@@ -34,6 +49,7 @@
  *   executor's lifecycle.
  */
 import type { PublicationId, RunId, Timestamp } from "@agentique-console/core";
+import type { ResourceGovernor } from "../execution/governor.ts";
 import type { PublicationAdvanceOutcome, RunPublicationService } from "../execution/publication.ts";
 import type { RunScheduler, SchedulerOutcome } from "../execution/scheduler.ts";
 import type { RunStore } from "../persistence/stores/runs.ts";
@@ -42,7 +58,9 @@ import type { PublicationStore } from "../persistence/stores/publications.ts";
 export interface RunHostDependencies {
   scheduler: Pick<RunScheduler, "advanceRun">;
   publication: Pick<RunPublicationService, "advance" | "reconcileOutstanding">;
-  runs: Pick<RunStore, "listNonterminal">;
+  /** The governor's committed capacity signal: the host subscribes on construction and unsubscribes on `stop`. */
+  governor: Pick<ResourceGovernor, "onCapacityReleased">;
+  runs: Pick<RunStore, "listNonterminal" | "listWaitingOn">;
   publications: Pick<PublicationStore, "listNonterminal" | "listPendingCleanup">;
   clock: () => Timestamp;
 }
@@ -61,7 +79,9 @@ export interface RunHostOptions {
 export type RunHostDiagnostic =
   | { kind: "pass_failed"; runId: RunId; message: string; retryInMs: number | null }
   | { kind: "publication_advance"; publicationId: PublicationId; outcome: PublicationAdvanceOutcome["kind"]; message: string | null }
-  | { kind: "reconstructed"; runs: number; publications: number };
+  | { kind: "reconstructed"; runs: number; publications: number }
+  /** A committed capacity release re-projected these Runs (the rows' capacity waiters plus this process's remembered ones). */
+  | { kind: "capacity_released"; runIds: RunId[] };
 
 interface RunState {
   pending: boolean;
@@ -75,6 +95,8 @@ export interface RunHostSnapshot {
   queued: RunId[];
   active: RunId[];
   armed: { runId: RunId; at: Timestamp }[];
+  /** Runs whose last pass in this process reported a capacity wait; re-notified on the next committed release. */
+  capacityWaiters: RunId[];
 }
 
 export class RunHost {
@@ -83,6 +105,8 @@ export class RunHost {
   readonly #active = new Set<RunId>();
   readonly #armed = new Map<RunId, Timestamp>();
   readonly #publications = new Map<PublicationId, Promise<void>>();
+  readonly #capacityWaiters = new Set<RunId>();
+  readonly #unsubscribeCapacity: () => void;
   #stopped = false;
   #draining = false;
   #idle: Promise<void> = Promise.resolve();
@@ -100,6 +124,7 @@ export class RunHost {
     this.maxActionsPerPass = options.maxActionsPerPass;
     this.failureBackoffMaxMs = options.failureBackoffMaxMs ?? 60_000;
     this.onDiagnostic = options.onDiagnostic ?? (() => {});
+    this.#unsubscribeCapacity = deps.governor.onCapacityReleased(() => this.capacityReleased());
   }
 
   get stopped(): boolean {
@@ -108,7 +133,7 @@ export class RunHost {
 
   /** The host's process-memory view, for tests and the health projection; never a source of truth. */
   snapshot(): RunHostSnapshot {
-    return { stopped: this.#stopped, queued: [...this.#queue], active: [...this.#active].sort(), armed: [...this.#armed].map(([runId, at]) => ({ runId, at })).sort((a, b) => (a.runId < b.runId ? -1 : 1)) };
+    return { stopped: this.#stopped, queued: [...this.#queue], active: [...this.#active].sort(), armed: [...this.#armed].map(([runId, at]) => ({ runId, at })).sort((a, b) => (a.runId < b.runId ? -1 : 1)), capacityWaiters: [...this.#capacityWaiters].sort() };
   }
 
   /** Marks the Run as possibly having work; coalesces with a pending mark; cancels an armed timer (the pass re-projects anyway). */
@@ -116,10 +141,25 @@ export class RunHost {
     if (this.#stopped) return;
     const state = this.stateOf(runId);
     this.disarm(runId, state);
+    this.#capacityWaiters.delete(runId);
     if (state.pending) return;
     state.pending = true;
     if (!state.running) this.#queue.push(runId);
     this.drain();
+  }
+
+  /**
+   * A lease release committed: every Run the rows record waiting on provider capacity is re-projected, and so is every Run this
+   * process saw report a capacity wait since its last pass. The rows are read after the commit, so a Run that recorded its wait
+   * before the release is found here, and one that records it afterwards revalidates the governor inside its own transaction.
+   */
+  private capacityReleased(): void {
+    if (this.#stopped) return;
+    const runIds = new Set<RunId>(this.#capacityWaiters);
+    for (const run of this.deps.runs.listWaitingOn("provider_capacity")) runIds.add(run.id);
+    if (runIds.size === 0) return;
+    this.onDiagnostic({ kind: "capacity_released", runIds: [...runIds].sort() });
+    for (const runId of runIds) this.notifyRun(runId);
   }
 
   /** Drives one Publication through its durable boundaries until it is terminal and released, or an infrastructure failure stops it. */
@@ -151,9 +191,11 @@ export class RunHost {
     return this.#idle;
   }
 
-  /** Closes admission: no further pass starts, every armed timer is cancelled; resolves once the active passes returned. */
+  /** Closes admission: no further pass starts, every armed timer is cancelled, the capacity signal is dropped; resolves once the active passes returned. */
   async stop(): Promise<void> {
     this.#stopped = true;
+    this.#unsubscribeCapacity();
+    this.#capacityWaiters.clear();
     for (const [runId, state] of this.#runs) this.disarm(runId, state);
     this.#queue.length = 0;
     for (const state of this.#runs.values()) state.pending = false;
@@ -243,6 +285,9 @@ export class RunHost {
         break;
       case "waiting":
         if (outcome.wakeAt !== null) this.arm(runId, state, outcome.wakeAt);
+        // A capacity wait the pass reported is remembered until the next committed release re-projects it, whatever the Run row says
+        // (a Run whose other node is held back by its own concurrency limit stays `running` while a node waits on capacity).
+        if (!this.#stopped && !state.pending && outcome.waiting.some((w) => w.reason === "provider_capacity")) this.#capacityWaiters.add(runId);
         break;
       case "quiescent":
       case "run_terminal":

@@ -132,7 +132,7 @@ export function createApp(options: CreateAppOptions): App {
   const events = new EventStream(runtime.ctx, runtime.stores.invocations, runtime.stores.runs);
   const admission = new AdmissionGate();
   const host = new RunHost(
-    { scheduler: runtime.scheduler, publication: runtime.publication, runs: runtime.stores.runs, publications: runtime.stores.publications, clock },
+    { scheduler: runtime.scheduler, publication: runtime.publication, governor: runtime.governor, runs: runtime.stores.runs, publications: runtime.stores.publications, clock },
     {
       maxConcurrentRuns: config.driver.maxConcurrentRuns,
       onDiagnostic: (diagnostic) => {

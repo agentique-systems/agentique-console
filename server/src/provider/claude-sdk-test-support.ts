@@ -52,6 +52,8 @@ export type FakeSdkStep =
   | { kind: "rate_limit"; status: "allowed" | "allowed_warning" | "rejected" }
   /** Waits for the abort signal, then throws the SDK's abort error. */
   | { kind: "hang" }
+  /** A test barrier: holds the turn until `until` resolves, then continues with the next step; an abort meanwhile throws the SDK's abort error. */
+  | { kind: "wait"; until: Promise<void> }
   | { kind: "throw"; error: Error }
   /** The subprocess dies: the stream ends without a result message. */
   | { kind: "exit" };
@@ -250,6 +252,14 @@ export class FakeClaudeSdk implements ClaudeSdk {
             if (signal === undefined) throw new Error("FakeClaudeSdk: a hang step needs an abort controller");
             if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
             throw abortError();
+          case "wait": {
+            if (signal === undefined) throw new Error("FakeClaudeSdk: a wait step needs an abort controller");
+            let onAbort: (() => void) | null = null;
+            await Promise.race([step.until, new Promise<void>((resolve) => signal.addEventListener("abort", (onAbort = () => resolve()), { once: true }))]);
+            if (onAbort !== null) signal.removeEventListener("abort", onAbort);
+            throwIfAborted();
+            break;
+          }
           case "throw":
             throw step.error;
           case "exit":
