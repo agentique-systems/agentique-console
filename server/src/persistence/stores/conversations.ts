@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import {
   ConflictError,
   conversationMessageSchema,
@@ -174,6 +174,18 @@ export class ConversationStore {
 
   getMessage(id: ConversationMessageId): ConversationMessage {
     return messageToDomain(requireRow(this.ctx.db.select().from(conversationMessages).where(eq(conversationMessages.id, id)).get(), "ConversationMessage", id));
+  }
+
+  /** The earliest message of `author` posted in the Run (one indexed read), or `null`: the launch's recorded goal for a deferred start. */
+  firstMessageOf(runId: RunId, author: ConversationMessageAuthor): ConversationMessage | null {
+    const row = this.ctx.db
+      .select()
+      .from(conversationMessages)
+      .where(and(eq(conversationMessages.runId, runId), eq(conversationMessages.author, author)))
+      .orderBy(asc(conversationMessages.createdAt), asc(conversationMessages.id))
+      .limit(1)
+      .get();
+    return row === undefined ? null : messageToDomain(row);
   }
 
   listMessages(conversationId: ConversationId): ConversationMessage[] {

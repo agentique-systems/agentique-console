@@ -19,6 +19,7 @@ import {
   runIsRunningOrDraining,
   runtimeToolHandlerBound,
   type AcceptanceCriterion,
+  type AcceptanceCriterionId,
   type ConversationId,
   type ProposedRequirement,
   type ProposeRequirementsInput,
@@ -164,6 +165,9 @@ export class RequirementProposalService {
    * proposal — kept Requirements name their id and keep it, new ones are minted, removed ones are retired by the revision
    * store, and the proposed Acceptance Criteria are authored in the new revision — in one transaction, with no Decision
    * (an operator-authored revision needs no approval) and no queued Orchestrator input (the operator steers by message).
+   * A kept Requirement keeps the Acceptance Criteria it holds at the current revision: its new tree entry lists them by
+   * id, so appending a goal (a later Run of the Conversation) never silently drops an earlier goal's checks; the entry's
+   * proposed checks are added beside them.
    */
   author(input: { conversationId: ConversationId; entries: ProposedRequirement[]; rationale: string | null }, options: WriteOptions = {}): { revision: RequirementRevision; criteria: AcceptanceCriterion[] } {
     if (options.actor !== undefined && options.actor.kind !== "operator") throw new RequirementProposalRefusedError("operator_required", `a Requirement revision is authored by the operator, not ${options.actor.kind}`, { conversationId: input.conversationId });
@@ -181,7 +185,7 @@ export class RequirementProposalService {
       }
       const meta: WriteOptions = { actor: OPERATOR_ACTOR, correlationId: options.correlationId ?? conversation.id, causationSeq: options.causationSeq ?? null };
       const chained = (): WriteOptions => ({ ...meta, causationSeq: this.ctx.journal.lastSeq() });
-      const tree = this.treeOf(entries);
+      const tree = this.treeOf(entries, this.currentCriteriaOf(conversation.id));
       const revision = this.stores.requirements.createRevision({ conversationId: conversation.id, tree: tree.map((t) => t.entry), approvedByDecisionId: null }, meta);
       const criteria: AcceptanceCriterion[] = [];
       for (const { proposed, entry } of tree) {
@@ -220,8 +224,27 @@ export class RequirementProposalService {
     return null;
   }
 
-  /** The revision tree in parent-first order: kept Requirements keep their ids, new ones are minted, positions follow the order. */
-  private treeOf(entries: readonly ProposedRequirement[]): { proposed: ProposedRequirement; entry: RequirementTreeEntry }[] {
+  /**
+   * The Acceptance Criteria each Requirement holds at the Conversation's current revision — those pinned to that revision and those
+   * its current tree entry lists — by Requirement id; what a kept entry carries into the next revision.
+   */
+  private currentCriteriaOf(conversationId: ConversationId): (requirementId: RequirementId) => AcceptanceCriterionId[] {
+    const current = this.stores.requirements.currentRevision(conversationId);
+    if (current === null) return () => [];
+    const listed = new Map(current.tree.map((e) => [e.id, new Set(e.acceptanceCriterionIds)] as const));
+    return (requirementId) =>
+      this.stores.requirements
+        .listAcceptanceCriteria({ requirementId })
+        .filter((c) => c.requirementRevisionId === current.id || (listed.get(requirementId)?.has(c.id) ?? false))
+        .map((c) => c.id)
+        .sort();
+  }
+
+  /**
+   * The revision tree in parent-first order: kept Requirements keep their ids, new ones are minted, positions follow the order; with
+   * `carried`, a kept entry lists the criteria it currently holds (an approved Orchestrator proposal states each entry's criteria itself).
+   */
+  private treeOf(entries: readonly ProposedRequirement[], carried?: (requirementId: RequirementId) => AcceptanceCriterionId[]): { proposed: ProposedRequirement; entry: RequirementTreeEntry }[] {
     const ids = new Map<string, RequirementId>(entries.map((e) => [e.key, e.requirementId ?? this.ctx.ids("requirement")] as const));
     const ordered: ProposedRequirement[] = [];
     const visit = (parentKey: string | null) => {
@@ -233,7 +256,7 @@ export class RequirementProposalService {
     visit(null);
     return ordered.map((proposed, position) => ({
       proposed,
-      entry: { id: ids.get(proposed.key)!, parentId: proposed.parentKey === null ? null : ids.get(proposed.parentKey)!, composition: proposed.composition, statement: proposed.statement, position, acceptanceCriterionIds: [] },
+      entry: { id: ids.get(proposed.key)!, parentId: proposed.parentKey === null ? null : ids.get(proposed.parentKey)!, composition: proposed.composition, statement: proposed.statement, position, acceptanceCriterionIds: proposed.requirementId !== null && carried !== undefined ? carried(proposed.requirementId) : [] },
     }));
   }
 }

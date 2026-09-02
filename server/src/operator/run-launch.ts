@@ -7,6 +7,21 @@
  * service. Nothing here assembles ids or plan sources by hand; the
  * Orchestrator refines the Requirements and the plan from its turns.
  *
+ * One operation, one root transaction. The Requirement revision, the Run
+ * with its Workspace preparation, the goal message, and the start are
+ * nested writes of one root, so a refusal at any point — another Run still
+ * active (the database's one-active-Run rule), a validation failure, a
+ * failed Workspace preparation, a failed insert, Event, or COMMIT — rolls
+ * every row back and runs the preparation port's compensation; nothing
+ * partially launched survives. The host is notified by the route only
+ * after the commit returned.
+ *
+ * The goal is recorded as the Run's first operator message whether or not
+ * the Run starts now: a deferred start (`start: false`) delivers exactly
+ * that message, in full, once — after a restart as well — and never
+ * substitutes a placeholder or records a second copy of it. A start with a
+ * replacement message records that message and delivers it instead.
+ *
  * Defaults come from the configuration and the canonical allocation rules:
  * the final reserve of a coding Run must fund the completion work — one
  * Orchestrator allocation for the final synthesis plus, when an Evaluator is
@@ -15,7 +30,7 @@
  * `allocationFits`, and a configured or requested value that cannot fund it
  * is refused with a message naming what to change.
  */
-import { addAllocation, allocationFits, allocationOfLimits, ValidationError, ZERO_ALLOCATION, type AcceptanceCriterionId, type Allocation, type ConversationId, type ProposedRequirement, type RequirementRevision, type Run, type RunCreateBody, type RunKind, type RunTarget } from "@agentique-console/core";
+import { addAllocation, allocationFits, allocationOfLimits, ConflictError, ValidationError, ZERO_ALLOCATION, type AcceptanceCriterionId, type Allocation, type ConversationId, type ConversationMessage, type ProposedRequirement, type RequirementRevision, type Run, type RunCreateBody, type RunKind, type RunTarget } from "@agentique-console/core";
 import type { ConsoleRuntime } from "../composition/console-runtime.ts";
 import type { Config } from "../config.ts";
 import { defaultTargetOf } from "./workspaces.ts";
@@ -52,9 +67,9 @@ export class RunLaunchService {
     private readonly defaults: LaunchDefaults,
   ) {}
 
-  /** Creates the Run (and, unless `start` is false, starts it) from the operator's goal and defaults; every refusal names its cause. */
+  /** Creates the Run (and, unless `start` is false, starts it) from the operator's goal and defaults, atomically; every refusal names its cause. */
   launch(conversationId: ConversationId, body: RunCreateBody): LaunchedRun {
-    const { stores } = this.runtime;
+    const { stores, ctx } = this.runtime;
     const conversation = stores.conversations.get(conversationId);
     const workspace = stores.workspaces.get(conversation.workspaceId);
     const kind = body.kind ?? this.defaults.runKind;
@@ -76,39 +91,55 @@ export class RunLaunchService {
     // The completion check: a deterministic Acceptance Criterion the coding Run declares, on the operator's Requirement.
     const check = body.completionCheck === undefined ? this.defaults.completionCheck : body.completionCheck;
     if (kind === "code" && check === null) throw new ValidationError("a coding Run declares a deterministic completion check (a command whose exit code decides completion)", { kind });
-    const authored = check === null ? null : this.authorRequirement(conversationId, body.goal, check);
-    const created = this.runtime.runCreation.create({
-      conversationId,
-      kind,
-      target,
-      budget,
-      orchestratorAgentDefinitionRevisionId: this.runtime.agents.builtins.orchestrator.id,
-      finalReserve,
-      orchestratorAllocation,
-      verificationPolicy: {
-        evaluatorAgentDefinitionRevisionId: evaluator === "reviewer" ? this.runtime.agents.builtins.reviewer.id : null,
-        runCompletionAcceptanceCriterionIds: authored === null ? [] : authored.criterionIds,
-      },
+    // The canonical transaction and compensation boundary: every write below joins this root and rolls back with it.
+    return ctx.tx.write(() => {
+      const authored = check === null ? null : this.authorRequirement(conversationId, body.goal, check);
+      const created = this.runtime.runCreation.create({
+        conversationId,
+        kind,
+        target,
+        budget,
+        orchestratorAgentDefinitionRevisionId: this.runtime.agents.builtins.orchestrator.id,
+        finalReserve,
+        orchestratorAllocation,
+        verificationPolicy: {
+          evaluatorAgentDefinitionRevisionId: evaluator === "reviewer" ? this.runtime.agents.builtins.reviewer.id : null,
+          runCompletionAcceptanceCriterionIds: authored === null ? [] : authored.criterionIds,
+        },
+      });
+      // The complete goal is the Run's first operator message, recorded now so a deferred start delivers exactly it.
+      const goal = stores.conversations.postMessage({ conversationId, author: "operator", content: body.goal, runId: created.run.id, invocationId: null });
+      const run = body.start === false ? created.run : this.runtime.runStart.start({ runId: created.run.id, conversationMessageId: goal.id }).run;
+      return { run, requirementRevision: authored?.revision ?? null, criterionIds: authored?.criterionIds ?? [] };
     });
-    let run = created.run;
-    if (body.start !== false) {
-      const message = stores.conversations.postMessage({ conversationId, author: "operator", content: body.goal, runId: run.id, invocationId: null });
-      run = this.runtime.runStart.start({ runId: run.id, conversationMessageId: message.id }).run;
-    }
-    return { run, requirementRevision: authored?.revision ?? null, criterionIds: authored?.criterionIds ?? [] };
   }
 
-  /** Starts a created Run from the operator's message (the goal by default). */
+  /**
+   * Starts a created Run: from a replacement message when one is given (recorded on the Conversation in the same transaction), otherwise
+   * from the goal message the launch recorded — delivered as it is, never re-posted. A Run that is not `created` is refused before anything
+   * is written, so a repeated or conflicting start records no message and prepares no second Invocation.
+   */
   start(run: Run, message: string | undefined): Run {
-    const { stores } = this.runtime;
-    const content = message ?? stores.conversations.listMessages(run.conversationId).find((m) => m.runId === run.id && m.author === "operator")?.content ?? "Proceed.";
-    const posted = stores.conversations.postMessage({ conversationId: run.conversationId, author: "operator", content, runId: run.id, invocationId: null });
-    return this.runtime.runStart.start({ runId: run.id, conversationMessageId: posted.id }).run;
+    const { stores, ctx } = this.runtime;
+    return ctx.tx.write(() => {
+      const current = stores.runs.get(run.id);
+      if (current.status !== "created") throw new ConflictError(`Run ${current.id} is ${current.status}; only a created Run starts`, { runId: current.id, status: current.status });
+      const input: ConversationMessage = message === undefined ? this.goalMessageOf(current) : stores.conversations.postMessage({ conversationId: current.conversationId, author: "operator", content: message, runId: current.id, invocationId: null });
+      return this.runtime.runStart.start({ runId: current.id, conversationMessageId: input.id }).run;
+    });
+  }
+
+  /** The goal message the launch recorded for the Run: its first operator message. */
+  private goalMessageOf(run: Run): ConversationMessage {
+    const goal = this.runtime.stores.conversations.firstMessageOf(run.id, "operator");
+    if (goal === null) throw new ValidationError(`Run ${run.id} has no recorded goal message; state the message to start it with`, { runId: run.id });
+    return goal;
   }
 
   /**
    * The operator's goal as a Requirement of the Conversation: appended to the current tree as one more leaf (kept Requirements keep
-   * their ids), carrying the completion check as its Acceptance Criterion; the first Run of a Conversation creates revision 1.
+   * their ids and the Acceptance Criteria they hold at the current revision — `acceptanceCriteria: []` proposes no new check for them),
+   * carrying the completion check as its Acceptance Criterion; the first Run of a Conversation creates revision 1.
    */
   private authorRequirement(conversationId: ConversationId, goal: string, check: { command: string; expectedExitCode?: number }): { revision: RequirementRevision; criterionIds: AcceptanceCriterionId[] } {
     const { stores } = this.runtime;

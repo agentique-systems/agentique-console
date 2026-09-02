@@ -295,7 +295,11 @@ export type ConversationUpdateBody = z.infer<typeof conversationUpdateBodySchema
 export const messageBodySchema = z.strictObject({ content: z.string().min(1).max(OPERATOR_MESSAGE_MAX_BYTES) });
 export type MessageBody = z.infer<typeof messageBodySchema>;
 
-/** The operator authors a Requirement revision: kept Requirements name their id, new ones are minted; criteria are authored in the revision. */
+/**
+ * The operator authors a Requirement revision: kept Requirements name their id and keep the Acceptance Criteria they hold at the
+ * current revision (an entry's `acceptanceCriteria` are added beside them, never a replacement); new Requirements are minted with
+ * exactly the criteria stated; Requirements left out are retired.
+ */
 export const requirementRevisionBodySchema = z.strictObject({ entries: proposedRequirementTreeSchema, rationale });
 export type RequirementRevisionBody = z.infer<typeof requirementRevisionBodySchema>;
 
@@ -333,6 +337,7 @@ export const runCreateBodySchema = z.strictObject({
 });
 export type RunCreateBody = z.infer<typeof runCreateBodySchema>;
 
+/** Starts a created Run: from the goal message the creation recorded (omitted), or from a replacement message recorded now and delivered instead. */
 export const runStartBodySchema = z.strictObject({ message: z.string().min(1).max(OPERATOR_MESSAGE_MAX_BYTES).optional() });
 export type RunStartBody = z.infer<typeof runStartBodySchema>;
 
