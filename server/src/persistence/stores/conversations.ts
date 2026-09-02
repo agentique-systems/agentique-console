@@ -15,6 +15,7 @@ import {
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { conversationMessages, conversations, invocations, runs, workspaces } from "../schema.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 import {
   assertSameConversation,
   conversationScope,
@@ -76,6 +77,18 @@ export class ConversationStore {
 
   listByWorkspace(workspaceId: WorkspaceId): Conversation[] {
     return this.ctx.db.select().from(conversations).where(eq(conversations.workspaceId, workspaceId)).all().map(toDomain);
+  }
+
+  /** One keyset page of a Workspace's Conversations by `(createdAt, id)`. */
+  pageByWorkspace(workspaceId: WorkspaceId, query: KeysetQuery): Conversation[] {
+    const key = [conversations.createdAt, conversations.id];
+    return this.ctx.db.select().from(conversations).where(and(eq(conversations.workspaceId, workspaceId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
+  }
+
+  /** One keyset page of every Conversation by `(createdAt, id)`. */
+  pageAll(query: KeysetQuery): Conversation[] {
+    const key = [conversations.createdAt, conversations.id];
+    return this.ctx.db.select().from(conversations).where(keysetWhere(key, query)).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   update(id: ConversationId, patch: { title?: string | null }, options?: WriteOptions): Conversation {
@@ -186,6 +199,12 @@ export class ConversationStore {
       .limit(1)
       .get();
     return row === undefined ? null : messageToDomain(row);
+  }
+
+  /** One keyset page of a Conversation's messages by `(createdAt, id)`, in either direction: the newest page first for a view, older pages on demand. */
+  pageMessages(conversationId: ConversationId, query: KeysetQuery): ConversationMessage[] {
+    const key = [conversationMessages.createdAt, conversationMessages.id];
+    return this.ctx.db.select().from(conversationMessages).where(and(eq(conversationMessages.conversationId, conversationId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(messageToDomain);
   }
 
   listMessages(conversationId: ConversationId): ConversationMessage[] {

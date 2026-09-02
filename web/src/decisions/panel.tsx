@@ -3,27 +3,46 @@ import { Link } from "react-router";
 import type { DecisionView, RunOverview } from "@agentique-console/core";
 import { useDecisionActions } from "@/api/mutations";
 import { useRunDecisions } from "@/api/queries";
-import { Notice, Panel, errorMessage } from "@/components/panel";
+import { PagedList } from "@/components/paging";
+import { Notice, Section, errorMessage } from "@/components/panel";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { timeAgo } from "@/lib/format";
 
+/**
+ * The Run's Decisions: the open ones first, as their own bounded page (they are never behind history, however long it is),
+ * then the history newest first, one page at a time.
+ */
 export function DecisionsPanel({ overview }: { overview: RunOverview }) {
-  const decisions = useRunDecisions(overview.run.id);
+  const open = useRunDecisions(overview.run.id, "open");
+  const history = useRunDecisions(overview.run.id);
   return (
-    <div className="mx-auto flex max-w-4xl flex-col gap-3" data-testid="decisions-panel">
-      <Panel query={decisions} empty={(page) => page.items.length === 0}>
-        {(page) => (
-          <>
-            {[...page.items]
-              .sort((a, b) => (a.action !== "none" ? -1 : 1) - (b.action !== "none" ? -1 : 1) || b.decision.createdAt.localeCompare(a.decision.createdAt))
-              .map((view) => (
+    <div className="mx-auto flex max-w-4xl flex-col gap-6" data-testid="decisions-panel">
+      <Section title="Open: your resolution is needed">
+        <PagedList query={open} idOf={(view) => view.decision.id} empty={<div className="px-3 py-4 text-xs text-muted-foreground">No open Decision.</div>} more={{ label: "Load more open Decisions", testId: "decisions-open-more" }}>
+          {(views) => (
+            <div className="flex flex-col gap-3" data-testid="decisions-open">
+              {views.map((view) => (
                 <DecisionCard key={view.decision.id} view={view} overview={overview} />
               ))}
-          </>
-        )}
-      </Panel>
+            </div>
+          )}
+        </PagedList>
+      </Section>
+      <Section title="History (newest first)">
+        <PagedList query={history} idOf={(view) => view.decision.id} more={{ label: "Load older Decisions", testId: "decisions-more" }}>
+          {(views) => (
+            <div className="flex flex-col gap-3" data-testid="decisions-history">
+              {views
+                .filter((view) => view.decision.status !== "open")
+                .map((view) => (
+                  <DecisionCard key={view.decision.id} view={view} overview={overview} />
+                ))}
+            </div>
+          )}
+        </PagedList>
+      </Section>
     </div>
   );
 }
@@ -37,7 +56,7 @@ function DecisionCard({ view, overview }: { view: DecisionView; overview: RunOve
   const mutation = action === "supersede" ? actions.supersede : actions.resolve;
   return (
     <article className="flex flex-col gap-2 rounded-md border border-border p-3 text-xs" data-decision={decision.id} data-action={action}>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <StatusBadge status={decision.status} />
         <span className="font-medium">{decision.kind.replaceAll("_", " ")}</span>
         <span className="text-3xs text-muted-foreground">

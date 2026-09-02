@@ -1,8 +1,8 @@
-import { budgetIncreaseRequestBodySchema, budgetIncreaseResolveBodySchema, pageOf, publicationRequestBodySchema, publicationResolveBodySchema, runPauseBodySchema, runStartBodySchema, signoffAcceptBodySchema, signoffRequestChangesBodySchema, type BudgetIncreaseResolveResponse, type PublicationRequestResponse, type PublicationResolveResponse, type RunControlResponse, type SignoffResolveResponse } from "@agentique-console/core";
-import { budgetResponse, decisionView, planResponse, publicationsResponse, runOverview, signoffResponse, taskLedger, usageResponse } from "../../operator/projections.ts";
+import { budgetIncreaseRequestBodySchema, budgetIncreaseResolveBodySchema, listDecisionsQuerySchema, planNodeScopedPageQuerySchema, publicationRequestBodySchema, publicationResolveBodySchema, runPauseBodySchema, runStartBodySchema, signoffAcceptBodySchema, signoffRequestChangesBodySchema, type BudgetIncreaseResolveResponse, type PublicationRequestResponse, type PublicationResolveResponse, type RunControlResponse, type SignoffResolveResponse, type TaskLedgerResponse } from "@agentique-console/core";
+import { budgetResponse, decisionView, planResponse, publicationsResponse, runOverview, signoffResponse, taskViews, usageResponse } from "../../operator/projections.ts";
 import { supportsPublication, WORKSPACE_CAPABILITIES } from "../../workspace-state/capabilities.ts";
 import { ApiError } from "../errors.ts";
-import { admit, id, notify, page, parse, type RouteHandlers } from "./support.ts";
+import { admit, CREATED_ID, id, notify, ORDINAL, page, pageResponse, parse, type RouteHandlers } from "./support.ts";
 
 export const runRoutes: Pick<
   RouteHandlers,
@@ -75,27 +75,30 @@ export const runRoutes: Pick<
   listRunPlanRevisions: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.plans.listRevisions(runId), (r) => String(r.number).padStart(9, "0"), page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.plans.pageRevisions(runId, q), { scope: `plan-revisions:${runId}`, keyOf: (r) => [r.number], shape: ORDINAL });
   },
   listRunInvocations: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.invocations.listByRun(runId), (i) => `${i.createdAt}/${i.id}`, page(request.query));
+    const query = parse(planNodeScopedPageQuerySchema, request.query, "query");
+    return pageResponse(query, (q) => ctx.app.runtime.stores.invocations.pageByRun(runId, q, query.planNodeId), { scope: `invocations:${runId}:${query.planNodeId ?? "*"}`, keyOf: (i) => [i.createdAt, i.id], shape: CREATED_ID });
   },
-  listRunTasks: (request, ctx) => {
+  listRunTasks: (request, ctx): TaskLedgerResponse => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return taskLedger(ctx.app.runtime, runId);
+    const query = parse(planNodeScopedPageQuerySchema, request.query, "query");
+    return pageResponse(query, (q) => taskViews(ctx.app.runtime, ctx.app.runtime.stores.tasks.pageByRun(runId, q, query.planNodeId)), { scope: `tasks:${runId}:${query.planNodeId ?? "*"}`, keyOf: (v) => [v.task.createdAt, v.task.id], shape: CREATED_ID });
   },
   listRunHandoffs: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.handoffs.listByRun(runId), (h) => h.id, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.handoffs.pageByRun(runId, q), { scope: `handoffs:${runId}`, keyOf: (h) => [h.createdAt, h.id], shape: CREATED_ID });
   },
   listRunDecisions: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.decisions.listByRun(runId).map(decisionView), (d) => `${d.decision.createdAt}/${d.decision.id}`, page(request.query));
+    const query = parse(listDecisionsQuerySchema, request.query, "query");
+    return pageResponse(query, (q) => ctx.app.runtime.stores.decisions.pageByRun(runId, q, query.status).map(decisionView), { scope: `decisions:${runId}:${query.status ?? "*"}`, keyOf: (d) => [d.decision.createdAt, d.decision.id], shape: CREATED_ID });
   },
   getRunBudget: (request, ctx) => {
     const runId = id("run", request.params.runId);
@@ -124,42 +127,44 @@ export const runRoutes: Pick<
   listRunEvaluations: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.evaluations.listByRun(runId), (e) => e.id, page(request.query));
+    const query = parse(planNodeScopedPageQuerySchema, request.query, "query");
+    return pageResponse(query, (q) => ctx.app.runtime.stores.evaluations.pageByRun(runId, q, query.planNodeId), { scope: `evaluations:${runId}:${query.planNodeId ?? "*"}`, keyOf: (e) => [e.createdAt, e.id], shape: CREATED_ID });
   },
   listRunGates: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.gates.listByRun(runId), (g) => `${g.openedAt}/${g.id}`, page(request.query));
+    const query = parse(planNodeScopedPageQuerySchema, request.query, "query");
+    return pageResponse(query, (q) => ctx.app.runtime.stores.gates.pageByRun(runId, q, query.planNodeId), { scope: `gates:${runId}:${query.planNodeId ?? "*"}`, keyOf: (g) => [g.openedAt, g.id], shape: CREATED_ID });
   },
   listRunSnapshots: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.snapshots.listByRun(runId), (s) => `${s.takenAt}/${s.id}`, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.snapshots.pageByRun(runId, q), { scope: `snapshots:${runId}`, keyOf: (s) => [s.takenAt, s.id], shape: CREATED_ID });
   },
   listRunChangesets: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.changesets.listByRun(runId), (c) => c.id, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.changesets.pageByRun(runId, q), { scope: `changesets:${runId}`, keyOf: (c) => [c.createdAt, c.id], shape: CREATED_ID });
   },
   listRunArtifacts: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.artifacts.listByRun(runId), (a) => `${a.createdAt}/${a.id}`, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.artifacts.pageByRun(runId, q), { scope: `artifacts:${runId}`, keyOf: (a) => [a.createdAt, a.id], shape: CREATED_ID });
   },
   getRunUsage: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return usageResponse(ctx.app.runtime, runId);
+    return usageResponse(ctx.app.runtime, runId, page(request.query));
   },
   listRunCompletionRequests: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.completionRequests.listByRun(runId), (r) => `${r.createdAt}/${r.id}`, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.completionRequests.pageByRun(runId, q), { scope: `completion-requests:${runId}`, keyOf: (r) => [r.createdAt, r.id], shape: CREATED_ID });
   },
   listRunOrchestratorInputs: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.orchestratorInputs.listByRun(runId), (i) => `${i.createdAt}/${i.id}`, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.orchestratorInputs.pageByRun(runId, q), { scope: `orchestrator-inputs:${runId}`, keyOf: (i) => [i.createdAt, i.id], shape: CREATED_ID });
   },
   getRunSignoff: (request, ctx) => {
     const runId = id("run", request.params.runId);

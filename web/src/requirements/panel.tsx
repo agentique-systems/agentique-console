@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ProposedRequirement, RequirementProposal, RequirementView, RunOverview } from "@agentique-console/core";
 import { useProposalReview } from "@/api/mutations";
 import { useConversationRequirements, useRunProposals } from "@/api/queries";
+import { PagedList } from "@/components/paging";
 import { Notice, Panel, Section, errorMessage } from "@/components/panel";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -12,32 +13,24 @@ export function RequirementsPanel({ overview }: { overview: RunOverview }) {
   const proposals = useRunProposals(overview.run.id);
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
-      <Panel query={proposals}>
-        {(page) => {
-          const open = page.items.find((p) => p.status === "proposed");
-          return (
-            <>
-              {open !== undefined && <ProposalReview proposal={open} overview={overview} />}
-              {page.items.filter((p) => p.status !== "proposed").length > 0 && (
-                <Section title="Earlier proposals">
-                  <ul className="flex flex-col gap-1 text-xs">
-                    {page.items
-                      .filter((p) => p.status !== "proposed")
-                      .map((p) => (
-                        <li key={p.id} className="flex items-center gap-2">
-                          <StatusBadge status={p.status} />
-                          <span className="text-muted-foreground">
-                            {p.entries.length} entr{p.entries.length === 1 ? "y" : "ies"} · {p.rationale}
-                          </span>
-                        </li>
-                      ))}
-                  </ul>
-                </Section>
-              )}
-            </>
-          );
-        }}
-      </Panel>
+      {/* The open proposal is the overview's own fact: never behind a page of history. */}
+      {overview.openProposal !== null && <ProposalReview key={overview.openProposal.id} proposal={overview.openProposal} overview={overview} />}
+      <Section title="Proposals (newest first)">
+        <PagedList query={proposals} idOf={(p) => p.id} empty={<div className="px-3 py-4 text-xs text-muted-foreground">No proposal yet.</div>} more={{ label: "Load older proposals", testId: "proposals-more" }}>
+          {(items) => (
+            <ul className="flex flex-col gap-1 text-xs" data-testid="proposals">
+              {items.map((p) => (
+                <li key={p.id} className="flex items-center gap-2" data-proposal={p.id}>
+                  <StatusBadge status={p.status} />
+                  <span className="text-muted-foreground">
+                    {p.entries.length} entr{p.entries.length === 1 ? "y" : "ies"} · {p.rationale}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </PagedList>
+      </Section>
       <Section title="Requirements (current revision)">
         <Panel query={requirements} empty={(r) => r.requirements.length === 0}>
           {(r) => (

@@ -7,6 +7,7 @@ import {
   type InvocationId,
   type ProposedRequirement,
   type RequirementProposal,
+  type RequirementProposalStatus,
   type RequirementProposalId,
   type RequirementRevisionId,
   type RunId,
@@ -14,6 +15,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { invocations, requirementProposals, requirementRevisions } from "../schema.ts";
 import { assertSameRun, loadRunRef, OPERATOR_ACTOR, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 type Row = typeof requirementProposals.$inferSelect;
 
@@ -190,6 +192,12 @@ export class RequirementProposalStore {
   }
 
   /** Every proposal of the Run, oldest first. */
+  /** One keyset page of a Run's RequirementProposals by `(createdAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery, status?: RequirementProposalStatus): RequirementProposal[] {
+    const key = [requirementProposals.createdAt, requirementProposals.id];
+    return this.ctx.db.select().from(requirementProposals).where(and(eq(requirementProposals.runId, runId), (status === undefined ? undefined : eq(requirementProposals.status, status)), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
+  }
+
   listByRun(runId: RunId): RequirementProposal[] {
     return this.ctx.db.select().from(requirementProposals).where(eq(requirementProposals.runId, runId)).orderBy(asc(requirementProposals.createdAt), asc(requirementProposals.id)).all().map(toDomain);
   }

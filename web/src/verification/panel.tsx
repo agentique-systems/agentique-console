@@ -1,6 +1,7 @@
 import type { FinalReport, RunOverview } from "@agentique-console/core";
 import { useArtifactText, useRunChangesets, useRunEvaluations, useRunGates } from "@/api/queries";
 import { ArtifactLink, ArtifactContent } from "@/artifacts/viewer";
+import { PagedList } from "@/components/paging";
 import { Facts, Notice, Panel, Section } from "@/components/panel";
 import { StatusBadge } from "@/components/status-badge";
 import { timeAgo } from "@/lib/format";
@@ -17,13 +18,13 @@ export function VerificationPanel({ overview }: { overview: RunOverview }) {
         </Notice>
       )}
       {overview.finalReportArtifactId !== null && <FinalReportView artifactId={overview.finalReportArtifactId} />}
-      <Section title="Gates">
-        <Panel query={gates} empty={(g) => g.items.length === 0}>
-          {(g) => (
+      <Section title="Gates (newest first)">
+        <PagedList query={gates} idOf={(gate) => gate.id} more={{ label: "Load older Gates", testId: "gates-more" }}>
+          {(items) => (
             <ul className="flex flex-col gap-1 text-xs" data-testid="gates">
-              {[...g.items].reverse().map((gate) => (
+              {items.map((gate) => (
                 <li key={gate.id} className="rounded-md border border-border p-2" data-gate={gate.kind}>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <StatusBadge status={gate.status} />
                     <span className="font-medium">
                       {gate.kind.replaceAll("_", " ")} #{gate.ordinal}
@@ -37,13 +38,13 @@ export function VerificationPanel({ overview }: { overview: RunOverview }) {
               ))}
             </ul>
           )}
-        </Panel>
+        </PagedList>
       </Section>
-      <Section title="Evaluations">
-        <Panel query={evaluations} empty={(e) => e.items.length === 0}>
-          {(e) => (
+      <Section title="Evaluations (newest first)">
+        <PagedList query={evaluations} idOf={(ev) => ev.id} more={{ label: "Load older Evaluations", testId: "evaluations-more" }}>
+          {(items) => (
             <ul className="flex flex-col gap-1 text-xs" data-testid="evaluations">
-              {e.items.map((ev) => (
+              {items.map((ev) => (
                 <li key={ev.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1">
                   <StatusBadge status={ev.verdict === "pass" ? "passed" : ev.verdict === "fail" ? "failed" : "waiting"} label={ev.verdict} />
                   <span>{ev.subject.kind.replaceAll("_", " ")}</span>
@@ -57,14 +58,14 @@ export function VerificationPanel({ overview }: { overview: RunOverview }) {
               ))}
             </ul>
           )}
-        </Panel>
+        </PagedList>
       </Section>
-      <Section title="Changesets">
-        <Panel query={changesets} empty={(c) => c.items.length === 0}>
-          {(c) => (
+      <Section title="Changesets (newest first)">
+        <PagedList query={changesets} idOf={(cs) => cs.id} more={{ label: "Load older Changesets", testId: "changesets-more" }}>
+          {(items) => (
             <ul className="flex flex-col gap-1 text-xs" data-testid="changesets">
-              {c.items.map((cs) => (
-                <li key={cs.id} className="flex items-center gap-2 rounded-md border border-border px-2 py-1">
+              {items.map((cs) => (
+                <li key={cs.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1">
                   <StatusBadge status={cs.integrationStatus} />
                   <span>{cs.kind}</span>
                   <span className="font-mono text-3xs text-muted-foreground">{cs.id.slice(0, 12)}</span>
@@ -74,7 +75,7 @@ export function VerificationPanel({ overview }: { overview: RunOverview }) {
               ))}
             </ul>
           )}
-        </Panel>
+        </PagedList>
       </Section>
     </div>
   );

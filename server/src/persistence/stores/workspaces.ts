@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 import {
   parseOrThrow,
   workspaceInputSchema,
@@ -42,6 +43,12 @@ export class WorkspaceStore {
 
   list(): Workspace[] {
     return this.ctx.db.select().from(workspaces).all().map(toDomain);
+  }
+
+  /** One keyset page of every Workspace by `(createdAt, id)`. */
+  page(query: KeysetQuery): Workspace[] {
+    const key = [workspaces.createdAt, workspaces.id];
+    return this.ctx.db.select().from(workspaces).where(keysetWhere(key, query)).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   update(id: WorkspaceId, patch: { name?: string }, options?: WriteOptions): Workspace {

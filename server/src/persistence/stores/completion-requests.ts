@@ -19,6 +19,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, completionRequests, gates, invocations, runs, runtimeToolCalls } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 type Row = typeof completionRequests.$inferSelect;
 
@@ -88,6 +89,12 @@ export class CompletionRequestStore {
 
   get(id: CompletionRequestId): CompletionRequest {
     return toDomain(requireRow(this.ctx.db.select().from(completionRequests).where(eq(completionRequests.id, id)).get(), "CompletionRequest", id));
+  }
+
+  /** One keyset page of a Run's CompletionRequests by `(createdAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery): CompletionRequest[] {
+    const key = [completionRequests.createdAt, completionRequests.id];
+    return this.ctx.db.select().from(completionRequests).where(and(eq(completionRequests.runId, runId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   listByRun(runId: RunId): CompletionRequest[] {

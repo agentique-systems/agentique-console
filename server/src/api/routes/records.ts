@@ -1,7 +1,7 @@
-import { ARTIFACT_CONTENT_MAX_BYTES, ARTIFACT_DOWNLOAD_MAX_BYTES, artifactContentQuerySchema, artifactPresentationOf, decisionResolveBodySchema, pageOf, type ArtifactResponse, type DecisionResolveResponse, type PublicationAdvanceResponse, type TaskView } from "@agentique-console/core";
-import { attemptResponse, decisionView, invocationResponse, planNodeResponse, publicationView, taskLedger } from "../../operator/projections.ts";
+import { ARTIFACT_CONTENT_MAX_BYTES, ARTIFACT_DOWNLOAD_MAX_BYTES, artifactContentQuerySchema, artifactPresentationOf, decisionResolveBodySchema, type ArtifactResponse, type DecisionResolveResponse, type PublicationAdvanceResponse, type TaskView } from "@agentique-console/core";
+import { attemptResponse, decisionView, invocationResponse, planNodeResponse, publicationView, taskViews } from "../../operator/projections.ts";
 import { ApiError } from "../errors.ts";
-import { admit, id, notify, page, parse, type RouteHandlers, type RouteRequest } from "./support.ts";
+import { admit, id, notify, ORDINAL, page, pageResponse, parse, type RouteHandlers, type RouteRequest } from "./support.ts";
 import type { AppContext } from "../../context.ts";
 
 /** A media type that a browser would execute is never served inline; text and JSON are served as text with an explicit charset. */
@@ -70,7 +70,7 @@ export const recordRoutes: Pick<
   listInvocationAttempts: (request, ctx) => {
     const invocationId = id("invocation", request.params.invocationId);
     ctx.app.runtime.stores.invocations.get(invocationId);
-    return pageOf(ctx.app.runtime.stores.invocations.listAttempts(invocationId), (a) => String(a.number).padStart(9, "0"), page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.invocations.pageAttempts(invocationId, q), { scope: `attempts:${invocationId}`, keyOf: (a) => [a.number], shape: ORDINAL });
   },
   getAttempt: (request, ctx) => attemptResponse(ctx.app.runtime, id("attempt", request.params.attemptId)),
   getAttemptTranscript: (request, ctx) => {
@@ -81,7 +81,7 @@ export const recordRoutes: Pick<
   },
   getTask: (request, ctx): TaskView => {
     const task = ctx.app.runtime.stores.tasks.get(id("task", request.params.taskId));
-    const view = taskLedger(ctx.app.runtime, task.runId).tasks.find((t) => t.task.id === task.id);
+    const view = taskViews(ctx.app.runtime, [task])[0];
     if (view === undefined) throw new ApiError("not_found", `Task ${task.id} not found`, { taskId: task.id });
     return view;
   },

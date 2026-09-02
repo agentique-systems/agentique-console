@@ -36,7 +36,7 @@ export interface CallOptions {
   signal?: AbortSignal;
 }
 
-type JsonRoute = Exclude<ApiRouteName, "events" | "getArtifactContent" | "downloadArtifact" | "getAttemptTranscript">;
+export type JsonRoute = Exclude<ApiRouteName, "events" | "getArtifactContent" | "downloadArtifact" | "getAttemptTranscript">;
 
 export async function api<N extends JsonRoute>(name: N, options: CallOptions = {}): Promise<ApiResponses[N]> {
   const route = API_ROUTES[name];

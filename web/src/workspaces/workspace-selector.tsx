@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronDown, FolderGit2, Plus } from "lucide-react";
 import type { WorkspaceResponse } from "@agentique-console/core";
-import { useWorkspaces } from "@/api/queries";
+import { itemsOf, useWorkspaces } from "@/api/queries";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -18,7 +18,8 @@ export function WorkspaceSelector({ selected }: { selected: WorkspaceResponse })
   const [open, setOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const select = useScopeStore((s) => s.select);
-  const workspaces = useWorkspaces().data?.items ?? [];
+  const paged = useWorkspaces();
+  const workspaces = itemsOf(paged.data, (row) => row.workspace.id);
   return (
     <>
       <Popover open={open} onOpenChange={setOpen}>
@@ -53,6 +54,13 @@ export function WorkspaceSelector({ selected }: { selected: WorkspaceResponse })
                   </CommandItem>
                 ))}
               </CommandGroup>
+              {paged.hasNextPage && (
+                <CommandGroup>
+                  <CommandItem value="load more workspaces" onSelect={() => void paged.fetchNextPage()} className="gap-2" data-testid="workspaces-more">
+                    {paged.isFetchingNextPage ? "Loading…" : "Load more Workspaces…"}
+                  </CommandItem>
+                </CommandGroup>
+              )}
               <CommandSeparator />
               <CommandGroup>
                 <CommandItem

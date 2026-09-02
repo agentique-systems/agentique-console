@@ -14,7 +14,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { apiPath, type Event, type EventStreamFrame } from "@agentique-console/core";
 import { apiUrl } from "@/api/client";
-import { keys } from "@/api/keys";
+import { isImmutableHistory, keys } from "@/api/keys";
 import { useConnectionStore } from "@/stores/connection";
 import { useOutputStore } from "@/stores/output";
 
@@ -104,8 +104,9 @@ export function createSubscription(client: QueryClient, options: { fetchImpl?: t
         return;
       case "caught_up":
         connection().noteSeq(frame.seq);
-        // A reconnect may have missed Events outside the replayed scope; every mounted projection refreshes once.
-        void client.invalidateQueries();
+        // A reconnect may have missed Events outside the replayed scope; every mounted projection refreshes once — except the
+        // immutable message history, which no Event can change.
+        void client.invalidateQueries({ predicate: (query) => !isImmutableHistory(query.queryKey) });
         return;
       case "event":
         connection().noteSeq(frame.event.seq);

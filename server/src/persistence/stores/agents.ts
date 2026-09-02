@@ -20,6 +20,7 @@ import { sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
 import { agentDefinitionRevisions, agentDefinitions, conversations, decisions, snapshots } from "../schema.ts";
 import { assertSameConversation, requireRow, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 function revisionToDomain(row: typeof agentDefinitionRevisions.$inferSelect): AgentDefinitionRevision {
   return parseOrThrow(agentDefinitionRevisionSchema, row, "AgentDefinitionRevision row");
@@ -198,6 +199,24 @@ export class AgentDefinitionStore {
 
   getRevision(id: AgentDefinitionRevisionId): AgentDefinitionRevision {
     return revisionToDomain(requireRow(this.ctx.db.select().from(agentDefinitionRevisions).where(eq(agentDefinitionRevisions.id, id)).get(), "AgentDefinitionRevision", id));
+  }
+
+  /** One keyset page of a definition's revisions by `(createdAt, id)`. */
+  pageRevisions(definitionId: AgentDefinitionId, query: KeysetQuery): AgentDefinitionRevision[] {
+    const key = [agentDefinitionRevisions.createdAt, agentDefinitionRevisions.id];
+    return this.ctx.db
+      .select()
+      .from(agentDefinitionRevisions)
+      .where(and(eq(agentDefinitionRevisions.definitionId, definitionId), keysetWhere(key, query)))
+      .orderBy(...keysetOrder(key, query))
+      .limit(query.limit)
+      .all()
+      .map(revisionToDomain);
+  }
+
+  /** How many revisions a definition has (one indexed count). */
+  countRevisions(definitionId: AgentDefinitionId): number {
+    return this.ctx.db.select({ n: sql<number>`count(*)` }).from(agentDefinitionRevisions).where(eq(agentDefinitionRevisions.definitionId, definitionId)).get()?.n ?? 0;
   }
 
   listRevisions(definitionId: AgentDefinitionId): AgentDefinitionRevision[] {

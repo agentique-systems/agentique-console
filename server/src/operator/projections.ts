@@ -7,7 +7,10 @@
  * Run row and its Publications, never a second state machine.
  */
 import {
+  AGGREGATE_HISTORY_WINDOW,
   PUBLICATION_MACHINE,
+  REQUIREMENT_HISTORY_WINDOW,
+  REQUIREMENT_HISTORY_WINDOW_SINGLE,
   type ArtifactId,
   type AttemptResponse,
   type BudgetResponse,
@@ -31,18 +34,23 @@ import {
   type RunPhase,
   type RunProjection,
   type SignoffResponse,
-  type TaskLedgerResponse,
+  type Task,
   type TaskView,
   type UsageResponse,
   type WorkspaceKind,
+  type PageQuery,
   publicationReportSchema,
 } from "@agentique-console/core";
 import type { ConsoleRuntime } from "../composition/console-runtime.ts";
 import { CompletionFacts } from "../execution/completion-requests.ts";
 import { projectNodeTasks } from "../execution/task-projection.ts";
 import { supportsPublication, WORKSPACE_CAPABILITIES } from "../workspace-state/capabilities.ts";
+import { CREATED_ID, pageResponse } from "../api/routes/support.ts";
 
-const HISTORY_LIMIT = 20;
+/** The most recent `AGGREGATE_HISTORY_WINDOW` records of a history, in their canonical order, with the total: a compact summary that hides nothing. */
+function windowed<T>(records: T[]): { window: T[]; count: number } {
+  return { window: records.slice(-AGGREGATE_HISTORY_WINDOW), count: records.length };
+}
 
 export function runPhaseOf(runtime: ConsoleRuntime, run: Run, kind: WorkspaceKind): RunPhase {
   switch (run.status) {
@@ -187,15 +195,25 @@ export function planResponse(runtime: ConsoleRuntime, runId: RunId): PlanRespons
 
 export function planNodeResponse(runtime: ConsoleRuntime, node: PlanNode): PlanNodeResponse {
   const { stores } = runtime;
+  const invocations = windowed(stores.invocations.listByPlanNode(node.id));
+  const tasks = windowed(stores.tasks.listByPlanNode(node.id));
+  const gates = windowed(stores.gates.listByPlanNode(node.id));
+  const evaluations = windowed(stores.evaluations.listByPlanNode(node.id));
+  const extensions = windowed(stores.allocationExtensions.listByPlanNode(node.id));
   return {
     node,
-    invocations: stores.invocations.listByPlanNode(node.id),
-    tasks: stores.tasks.listByPlanNode(node.id),
-    gates: stores.gates.listByPlanNode(node.id),
-    evaluations: stores.evaluations.listByPlanNode(node.id),
+    invocations: invocations.window,
+    invocationCount: invocations.count,
+    tasks: tasks.window,
+    taskCount: tasks.count,
+    gates: gates.window,
+    gateCount: gates.count,
+    evaluations: evaluations.window,
+    evaluationCount: evaluations.count,
     usage: stores.usage.totalsForPlanNode(node.id),
     allocation: node.kind === "pattern" ? allocationOf(runtime, node.id) : null,
-    extensions: stores.allocationExtensions.listByPlanNode(node.id),
+    extensions: extensions.window,
+    extensionCount: extensions.count,
   };
 }
 
@@ -227,11 +245,14 @@ export function attemptResponse(runtime: ConsoleRuntime, attemptId: AttemptRespo
   };
 }
 
-export function taskLedger(runtime: ConsoleRuntime, runId: RunId): TaskLedgerResponse {
+/** The ledger views of the given Tasks (one page, or one Task): dependencies from the Run's edges, Coordinator states from the node projection, outputs by id. */
+export function taskViews(runtime: ConsoleRuntime, tasks: Task[]): TaskView[] {
   const { stores } = runtime;
-  const tasks = stores.tasks.listByRun(runId);
-  const dependencies = stores.tasks.dependencies(runId);
-  const artifacts = new Map(stores.artifacts.listByRun(runId).map((a) => [a.id, a] as const));
+  if (tasks.length === 0) return [];
+  const runIds = [...new Set(tasks.map((t) => t.runId))];
+  const dependencies = runIds.flatMap((runId) => stores.tasks.dependencies(runId));
+  const outputIds = [...new Set(tasks.flatMap((t) => t.outputArtifactIds))];
+  const artifacts = new Map(stores.artifacts.getMany(outputIds).map((a) => [a.id, a] as const));
   const states = new Map<string, TaskView["state"]>();
   const supersededBy = new Map<string, string>();
   const nodeIds = new Set(tasks.map((t) => t.planNodeId).filter((id): id is NonNullable<typeof id> => id !== null));
@@ -239,34 +260,33 @@ export function taskLedger(runtime: ConsoleRuntime, runId: RunId): TaskLedgerRes
     const node = stores.plans.getNode(planNodeId);
     if (node.kind !== "pattern" || node.pattern !== "coordinator_worker") continue;
     try {
-      const projection = projectNodeTasks(stores, { id: node.id, runId });
+      const projection = projectNodeTasks(stores, { id: node.id, runId: node.runId });
       for (const [taskId, state] of projection.states) states.set(taskId, { kind: state.kind, ...("awaiting" in state ? { awaiting: state.awaiting } : {}), ...("blockReason" in state ? { blockReason: state.blockReason } : {}) } as TaskView["state"]);
       for (const [taskId, by] of projection.supersededBy) supersededBy.set(taskId, by);
     } catch {
       // A contradictory ledger leaves its Tasks without a projected state; the rows still show.
     }
   }
-  return {
-    tasks: tasks.map((task) => ({
-      task,
-      dependencies: dependencies.filter((d) => d.taskId === task.id).map((d) => d.dependsOnTaskId),
-      dependents: dependencies.filter((d) => d.dependsOnTaskId === task.id).map((d) => d.taskId),
-      supersededBy: (supersededBy.get(task.id) as TaskView["supersededBy"]) ?? null,
-      state: states.get(task.id) ?? null,
-      outputs: task.outputArtifactIds.map((id) => artifacts.get(id)).filter((a): a is NonNullable<typeof a> => a !== undefined),
-    })),
-    dependencies,
-  };
+  return tasks.map((task) => ({
+    task,
+    dependencies: dependencies.filter((d) => d.taskId === task.id).map((d) => d.dependsOnTaskId),
+    dependents: dependencies.filter((d) => d.dependsOnTaskId === task.id).map((d) => d.taskId),
+    supersededBy: (supersededBy.get(task.id) as TaskView["supersededBy"]) ?? null,
+    state: states.get(task.id) ?? null,
+    outputs: task.outputArtifactIds.map((id) => artifacts.get(id)).filter((a): a is NonNullable<typeof a> => a !== undefined),
+  }));
 }
 
-export function requirementView(runtime: ConsoleRuntime, requirement: Requirement): RequirementView {
+export function requirementView(runtime: ConsoleRuntime, requirement: Requirement, detail: "list" | "single" = "list"): RequirementView {
   const { stores } = runtime;
   const revision = stores.requirements.currentRevision(requirement.conversationId);
+  const history = stores.requirements.history(requirement.id);
   return {
     requirement,
     entry: revision?.tree.find((e) => e.id === requirement.id) ?? null,
     criteria: stores.requirements.listAcceptanceCriteria({ requirementId: requirement.id }),
-    history: stores.requirements.history(requirement.id).slice(-HISTORY_LIMIT),
+    history: history.slice(-(detail === "single" ? REQUIREMENT_HISTORY_WINDOW_SINGLE : REQUIREMENT_HISTORY_WINDOW)),
+    historyCount: history.length,
     waiverDecisionId: stores.requirements.latestWaiverDecisionOf(requirement.id),
   };
 }
@@ -276,7 +296,7 @@ export function requirementsResponse(runtime: ConsoleRuntime, conversationId: Re
   const order = new Map((revision?.tree ?? []).map((e, i) => [e.id, i] as const));
   const requirements = runtime.stores.requirements
     .listByConversation(conversationId)
-    .map((r) => requirementView(runtime, r))
+    .map((r) => requirementView(runtime, r, "list"))
     .sort((a, b) => (order.get(a.requirement.id) ?? 1e9) - (order.get(b.requirement.id) ?? 1e9) || (a.requirement.id < b.requirement.id ? -1 : 1));
   return { revision, requirements };
 }
@@ -294,14 +314,15 @@ export function budgetResponse(runtime: ConsoleRuntime, runId: RunId): BudgetRes
   return { ...projection, requiredFinalAllocation: required };
 }
 
-export function usageResponse(runtime: ConsoleRuntime, runId: RunId): UsageResponse {
+export function usageResponse(runtime: ConsoleRuntime, runId: RunId, query: PageQuery): UsageResponse {
   const { stores } = runtime;
   const nodes = stores.plans.listNodes(runId);
-  const invocations = stores.invocations.listByRun(runId);
   return {
     run: stores.usage.totalsForRun(runId),
     byPlanNode: nodes.map((n) => ({ planNodeId: n.id, totals: stores.usage.totalsForPlanNode(n.id) })),
-    byInvocation: invocations.map((i) => ({ invocationId: i.id, planNodeId: i.planNodeId, totals: stores.usage.totalsForInvocation(i.id) })),
+    byInvocation: pageResponse(query, (q) =>
+      stores.invocations.pageByRun(runId, q).map((i) => ({ invocationId: i.id, planNodeId: i.planNodeId, createdAt: i.createdAt, totals: stores.usage.totalsForInvocation(i.id) })), { scope: `usage-invocations:${runId}`, keyOf: (u) => [u.createdAt, u.invocationId], shape: CREATED_ID },
+    ),
   };
 }
 

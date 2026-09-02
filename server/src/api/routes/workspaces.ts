@@ -1,7 +1,7 @@
-import { pageOf, workspaceCreateBodySchema, workspaceUpdateBodySchema, type AgentDefinitionLoadResponse, type AgentDefinitionResponse, type AgentDefinitionSummary, type ConversationResponse, type Page, type Run, type WorkspaceAgentDefinitionsResponse, type AgentDefinitionRevision } from "@agentique-console/core";
+import { workspaceCreateBodySchema, workspaceUpdateBodySchema, type AgentDefinitionLoadResponse, type AgentDefinitionResponse, type AgentDefinitionSummary, type ConversationResponse, type Page, type Run, type WorkspaceAgentDefinitionsResponse, type AgentDefinitionRevision } from "@agentique-console/core";
 import type { ConsoleRuntime } from "../../composition/console-runtime.ts";
 import { ApiError } from "../errors.ts";
-import { admit, created, id, page, parse, type RouteHandlers } from "./support.ts";
+import { admit, CREATED_ID, created, id, page, pageResponse, parse, type RouteHandlers } from "./support.ts";
 
 export function conversationResponse(runtime: ConsoleRuntime, conversationId: ConversationResponse["conversation"]["id"]): ConversationResponse {
   const conversation = runtime.stores.conversations.get(conversationId);
@@ -20,7 +20,7 @@ function summaries(runtime: ConsoleRuntime, filter: (revision: AgentDefinitionRe
 }
 
 export const workspaceRoutes: Pick<RouteHandlers, "listWorkspaces" | "createWorkspace" | "getWorkspace" | "updateWorkspace" | "listWorkspaceConversations" | "listWorkspaceRuns" | "listWorkspaceAgentDefinitions" | "loadWorkspaceAgentDefinitions" | "getAgentDefinition" | "listAgentDefinitionRevisions" | "getAgentDefinitionRevision"> = {
-  listWorkspaces: (request, ctx) => pageOf(ctx.app.workspaces.list(), (w) => w.workspace.id, page(request.query)),
+  listWorkspaces: (request, ctx) => pageResponse(page(request.query), (q) => ctx.app.runtime.stores.workspaces.page(q).map((w) => ctx.app.workspaces.view(w)), { scope: "workspaces", keyOf: (w) => [w.workspace.createdAt, w.workspace.id], shape: CREATED_ID }),
   createWorkspace: async (request, ctx) => {
     admit(ctx);
     return created(request.reply, await ctx.app.workspaces.create(parse(workspaceCreateBodySchema, request.body, "body")));
@@ -33,16 +33,12 @@ export const workspaceRoutes: Pick<RouteHandlers, "listWorkspaces" | "createWork
   listWorkspaceConversations: (request, ctx): Page<ConversationResponse> => {
     const workspaceId = id("workspace", request.params.workspaceId);
     ctx.app.runtime.stores.workspaces.get(workspaceId);
-    return pageOf(
-      ctx.app.runtime.stores.conversations.listByWorkspace(workspaceId).map((c) => conversationResponse(ctx.app.runtime, c.id)),
-      (c) => c.conversation.id,
-      page(request.query),
-    );
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.conversations.pageByWorkspace(workspaceId, q).map((c) => conversationResponse(ctx.app.runtime, c.id)), { scope: `conversations:${workspaceId}`, keyOf: (c) => [c.conversation.createdAt, c.conversation.id], shape: CREATED_ID });
   },
   listWorkspaceRuns: (request, ctx): Page<Run> => {
     const workspaceId = id("workspace", request.params.workspaceId);
     ctx.app.runtime.stores.workspaces.get(workspaceId);
-    return pageOf(ctx.app.runtime.stores.runs.listByWorkspace(workspaceId), (r) => r.id, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.runs.pageByWorkspace(workspaceId, q), { scope: `runs:${workspaceId}`, keyOf: (r) => [r.createdAt, r.id], shape: CREATED_ID });
   },
   listWorkspaceAgentDefinitions: (request, ctx): WorkspaceAgentDefinitionsResponse => {
     const workspaceId = id("workspace", request.params.workspaceId);
@@ -71,12 +67,15 @@ export const workspaceRoutes: Pick<RouteHandlers, "listWorkspaces" | "createWork
   getAgentDefinition: (request, ctx): AgentDefinitionResponse => {
     const definitionId = id("agentDefinition", request.params.agentDefinitionId);
     const { stores } = ctx.app.runtime;
-    return { definition: stores.agents.getDefinition(definitionId), revisions: stores.agents.listRevisions(definitionId) };
+    const definition = stores.agents.getDefinition(definitionId);
+    // The latest revision and the count: the history pages from its own route.
+    const latest = stores.agents.pageRevisions(definitionId, { after: null, order: "desc", limit: 1 })[0] ?? null;
+    return { definition, latestRevision: latest, revisionCount: stores.agents.countRevisions(definitionId) };
   },
   listAgentDefinitionRevisions: (request, ctx) => {
     const definitionId = id("agentDefinition", request.params.agentDefinitionId);
     ctx.app.runtime.stores.agents.getDefinition(definitionId);
-    return pageOf(ctx.app.runtime.stores.agents.listRevisions(definitionId), (r) => r.id, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.agents.pageRevisions(definitionId, q), { scope: `agent-definition-revisions:${definitionId}`, keyOf: (r) => [r.createdAt, r.id], shape: CREATED_ID });
   },
   getAgentDefinitionRevision: (request, ctx) => {
     const definitionId = id("agentDefinition", request.params.agentDefinitionId);

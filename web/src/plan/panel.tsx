@@ -117,12 +117,19 @@ function NodeInspector({ planNodeId, runId }: { planNodeId: string; runId: strin
                 ["Wait", n.node.waitReason ?? "—"],
                 ["Allocation", n.allocation === null ? "—" : `${allocation(n.allocation.effective)} (used ${allocation(n.allocation.account.consumed)})`],
                 ["Usage", usage(n.usage)],
-                ["Tasks", n.tasks.length],
-                ["Gates", n.gates.map((g) => `${g.kind} ${g.status}`).join(", ") || "—"],
+                ["Tasks", n.taskCount],
+                ["Gates", `${n.gates.map((g) => `${g.kind} ${g.status}`).join(", ") || "—"}${n.gateCount > n.gates.length ? ` (${n.gateCount - n.gates.length} older)` : ""}`],
+                ["Evaluations", n.evaluationCount],
+                ["Extensions", n.extensionCount],
               ]}
             />
           </Section>
-          <Section title="Invocations">
+          <Section title={`Invocations (${n.invocationCount})`}>
+            {n.invocationCount > n.invocations.length && (
+              <div className="text-3xs text-muted-foreground" data-testid="invocations-windowed">
+                The {n.invocations.length} most recent of {n.invocationCount}; the Run's invocation list pages the rest.
+              </div>
+            )}
             <ul className="flex flex-col gap-1 text-xs">
               {n.invocations.map((i) => (
                 <li key={i.id}>

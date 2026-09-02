@@ -28,6 +28,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { acceptanceCriteria, artifacts, completionRequests, evaluations, gates, invocations, planNodes, publications, requirementRevisions, runs, snapshots } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 function evaluationToDomain(row: typeof evaluations.$inferSelect): Evaluation {
   // The generated index columns are projections of `context` and `subject`, never part of the domain object.
@@ -196,6 +197,19 @@ export class EvaluationStore {
 
   listByRun(runId: RunId): Evaluation[] {
     return this.ctx.db.select().from(evaluations).where(eq(evaluations.runId, runId)).orderBy(asc(evaluations.createdAt)).all().map(evaluationToDomain);
+  }
+
+  /** One keyset page of a Run's Evaluations by `(createdAt, id)`, optionally narrowed to one Plan Node. */
+  pageByRun(runId: RunId, query: KeysetQuery, planNodeId?: PlanNodeId): Evaluation[] {
+    const key = [evaluations.createdAt, evaluations.id];
+    return this.ctx.db
+      .select()
+      .from(evaluations)
+      .where(and(eq(evaluations.runId, runId), planNodeId === undefined ? undefined : eq(evaluations.planNodeId, planNodeId), keysetWhere(key, query)))
+      .orderBy(...keysetOrder(key, query))
+      .limit(query.limit)
+      .all()
+      .map(evaluationToDomain);
   }
 
   listByPlanNode(planNodeId: PlanNodeId): Evaluation[] {
@@ -463,6 +477,19 @@ export class GateStore {
 
   listByRun(runId: RunId): Gate[] {
     return this.ctx.db.select().from(gates).where(eq(gates.runId, runId)).orderBy(asc(gates.openedAt), asc(gates.id)).all().map(gateToDomain);
+  }
+
+  /** One keyset page of a Run's Gates by `(openedAt, id)`, optionally narrowed to one Plan Node. */
+  pageByRun(runId: RunId, query: KeysetQuery, planNodeId?: PlanNodeId): Gate[] {
+    const key = [gates.openedAt, gates.id];
+    return this.ctx.db
+      .select()
+      .from(gates)
+      .where(and(eq(gates.runId, runId), planNodeId === undefined ? undefined : eq(gates.planNodeId, planNodeId), keysetWhere(key, query)))
+      .orderBy(...keysetOrder(key, query))
+      .limit(query.limit)
+      .all()
+      .map(gateToDomain);
   }
 
   /** Every `node_exit` Gate of a node in ordinal order: the node's verification history. */

@@ -23,6 +23,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, changesets, gates, invocations, runs, snapshots, tasks, workspaces } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, workspaceScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 function snapshotToDomain(row: typeof snapshots.$inferSelect): Snapshot {
   const identity =
@@ -84,6 +85,12 @@ export class SnapshotStore {
 
   listByRun(runId: RunId): Snapshot[] {
     return this.ctx.db.select().from(snapshots).where(eq(snapshots.runId, runId)).orderBy(asc(snapshots.takenAt), asc(snapshots.id)).all().map(snapshotToDomain);
+  }
+
+  /** One keyset page of a Run's Snapshots by `(takenAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery): Snapshot[] {
+    const key = [snapshots.takenAt, snapshots.id];
+    return this.ctx.db.select().from(snapshots).where(and(eq(snapshots.runId, runId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(snapshotToDomain);
   }
 }
 
@@ -199,6 +206,12 @@ export class ChangesetStore {
 
   listByRun(runId: RunId): Changeset[] {
     return this.ctx.db.select().from(changesets).where(eq(changesets.runId, runId)).orderBy(asc(changesets.createdAt)).all().map(changesetToDomain);
+  }
+
+  /** One keyset page of a Run's Changesets by `(createdAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery): Changeset[] {
+    const key = [changesets.createdAt, changesets.id];
+    return this.ctx.db.select().from(changesets).where(and(eq(changesets.runId, runId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(changesetToDomain);
   }
 
   transition(id: ChangesetId, transition: ChangesetTransition, options?: WriteOptions): Changeset {

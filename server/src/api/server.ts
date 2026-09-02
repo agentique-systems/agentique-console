@@ -27,6 +27,18 @@ export function buildServer(ctx: AppContext): FastifyInstance {
     for (const method of Array.isArray(route.method) ? route.method : [route.method]) if (method !== "HEAD") registered.push(`${method} ${route.url}`);
   });
 
+  // The serialized response bound (core `API_RESPONSE_MAX_BYTES`): a JSON body that would exceed it is refused as `payload_too_large`,
+  // never truncated — the aggregate routes keep their nested histories windowed and counted so this stays a last resort.
+  app.addHook("onSend", async (_request, reply, payload) => {
+    if (typeof payload !== "string" || reply.statusCode >= 400) return payload;
+    const type = String(reply.getHeader("content-type") ?? "");
+    if (!type.includes("application/json")) return payload;
+    const bytes = Buffer.byteLength(payload);
+    if (bytes <= ctx.app.limits.responseMaxBytes) return payload;
+    void reply.status(413);
+    return JSON.stringify(new ApiError("payload_too_large", `the response (${bytes} bytes) exceeds the bound of ${ctx.app.limits.responseMaxBytes} bytes; page the collection`, { field: "response" }).body());
+  });
+
   app.setErrorHandler((error: unknown, _request, reply) => {
     const api = toApiError(error);
     if (api) {

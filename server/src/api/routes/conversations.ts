@@ -1,7 +1,7 @@
-import { acceptanceCriterionBodySchema, conversationCreateBodySchema, conversationUpdateBodySchema, listConversationsQuerySchema, messageBodySchema, pageOf, proposalApproveBodySchema, proposalRejectBodySchema, requirementRevisionBodySchema, runCreateBodySchema, type MessagePostResponse, type RequirementProposalResolveResponse, type RequirementRevisionResponse } from "@agentique-console/core";
+import { acceptanceCriterionBodySchema, conversationCreateBodySchema, conversationUpdateBodySchema, listConversationsQuerySchema, listDecisionsQuerySchema, listProposalsQuerySchema, messageBodySchema, proposalApproveBodySchema, proposalRejectBodySchema, requirementRevisionBodySchema, runCreateBodySchema, type MessagePostResponse, type RequirementProposalResolveResponse, type RequirementRevisionResponse } from "@agentique-console/core";
 import { decisionView, requirementView, requirementsResponse, runOverview } from "../../operator/projections.ts";
 import { ApiError } from "../errors.ts";
-import { admit, created, id, notify, page, parse, type RouteHandlers } from "./support.ts";
+import { admit, CREATED_ID, created, id, notify, page, pageResponse, parse, type RouteHandlers } from "./support.ts";
 import { conversationResponse } from "./workspaces.ts";
 
 export const conversationRoutes: Pick<
@@ -28,11 +28,8 @@ export const conversationRoutes: Pick<
   listConversations: (request, ctx) => {
     const query = parse(listConversationsQuerySchema, request.query, "query");
     const { stores } = ctx.app.runtime;
-    const conversations = query.workspaceId === undefined ? stores.workspaces.list().flatMap((w) => stores.conversations.listByWorkspace(w.id)) : stores.conversations.listByWorkspace(query.workspaceId);
-    return pageOf(
-      conversations.map((c) => conversationResponse(ctx.app.runtime, c.id)),
-      (c) => c.conversation.id,
-      query,
+    return pageResponse(query, (q) =>
+      (query.workspaceId === undefined ? stores.conversations.pageAll(q) : stores.conversations.pageByWorkspace(query.workspaceId, q)).map((c) => conversationResponse(ctx.app.runtime, c.id)), { scope: `conversations:${query.workspaceId ?? "*"}`, keyOf: (c) => [c.conversation.createdAt, c.conversation.id], shape: CREATED_ID },
     );
   },
   createConversation: (request, ctx) => {
@@ -51,7 +48,7 @@ export const conversationRoutes: Pick<
   listConversationMessages: (request, ctx) => {
     const conversationId = id("conversation", request.params.conversationId);
     ctx.app.runtime.stores.conversations.get(conversationId);
-    return pageOf(ctx.app.runtime.stores.conversations.listMessages(conversationId), (m) => `${m.createdAt}/${m.id}`, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.conversations.pageMessages(conversationId, q), { scope: `messages:${conversationId}`, keyOf: (m) => [m.createdAt, m.id], shape: CREATED_ID });
   },
   postConversationMessage: (request, ctx): MessagePostResponse => {
     admit(ctx);
@@ -85,12 +82,13 @@ export const conversationRoutes: Pick<
   listConversationDecisions: (request, ctx) => {
     const conversationId = id("conversation", request.params.conversationId);
     ctx.app.runtime.stores.conversations.get(conversationId);
-    return pageOf(ctx.app.runtime.stores.decisions.listByConversation(conversationId).map(decisionView), (d) => d.decision.id, page(request.query));
+    const query = parse(listDecisionsQuerySchema, request.query, "query");
+    return pageResponse(query, (q) => ctx.app.runtime.stores.decisions.pageByConversation(conversationId, q, query.status).map(decisionView), { scope: `decisions:${conversationId}:${query.status ?? "*"}`, keyOf: (d) => [d.decision.createdAt, d.decision.id], shape: CREATED_ID });
   },
   listConversationRuns: (request, ctx) => {
     const conversationId = id("conversation", request.params.conversationId);
     ctx.app.runtime.stores.conversations.get(conversationId);
-    return pageOf(ctx.app.runtime.stores.runs.listByConversation(conversationId), (r) => r.id, page(request.query));
+    return pageResponse(page(request.query), (q) => ctx.app.runtime.stores.runs.pageByConversation(conversationId, q), { scope: `runs:${conversationId}`, keyOf: (r) => [r.createdAt, r.id], shape: CREATED_ID });
   },
   createRun: (request, ctx) => {
     admit(ctx);
@@ -100,7 +98,7 @@ export const conversationRoutes: Pick<
     notify(ctx, launched.run.id);
     return created(request.reply, runOverview(ctx.app.runtime, ctx.app.runtime.stores.runs.get(launched.run.id)));
   },
-  getRequirement: (request, ctx) => requirementView(ctx.app.runtime, ctx.app.runtime.stores.requirements.get(id("requirement", request.params.requirementId))),
+  getRequirement: (request, ctx) => requirementView(ctx.app.runtime, ctx.app.runtime.stores.requirements.get(id("requirement", request.params.requirementId)), "single"),
   createAcceptanceCriterion: (request, ctx) => {
     admit(ctx);
     const requirementId = id("requirement", request.params.requirementId);
@@ -116,7 +114,8 @@ export const conversationRoutes: Pick<
   listRunRequirementProposals: (request, ctx) => {
     const runId = id("run", request.params.runId);
     ctx.app.runtime.stores.runs.get(runId);
-    return pageOf(ctx.app.runtime.stores.requirementProposals.listByRun(runId), (p) => p.id, page(request.query));
+    const query = parse(listProposalsQuerySchema, request.query, "query");
+    return pageResponse(query, (q) => ctx.app.runtime.stores.requirementProposals.pageByRun(runId, q, query.status), { scope: `requirement-proposals:${runId}:${query.status ?? "*"}`, keyOf: (p) => [p.createdAt, p.id], shape: CREATED_ID });
   },
   getRequirementProposal: (request, ctx) => ctx.app.runtime.stores.requirementProposals.get(id("requirementProposal", request.params.proposalId, "proposalId")),
   approveRequirementProposal: (request, ctx): RequirementProposalResolveResponse => {

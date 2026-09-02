@@ -9,9 +9,13 @@
  *
  * Errors are one envelope (`ApiErrorBody`) with a closed code set; an
  * unknown route — every legacy path included — is the standard `not_found`
- * body with no redirect and no hint. Lists page deterministically by id
- * cursor with a bounded limit; bodies and content responses are bounded by
- * the constants below.
+ * body with no redirect and no hint. Lists page deterministically by keyset
+ * over an opaque cursor that names its collection and order, with a bounded
+ * record count and a bounded serialized size; bodies, pages, and every JSON
+ * response are bounded by the constants below, and nothing is ever
+ * truncated silently — a page ends before the record that would cross its
+ * bound and says so with its cursor, and a response that cannot fit is
+ * refused.
  */
 import { z } from "zod";
 import type { AgentDefinition, AgentDefinitionRevision } from "./agents.ts";
@@ -52,9 +56,12 @@ import type { ExecutionPlanRevision, PlanGraph, PlanNode, PlanNodeStatus } from 
 import type { Publication, PublicationReport } from "./publication.ts";
 import { acceptanceCheckSchema, proposedRequirementTreeSchema, REQUIREMENT_TREE_MAX_ENTRIES, type AcceptanceCheck, type AcceptanceCriterion, type ProposedRequirement, type Requirement, type RequirementProposal, type RequirementRevision, type RequirementStatusChange, type RequirementTreeEntry } from "./requirements.ts";
 import { OPERATOR_PAUSE_MODES, RUN_KINDS, runTargetSchema, type OperatorPauseMode, type Run, type RunKind, type RunStatus, type RunTarget, type RunWaitReason } from "./runs.ts";
+import { ValidationError } from "./errors.ts";
+import { DECISION_STATUSES } from "./decisions.ts";
+import { REQUIREMENT_PROPOSAL_STATUSES } from "./requirements.ts";
 import type { RuntimeToolCall } from "./runtime-tools.ts";
 import type { SignoffResolution } from "./signoff.ts";
-import type { Task, TaskBlockReason, TaskDependency } from "./tasks.ts";
+import type { Task, TaskBlockReason } from "./tasks.ts";
 import type { Usage, UsageTotals } from "./usage.ts";
 import { idSchema } from "./validation.ts";
 import type { Evaluation, Gate } from "./verification.ts";
@@ -105,6 +112,15 @@ export const API_BODY_MAX_BYTES = 262_144;
 /** The default and maximum page sizes of every list route. */
 export const PAGE_LIMIT_DEFAULT = 50;
 export const PAGE_LIMIT_MAX = 200;
+/** The bound on the serialized JSON of one page's items: a page ends before the item that would cross it and reports its next cursor; no record is truncated. */
+export const PAGE_MAX_BYTES = 1_048_576;
+/** The bound on any JSON response body; a response that would exceed it is refused as `payload_too_large`, never truncated. */
+export const API_RESPONSE_MAX_BYTES = 4_194_304;
+/** Records an aggregate response carries of a growing nested history (the most recent ones) beside the total count; the rest is paged from its own route. */
+export const AGGREGATE_HISTORY_WINDOW = 50;
+/** Status changes a Requirement view carries in a list (the most recent) beside the total count; a single Requirement carries more. */
+export const REQUIREMENT_HISTORY_WINDOW = 5;
+export const REQUIREMENT_HISTORY_WINDOW_SINGLE = 20;
 /** Artifact bytes an inline content read returns per page (`offset`/`maxBytes`); larger Artifacts page or download. */
 export const ARTIFACT_CONTENT_MAX_BYTES = 1_048_576;
 /** The bound on a download response. */
@@ -114,27 +130,93 @@ export const OPERATOR_MESSAGE_MAX_BYTES = 32_768;
 /** Events one replay page carries; a subscription pages until it is caught up. */
 export const EVENT_REPLAY_PAGE = 500;
 
+export const PAGE_ORDERS = ["asc", "desc"] as const;
+export type PageOrder = (typeof PAGE_ORDERS)[number];
+
 export interface Page<T> {
   items: T[];
-  /** The cursor of the next page, or `null` at the end; pass it back as `cursor`. */
+  /** Continues past the last item in the page's order, or `null` when nothing follows; pass it back as `cursor` with the same `order`. */
   nextCursor: string | null;
+  /** Continues away from the first item in the opposite order (the items newer than a newest-first page); pass it back as `cursor` with the opposite `order`; `null` for an empty page. */
+  reverseCursor: string | null;
 }
 
+/** Every list route: an opaque cursor, a bounded limit, and the order of the collection's canonical key (ascending by default). */
 export const pageQuerySchema = z.strictObject({
-  cursor: z.string().min(1).max(256).optional(),
+  cursor: z.string().min(1).max(512).optional(),
   limit: z.coerce.number().int().min(1).max(PAGE_LIMIT_MAX).optional(),
+  order: z.enum(PAGE_ORDERS).optional(),
 });
 export type PageQuery = z.infer<typeof pageQuerySchema>;
 
-/** Pages an id-sorted list deterministically: the cursor is the last id of the previous page. */
-export function pageOf<T>(items: readonly T[], idOf: (item: T) => string, query: PageQuery): Page<T> {
-  const sorted = [...items].sort((a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0));
-  const start = query.cursor === undefined ? 0 : sorted.findIndex((item) => idOf(item) > query.cursor!);
-  const from = start < 0 ? sorted.length : start;
-  const limit = query.limit ?? PAGE_LIMIT_DEFAULT;
-  const page = sorted.slice(from, from + limit);
-  const last = page.at(-1);
-  return { items: page, nextCursor: last !== undefined && from + limit < sorted.length ? idOf(last) : null };
+/** One element of a keyset: a timestamp or id (string) or an ordinal (number). */
+export type PageKeyElement = string | number;
+export type PageKeyShape = readonly ("string" | "number")[];
+
+/**
+ * A cursor names the collection it pages (`scope`: the route and the owning id), the order it was issued for, and the
+ * keyset of the item it continues from. A cursor issued for another collection, another order, or another key shape is
+ * refused: pages never cross scopes, and a stale or forged cursor is a `bad_request`, never a silent reset.
+ */
+export interface PageCursor {
+  scope: string;
+  order: PageOrder;
+  key: PageKeyElement[];
+}
+
+const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/** base64url of an ASCII string (the percent-encoded JSON of a cursor), without padding; platform-neutral. */
+function base64url(ascii: string): string {
+  let out = "";
+  for (let i = 0; i < ascii.length; i += 3) {
+    const a = ascii.charCodeAt(i);
+    const b = i + 1 < ascii.length ? ascii.charCodeAt(i + 1) : null;
+    const c = i + 2 < ascii.length ? ascii.charCodeAt(i + 2) : null;
+    out += BASE64URL[a >> 2]! + BASE64URL[((a & 3) << 4) | ((b ?? 0) >> 4)]!;
+    if (b !== null) out += BASE64URL[((b & 15) << 2) | ((c ?? 0) >> 6)]!;
+    if (c !== null) out += BASE64URL[c & 63]!;
+  }
+  return out;
+}
+
+/** The inverse of `base64url`; `null` for anything that is not base64url. */
+function unbase64url(text: string): string | null {
+  if (!/^[A-Za-z0-9_-]*$/.test(text) || text.length % 4 === 1) return null;
+  let out = "";
+  let bits = 0;
+  let value = 0;
+  for (const char of text) {
+    value = (value << 6) | BASE64URL.indexOf(char);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out += String.fromCharCode((value >> bits) & 255);
+    }
+  }
+  return out;
+}
+
+export function encodeCursor(cursor: PageCursor): string {
+  return base64url(encodeURIComponent(JSON.stringify([cursor.scope, cursor.order, cursor.key])));
+}
+
+/** Decodes and validates a cursor against the collection, order, and key shape the route pages; throws `ValidationError` naming the defect. */
+export function decodeCursor(raw: string, expected: { scope: string; order: PageOrder; shape: PageKeyShape }): PageKeyElement[] {
+  let parsed: unknown;
+  try {
+    const ascii = unbase64url(raw);
+    if (ascii === null) throw new Error("not base64url");
+    parsed = JSON.parse(decodeURIComponent(ascii));
+  } catch {
+    throw new ValidationError("cursor is malformed", { field: "cursor", reason: "malformed" });
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 3 || typeof parsed[0] !== "string" || !Array.isArray(parsed[2])) throw new ValidationError("cursor is malformed", { field: "cursor", reason: "malformed" });
+  const [scope, order, key] = parsed as [string, unknown, unknown[]];
+  if (scope !== expected.scope) throw new ValidationError("cursor belongs to another collection", { field: "cursor", reason: "scope" });
+  if (order !== expected.order) throw new ValidationError(`cursor was issued for the ${String(order)} order`, { field: "cursor", reason: "order" });
+  if (key.length !== expected.shape.length || key.some((k, i) => typeof k !== expected.shape[i] || (typeof k === "number" && !Number.isFinite(k)))) throw new ValidationError("cursor does not name a position in this collection", { field: "cursor", reason: "shape" });
+  return key as PageKeyElement[];
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +459,17 @@ export type FsDirsQuery = z.infer<typeof fsDirsQuerySchema>;
 export const listConversationsQuerySchema = pageQuerySchema.extend({ workspaceId: idSchema("workspace").optional() });
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 
+/** Run-scoped collections that a Plan Node's detail summarizes: the full history pages here, narrowed to the node. */
+export const planNodeScopedPageQuerySchema = pageQuerySchema.extend({ planNodeId: idSchema("planNode").optional() });
+export type PlanNodeScopedPageQuery = z.infer<typeof planNodeScopedPageQuerySchema>;
+
+/** Decisions narrowed to one status: the open ones are always one bounded page away, whatever the history. */
+export const listDecisionsQuerySchema = pageQuerySchema.extend({ status: z.enum(DECISION_STATUSES).optional() });
+export type ListDecisionsQuery = z.infer<typeof listDecisionsQuerySchema>;
+
+export const listProposalsQuerySchema = pageQuerySchema.extend({ status: z.enum(REQUIREMENT_PROPOSAL_STATUSES).optional() });
+export type ListProposalsQuery = z.infer<typeof listProposalsQuerySchema>;
+
 /** The event stream: replay from `afterSeq` (0 for everything), optionally scoped; then live. */
 export const eventsQuerySchema = z.strictObject({
   afterSeq: z.coerce.number().int().min(0).optional(),
@@ -501,7 +594,9 @@ export interface AgentDefinitionLoadResponse {
 
 export interface AgentDefinitionResponse {
   definition: AgentDefinition;
-  revisions: AgentDefinitionRevision[];
+  /** The latest revision; the history pages from the revisions route. */
+  latestRevision: AgentDefinitionRevision | null;
+  revisionCount: number;
 }
 
 export interface ConversationResponse {
@@ -521,8 +616,10 @@ export interface RequirementView {
   /** The Requirement's entry in the current revision, or `null` when it left the tree. */
   entry: RequirementTreeEntry | null;
   criteria: AcceptanceCriterion[];
-  /** The most recent status changes, newest last (bounded). */
+  /** The most recent status changes, newest last: `REQUIREMENT_HISTORY_WINDOW` of them in a list, `REQUIREMENT_HISTORY_WINDOW_SINGLE` for one Requirement. */
   history: RequirementStatusChange[];
+  /** Every status change the Requirement ever had, counted. */
+  historyCount: number;
   waiverDecisionId: DecisionId | null;
 }
 
@@ -632,15 +729,21 @@ export interface PlanResponse {
   nodes: PlanNodeSummary[];
 }
 
+/** A Plan Node's detail: compact summaries of its growing histories — the `AGGREGATE_HISTORY_WINDOW` most recent records beside the total — with the full history one paged route away (`planNodeId` on the Run's collection). */
 export interface PlanNodeResponse {
   node: PlanNode;
   invocations: Invocation[];
+  invocationCount: number;
   tasks: Task[];
+  taskCount: number;
   gates: Gate[];
+  gateCount: number;
   evaluations: Evaluation[];
+  evaluationCount: number;
   usage: UsageTotals;
   allocation: PlanNodeAllocationProjection | null;
   extensions: AllocationExtension[];
+  extensionCount: number;
 }
 
 export interface InvocationResponse {
@@ -672,10 +775,8 @@ export interface TaskView {
   outputs: Artifact[];
 }
 
-export interface TaskLedgerResponse {
-  tasks: TaskView[];
-  dependencies: TaskDependency[];
-}
+/** The Run's Task ledger pages like every collection; each view carries its own dependency edges. */
+export type TaskLedgerResponse = Page<TaskView>;
 
 /** What a Decision needs from the operator, and through which operation. */
 export const DECISION_ACTIONS = ["resolve", "supersede", "budget_increase", "signoff", "publish", "none"] as const;
@@ -717,8 +818,10 @@ export interface BudgetIncreaseResolveResponse {
 
 export interface UsageResponse {
   run: UsageTotals;
+  /** One entry per Plan Node of the Run (bounded by the plan). */
   byPlanNode: { planNodeId: PlanNodeId; totals: UsageTotals }[];
-  byInvocation: { invocationId: InvocationId; planNodeId: PlanNodeId; totals: UsageTotals }[];
+  /** One entry per Invocation, paged with the route's page query (creation order). */
+  byInvocation: Page<{ invocationId: InvocationId; planNodeId: PlanNodeId; createdAt: string; totals: UsageTotals }>;
 }
 
 export interface SignoffView {

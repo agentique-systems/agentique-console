@@ -8,7 +8,7 @@
  * process signals in `main.ts`.
  */
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { addAllocation, ZERO_ALLOCATION, type Allocation, type Timestamp } from "@agentique-console/core";
+import { addAllocation, API_RESPONSE_MAX_BYTES, ZERO_ALLOCATION, type Allocation, type Timestamp } from "@agentique-console/core";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "./api/server.ts";
 import { composeConsoleRuntime, DEFAULT_PLANNING_CONFIG, type ConsoleRuntime } from "./composition/console-runtime.ts";
@@ -36,6 +36,8 @@ export interface CreateAppOptions {
   publicationHooks?: PublicationHooks;
   /** The event stream's outbound bounds (the buffer bound, the heartbeat); tests lower them to reach backpressure deterministically. */
   events?: SseOptions;
+  /** The serialized JSON response bound (core `API_RESPONSE_MAX_BYTES`); tests lower it to prove the refusal. */
+  responseMaxBytes?: number;
 }
 
 export type AppDiagnostic = { at: Timestamp; source: "persistence"; diagnostic: PersistenceDiagnostic } | { at: Timestamp; source: "execution"; diagnostic: ExecutionDiagnostic } | { at: Timestamp; source: "host"; diagnostic: RunHostDiagnostic };
@@ -76,6 +78,8 @@ export interface App {
   events: EventStream;
   /** The bounds `GET /api/events` subscriptions run with. */
   eventStreamOptions: SseOptions;
+  /** The transport bounds of the HTTP layer. */
+  limits: { responseMaxBytes: number };
   admission: AdmissionGate;
   workspaces: WorkspaceService;
   launch: RunLaunchService;
@@ -154,6 +158,7 @@ export function createApp(options: CreateAppOptions): App {
     host,
     events,
     eventStreamOptions: options.events ?? {},
+    limits: { responseMaxBytes: options.responseMaxBytes ?? API_RESPONSE_MAX_BYTES },
     admission,
     workspaces,
     launch,

@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import {
   artifactInputSchema,
   artifactSchema,
@@ -15,6 +15,7 @@ import { BlobCorruptedError, sha256Hex, type PendingEntry } from "../blob-store.
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, attempts, invocations, tasks } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 type Row = typeof artifacts.$inferSelect;
 
@@ -386,8 +387,20 @@ export class ArtifactStore {
     return report;
   }
 
+  /** The Artifacts with the given ids, in one bounded query (missing ids are absent). */
+  getMany(ids: readonly ArtifactId[]): Artifact[] {
+    if (ids.length === 0) return [];
+    return this.ctx.db.select().from(artifacts).where(inArray(artifacts.id, [...ids])).all().map(toDomain);
+  }
+
   get(id: ArtifactId): Artifact {
     return toDomain(requireRow(this.ctx.db.select().from(artifacts).where(eq(artifacts.id, id)).get(), "Artifact", id));
+  }
+
+  /** One keyset page of a Run's Artifacts by `(createdAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery): Artifact[] {
+    const key = [artifacts.createdAt, artifacts.id];
+    return this.ctx.db.select().from(artifacts).where(and(eq(artifacts.runId, runId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   listByRun(runId: RunId): Artifact[] {

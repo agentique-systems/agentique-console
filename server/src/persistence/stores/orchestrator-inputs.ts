@@ -14,6 +14,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { invocations, orchestratorInputs } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 type Row = typeof orchestratorInputs.$inferSelect;
 
@@ -64,6 +65,12 @@ export class OrchestratorInputStore {
       .orderBy(asc(orchestratorInputs.createdAt), asc(orchestratorInputs.id))
       .all()
       .map(toDomain);
+  }
+
+  /** One keyset page of a Run's OrchestratorInputs by `(createdAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery): OrchestratorInput[] {
+    const key = [orchestratorInputs.createdAt, orchestratorInputs.id];
+    return this.ctx.db.select().from(orchestratorInputs).where(and(eq(orchestratorInputs.runId, runId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   listByRun(runId: RunId): OrchestratorInput[] {

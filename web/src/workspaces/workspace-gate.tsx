@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Folder, Plus } from "lucide-react";
 import type { WorkspaceResponse } from "@agentique-console/core";
-import { useWorkspaces } from "@/api/queries";
+import { itemsOf, useWorkspaces } from "@/api/queries";
+import { LoadMore } from "@/components/paging";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { timeAgo } from "@/lib/format";
@@ -12,9 +13,26 @@ import { WorkspaceWizard } from "./workspace-wizard";
 export function WorkspaceGate() {
   const workspaces = useWorkspaces();
   const [wizardOpen, setWizardOpen] = useState(false);
-  const rows = [...(workspaces.data?.items ?? [])].sort((a, b) => b.workspace.createdAt.localeCompare(a.workspace.createdAt));
+  const rows = itemsOf(workspaces.data, (row) => row.workspace.id);
+  if (workspaces.isPending) {
+    return (
+      <div className="flex h-screen items-center justify-center" data-testid="app-loading">
+        <span className="text-xs text-muted-foreground">Loading…</span>
+      </div>
+    );
+  }
+  if (workspaces.isError) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-2" data-testid="app-unreachable">
+        <p className="text-sm text-status-failed">The console server is unreachable.</p>
+        <p className="text-xs text-muted-foreground">
+          Start it with <code>npm run dev</code>. This page retries on its own.
+        </p>
+      </div>
+    );
+  }
   return (
-    <div className="flex h-screen flex-col items-center overflow-y-auto p-10" data-testid="workspace-gate">
+    <div className="flex h-screen flex-col items-center overflow-y-auto p-4 sm:p-10" data-testid="workspace-gate">
       <div className="w-full max-w-xl">
         {rows.length === 0 ? (
           <div className="flex flex-col items-center gap-3 py-16 text-center">
@@ -40,6 +58,7 @@ export function WorkspaceGate() {
                 {rows.map((row) => (
                   <WorkspaceRow key={row.workspace.id} row={row} />
                 ))}
+                <LoadMore query={workspaces} label="Load more Workspaces" testId="workspaces-more" />
               </div>
             </ScrollArea>
           </>

@@ -28,6 +28,7 @@ import type { PersistenceContext } from "../context.ts";
 import { artifacts, gates, invocations, planNodes, taskDependencies, tasks } from "../schema.ts";
 import type { ExecutionPlanStore } from "./plans.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 function toDomain(row: typeof tasks.$inferSelect): Task {
   return parseOrThrow(taskSchema, row, "Task row");
@@ -136,6 +137,12 @@ export class TaskStore {
 
   get(id: TaskId): Task {
     return toDomain(requireRow(this.ctx.db.select().from(tasks).where(eq(tasks.id, id)).get(), "Task", id));
+  }
+
+  /** One keyset page of a Run's Tasks by `(createdAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery, planNodeId?: PlanNodeId): Task[] {
+    const key = [tasks.createdAt, tasks.id];
+    return this.ctx.db.select().from(tasks).where(and(eq(tasks.runId, runId), (planNodeId === undefined ? undefined : eq(tasks.planNodeId, planNodeId)), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   listByRun(runId: RunId): Task[] {

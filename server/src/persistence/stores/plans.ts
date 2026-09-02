@@ -54,6 +54,7 @@ import {
 } from "../schema.ts";
 import type { BudgetReservationStore } from "./budgets.ts";
 import { assertSameConversation, assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 import type { UsageStore } from "./usage.ts";
 
 type NodeRow = typeof planNodes.$inferSelect;
@@ -285,6 +286,19 @@ export class ExecutionPlanStore {
       `${runId}:${number}`,
     );
     return parseOrThrow(executionPlanRevisionSchema, row, "ExecutionPlanRevision row");
+  }
+
+  /** One keyset page of a Run's accepted revisions by number. */
+  pageRevisions(runId: RunId, query: KeysetQuery): ExecutionPlanRevision[] {
+    const key = [executionPlanRevisions.number];
+    return this.ctx.db
+      .select()
+      .from(executionPlanRevisions)
+      .where(and(eq(executionPlanRevisions.runId, runId), keysetWhere(key, query)))
+      .orderBy(...keysetOrder(key, query))
+      .limit(query.limit)
+      .all()
+      .map((row) => parseOrThrow(executionPlanRevisionSchema, row, "ExecutionPlanRevision row"));
   }
 
   listRevisions(runId: RunId): ExecutionPlanRevision[] {

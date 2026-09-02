@@ -196,9 +196,9 @@ describe("the application path over HTTP", () => {
     expect(replayed.body).toMatchObject({ kind: "resolved", replayed: true });
 
     // 4. The Task exists in the ledger; the Orchestrator binds it into the plan on the operator's next message.
-    const ledger = await until(() => t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } }).then((r) => r.body), (l) => l.tasks.length === 1, "one Task", 60_000, () => attemptsOf(w, runId));
-    const taskId = ledger.tasks[0]!.task.id;
-    expect(ledger.tasks[0]!.task.status).toBe("pending");
+    const ledger = await until(() => t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } }).then((r) => r.body), (l) => l.items.length === 1, "one Task", 60_000, () => attemptsOf(w, runId));
+    const taskId = ledger.items[0]!.task.id;
+    expect(ledger.items[0]!.task.status).toBe("pending");
     await idle(w, runId);
     const revisionId = await implementerRevision(w);
     t.sdk.script(planTurn(revisionId, [taskId]), workerTurn(taskId), ...completionTurns());
@@ -214,8 +214,8 @@ describe("the application path over HTTP", () => {
     const implementerNode = plan.body.nodes.find((n) => n.node.kind === "pattern" && n.node.title === "Add --version");
     expect(implementerNode?.node.status).toBe("succeeded");
     const tasks = await t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } });
-    expect(tasks.body.tasks[0]!.task.status).toBe("completed");
-    expect(tasks.body.tasks[0]!.task.evidence.map((e) => e.kind)).toContain("url");
+    expect(tasks.body.items[0]!.task.status).toBe("completed");
+    expect(tasks.body.items[0]!.task.evidence.map((e) => e.kind)).toContain("url");
     const invocations = await t.call<Page<Invocation>>("listRunInvocations", { params: { runId } });
     expect(invocations.body.items.filter((i) => i.role === "worker")).toHaveLength(1);
     const gates = await t.call<Page<{ kind: string; status: string }>>("listRunGates", { params: { runId } });
@@ -321,8 +321,8 @@ describe("the application path over HTTP", () => {
     const revisionId = await implementerRevision(w);
     w.t.sdk.script({ steps: [{ kind: "tool_use", name: tool("create_tasks"), input: { tasks: [{ key: "impl", subject: "Implement --version", requirementIds: [goalId], inputArtifactIds: [], requiredOutputs: ["src/cli.js"], dependsOnKeys: [], dependsOnTaskIds: [], replacesTaskId: null }] } }, returned("Task created.")] });
     await w.t.call("startRun", { params: { runId }, body: {} });
-    const ledger = await until(() => w.t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } }).then((r) => r.body), (l) => l.tasks.length === 1, "one Task", 60_000, () => attemptsOf(w, runId));
-    const taskId = ledger.tasks[0]!.task.id;
+    const ledger = await until(() => w.t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } }).then((r) => r.body), (l) => l.items.length === 1, "one Task", 60_000, () => attemptsOf(w, runId));
+    const taskId = ledger.items[0]!.task.id;
     await idle(w, runId);
     // The Worker hangs until it is interrupted: the shutdown is what ends it.
     w.t.sdk.script({ steps: [{ kind: "tool_use", name: tool("revise_execution_plan"), input: { source: planSource(revisionId, [taskId]) } }, returned("Planned.")] }, { steps: [{ kind: "hang" }] });
@@ -402,8 +402,8 @@ async function completeThroughSignoff(w: World): Promise<string> {
   const revisionId = await implementerRevision(w);
   w.t.sdk.script({ steps: [{ kind: "tool_use", name: tool("create_tasks"), input: { tasks: [{ key: "impl", subject: "Implement --version", requirementIds: [goalId], inputArtifactIds: [], requiredOutputs: ["src/cli.js"], dependsOnKeys: [], dependsOnTaskIds: [], replacesTaskId: null }] } }, returned("Task created.")] });
   await w.t.call("startRun", { params: { runId }, body: {} });
-  const ledger = await until(() => w.t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } }).then((r) => r.body), (l) => l.tasks.length === 1, "one Task", 60_000, () => attemptsOf(w, runId));
-  const taskId = ledger.tasks[0]!.task.id;
+  const ledger = await until(() => w.t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } }).then((r) => r.body), (l) => l.items.length === 1, "one Task", 60_000, () => attemptsOf(w, runId));
+  const taskId = ledger.items[0]!.task.id;
   await idle(w, runId);
   w.t.sdk.script(planTurn(revisionId, [taskId]), workerTurn(taskId), ...completionTurns());
   await w.t.call("postConversationMessage", { params: { conversationId: w.conversationId }, body: { content: "Proceed." } });

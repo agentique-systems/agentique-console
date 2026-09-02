@@ -24,6 +24,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { agentDefinitionRevisions, agentDefinitions, changesets, runs, snapshots } from "../schema.ts";
 import type { ConversationStore } from "./conversations.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 import { assertSameRun, loadConversationRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
 type Row = typeof runs.$inferSelect;
@@ -152,6 +153,18 @@ export class RunStore {
 
   listByWorkspace(workspaceId: WorkspaceId): Run[] {
     return this.ctx.db.select().from(runs).where(eq(runs.workspaceId, workspaceId)).orderBy(asc(runs.createdAt)).all().map(toDomain);
+  }
+
+  /** One keyset page of a Conversation's Runs by `(createdAt, id)`. */
+  pageByConversation(conversationId: ConversationId, query: KeysetQuery): Run[] {
+    const key = [runs.createdAt, runs.id];
+    return this.ctx.db.select().from(runs).where(and(eq(runs.conversationId, conversationId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
+  }
+
+  /** One keyset page of a Workspace's Runs by `(createdAt, id)`. */
+  pageByWorkspace(workspaceId: WorkspaceId, query: KeysetQuery): Run[] {
+    const key = [runs.createdAt, runs.id];
+    return this.ctx.db.select().from(runs).where(and(eq(runs.workspaceId, workspaceId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   /** Every Run that has not ended: what a restarted host reconstructs its work from. */

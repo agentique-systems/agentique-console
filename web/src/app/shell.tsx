@@ -11,7 +11,7 @@ const SystemView = lazy(() => import("@/system/view").then((m) => ({ default: m.
 
 export function Shell({ workspace }: { workspace: WorkspaceResponse }) {
   return (
-    <div className="flex h-screen min-w-[720px] flex-col overflow-hidden">
+    <div className="flex h-screen min-w-0 flex-col overflow-hidden">
       <Topbar workspace={workspace} />
       <main className="min-h-0 flex-1">
         <Suspense

@@ -31,6 +31,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, publications, requirementRevisions, requirements, runs, tasks } from "../schema.ts";
 import { assertSameConversation, conversationScope, loadConversationRef, OPERATOR_ACTOR, requireRow, RUNTIME_ACTOR, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 type Row = typeof decisions.$inferSelect;
 
@@ -191,6 +192,32 @@ export class DecisionStore {
   /** Every Decision of a Run, in creation order (then id order). */
   listByRun(runId: RunId): Decision[] {
     return this.ctx.db.select().from(decisions).where(eq(decisions.runId, runId)).orderBy(asc(decisions.createdAt), asc(decisions.id)).all().map(toDomain);
+  }
+
+  /** One keyset page of a Run's Decisions by `(createdAt, id)`, optionally of one status (the open ones are one bounded page whatever the history). */
+  pageByRun(runId: RunId, query: KeysetQuery, status?: DecisionStatus): Decision[] {
+    const key = [decisions.createdAt, decisions.id];
+    return this.ctx.db
+      .select()
+      .from(decisions)
+      .where(and(eq(decisions.runId, runId), status === undefined ? undefined : eq(decisions.status, status), keysetWhere(key, query)))
+      .orderBy(...keysetOrder(key, query))
+      .limit(query.limit)
+      .all()
+      .map(toDomain);
+  }
+
+  /** One keyset page of a Conversation's Decisions by `(createdAt, id)`, optionally of one status. */
+  pageByConversation(conversationId: ConversationId, query: KeysetQuery, status?: DecisionStatus): Decision[] {
+    const key = [decisions.createdAt, decisions.id];
+    return this.ctx.db
+      .select()
+      .from(decisions)
+      .where(and(eq(decisions.conversationId, conversationId), status === undefined ? undefined : eq(decisions.status, status), keysetWhere(key, query)))
+      .orderBy(...keysetOrder(key, query))
+      .limit(query.limit)
+      .all()
+      .map(toDomain);
   }
 
   /**

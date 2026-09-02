@@ -90,17 +90,20 @@ class ServerProcess {
         child.off("message", onMessage);
         reject(new Error(`no reply from the server process within ${timeoutMs}ms; stderr: ${this.#stderr.slice(-2_000)}`));
       }, timeoutMs);
+      const onExit = (code: number | null) => {
+        clearTimeout(timer);
+        child.off("message", onMessage);
+        reject(new Error(`the server process exited with ${code}; stderr: ${this.#stderr.slice(-2_000)}`));
+      };
       const onMessage = (reply: Reply) => {
         if (!accept(reply)) return;
         clearTimeout(timer);
         child.off("message", onMessage);
+        child.off("exit", onExit);
         resolve(reply);
       };
       child.on("message", onMessage);
-      child.once("exit", (code) => {
-        clearTimeout(timer);
-        reject(new Error(`the server process exited with ${code}; stderr: ${this.#stderr.slice(-2_000)}`));
-      });
+      child.once("exit", onExit);
     });
   }
 }
@@ -166,7 +169,7 @@ describe("the operator's web application over the real server", () => {
     // 3. The scripted provider: plan one implementer node, implement in a worktree, request completion, synthesize.
     await server.script("coding", workspaceId!);
     // 4. Start the Run from the goal and the completion check (the fixture's check is a real subprocess).
-    await user.type(screen.getByTestId("goal"), "Add a --version flag to the CLI.");
+    await user.type(await screen.findByTestId("goal", {}, { timeout: 30_000 }), "Add a --version flag to the CLI.");
     const check = screen.getByLabelText("completion check");
     await user.clear(check);
     await user.type(check, "node test.js");

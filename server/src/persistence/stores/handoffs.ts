@@ -16,6 +16,7 @@ import {
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, handoffs, invocations, planEdges, planNodes, tasks } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 
 function toDomain(row: typeof handoffs.$inferSelect): Handoff {
   return parseOrThrow(handoffSchema, row, "Handoff row");
@@ -101,6 +102,12 @@ export class HandoffStore {
   getByKey(runId: RunId, handoffKey: string): Handoff | null {
     const row = this.ctx.db.select().from(handoffs).where(and(eq(handoffs.runId, runId), eq(handoffs.handoffKey, handoffKey))).get();
     return row ? toDomain(row) : null;
+  }
+
+  /** One keyset page of a Run's Handoffs by `(createdAt, id)`. */
+  pageByRun(runId: RunId, query: KeysetQuery): Handoff[] {
+    const key = [handoffs.createdAt, handoffs.id];
+    return this.ctx.db.select().from(handoffs).where(and(eq(handoffs.runId, runId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(toDomain);
   }
 
   listByRun(runId: RunId): Handoff[] {

@@ -43,6 +43,7 @@ import { agentDefinitionRevisions, artifacts, attempts, capacityLeases, contextM
 import { ROOT_SOURCE_PATH } from "@agentique-console/core";
 import type { BudgetReservationStore } from "./budgets.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
+import { keysetOrder, keysetWhere, type KeysetQuery } from "./paging.ts";
 import type { UsageStore } from "./usage.ts";
 
 type InvocationRow = typeof invocations.$inferSelect;
@@ -692,6 +693,25 @@ export class InvocationStore {
 
   listByRun(runId: RunId): Invocation[] {
     return this.ctx.db.select().from(invocations).where(eq(invocations.runId, runId)).orderBy(asc(invocations.createdAt), asc(invocations.id)).all().map(invocationToDomain);
+  }
+
+  /** One keyset page of a Run's Invocations by `(createdAt, id)`, optionally narrowed to one Plan Node. */
+  pageByRun(runId: RunId, query: KeysetQuery, planNodeId?: PlanNodeId): Invocation[] {
+    const key = [invocations.createdAt, invocations.id];
+    return this.ctx.db
+      .select()
+      .from(invocations)
+      .where(and(eq(invocations.runId, runId), planNodeId === undefined ? undefined : eq(invocations.planNodeId, planNodeId), keysetWhere(key, query)))
+      .orderBy(...keysetOrder(key, query))
+      .limit(query.limit)
+      .all()
+      .map(invocationToDomain);
+  }
+
+  /** One keyset page of an Invocation's Attempts by number. */
+  pageAttempts(invocationId: InvocationId, query: KeysetQuery): Attempt[] {
+    const key = [attempts.number];
+    return this.ctx.db.select().from(attempts).where(and(eq(attempts.invocationId, invocationId), keysetWhere(key, query))).orderBy(...keysetOrder(key, query)).limit(query.limit).all().map(attemptToDomain);
   }
 
   /** Non-terminal Invocations of a Run, optionally of one role, in creation order. */

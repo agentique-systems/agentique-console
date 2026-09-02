@@ -27,6 +27,8 @@ export interface TestAppOptions {
   publicationHooks?: PublicationHooks;
   /** The event stream's outbound bounds. */
   events?: SseOptions;
+  /** The serialized JSON response bound. */
+  responseMaxBytes?: number;
 }
 
 export interface TestApp {
@@ -68,7 +70,7 @@ export async function openTestApp(options: TestAppOptions = {}): Promise<TestApp
   const dir = options.dir ?? newAppDirectory();
   const config = loadConfig(testEnv(dir, options.env ?? {}), dir);
   const sdk = options.sdk ?? new FakeClaudeSdk();
-  const app = createApp({ config, sdk, ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }), ...(options.events === undefined ? {} : { events: options.events }) });
+  const app = createApp({ config, sdk, ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }), ...(options.events === undefined ? {} : { events: options.events }), ...(options.responseMaxBytes === undefined ? {} : { responseMaxBytes: options.responseMaxBytes }) });
   if (options.boot !== false) await bootApp(app);
   await app.server.ready();
   const raw: TestApp["raw"] = async (method, url, body) => {
