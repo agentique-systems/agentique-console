@@ -12,7 +12,7 @@
 
 1. Stop writes that move refs or remove objects.
 2. Record worktree, branch, `HEAD`, status, and operation markers.
-3. Inspect all worktrees because the missing work may exist in another lane.
+3. Inspect all worktrees because the missing work may exist in another worktree.
 4. Inspect reflogs before object-level recovery.
 5. Create a rescue ref for every candidate OID before experimenting.
 6. Prefer additive repairs such as revert, merge, or cherry-pick.

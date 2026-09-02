@@ -349,7 +349,7 @@ Phase 1 table list with ownership and cardinality is in
 | `POST /api/user-sessions/:id/interrupt` | Deleted. → `POST /api/runs/:id/cancel`. |
 | `POST /api/user-sessions/:id/resume-capacity` | Deleted. → `POST /api/runs/:id/resume`. |
 | `GET /api/agent-sessions/:id`, `GET …/:id/transcript`, `GET …/:id/activity` | Deleted. → `GET /api/plan-nodes/:id`, `GET /api/invocations/:id`, `GET /api/attempts/:id/transcript`. |
-| `POST /api/agent-sessions/:id/agents/:agent/interrupt` | Deleted. → `POST /api/plan-nodes/:id/cancel`. |
+| `POST /api/agent-sessions/:id/agents/:agent/interrupt` | Deleted. → Operator control is Run-level (execution-model §3): `POST /api/runs/:id/pause` with mode `hard` interrupts executing Attempts, `POST /api/runs/:id/cancel` ends the Run; a Plan Node is removed only by the Orchestrator's plan revision (§4). No per-node operator route exists. |
 | `POST /api/scheduled-assignments/:id/cancel` | Deleted with no replacement. |
 | `GET /api/handoffs/:id` | Deleted. → `GET /api/handoffs/:id` (new shape; no paging). |
 | `POST /api/compose/improve` | Deleted with no replacement. |

@@ -32,8 +32,8 @@ Two numbering schemes coexist in the history and both are kept:
 | 6 Chain, routing, parallel Patterns | 3 | 2C (`chain`), 2D-A (`route`, `parallel`, `join`) |
 | 7 Evaluator-optimizer | 3 | 2D-B2 |
 | 8 Coordinator-worker and Pattern selection | 3 | 2D-B1 (runner), 2A (compiler selects Patterns from the plan source), `revise_execution_plan` (`552d655`) |
-| 9 Complete application cutover | 5 and 6 | not started |
-| 10 Eradicate legacy and harden | 6 and 7 | not started |
+| 9 Complete application cutover | 5 and 6 | publication correction (`9f32ebd`), API contract (`b27e3a4`), server and web cutover (`0c8a61a`), application path and restarts (`5936f14`) |
+| 10 Eradicate legacy and harden | 6 and 7 | inventory executed with the cutover (`0c8a61a`), documents, terminology, and invariant audit (this commit); merge to `main` pending review |
 
 ## Status vocabulary
 
@@ -501,35 +501,111 @@ admitted, the scheduler as the one driver), operator operations exposed
 through the API (Run creation, cancel, pause/resume, Decision resolution,
 Budget Increase, signoff, publication).
 
-**Implemented.** The reusable wiring only: `server/src/composition/`
-composes the runtime for production (database under the migration
-contract, file blob and continuation stores, the production adapter, the
-six Workspace ports, Agent Definitions, every service) and offers
-`advanceRunUntil` and the verification entrypoint; the API, the web
-application, and the entrypoints are not written. `server/src/main.ts`,
-`app.ts`, and `boot.ts` still build the legacy application over
-`server/src/db/`; no entrypoint calls the clean-break `RecoveryService`
-(its callers are the composition, the test harnesses
-`execution/test-support.ts`, `recovery-test-support.ts`, and the crash
-child).
+**Implemented.**
 
-**Evidence.** None.
+- *Publication correction first* (`9f32ebd`). The git provider's
+  destructive checkout synchronization (`reset --hard` behind a stale
+  clean-tree observation) is gone: the receipted compare-and-swap of the
+  Target ref is unchanged, and the checkout is brought forward only by a
+  non-destructive `read-tree -m -u` from the observed HEAD to the
+  candidate, reported truthfully as `synchronized`, `not_checked_out`,
+  `unchanged` (with `local_changes`, `head_moved`, or `operation_failed`),
+  or `unknown` on a receipt replay. The directory kind no longer publishes
+  through a non-atomic tree write: it refuses every strategy before
+  touching the Target (`strategy_unsupported`), stated in the capability
+  table, the API, and the web application; execution and inspection keep
+  working. Preparation markers are validated, repaired, and rebuilt.
+  Real-filesystem evidence: `workspace-state/publish.test.ts`,
+  `composition/publication-git.test.ts` (a later commit and a later edit
+  survive, a moved Target is refused, a real process death after the ref
+  update and before the record replays the receipt exactly once, a damaged
+  marker is repaired, a cleanup failure keeps the outcome).
+- *The API contract* (`b27e3a4`): `core/src/api.ts` is the single route
+  table (every resource of execution-model §13 and legacy-removal §5),
+  with strict request schemas, bounded bodies, deterministic keyset
+  pagination, typed error codes, response projections (`RunOverview` with
+  the derived `RunPhase`, plan, ledger, Decisions with their operator
+  action, Budget, signoff, publications), and the event-stream frame.
+- *The server cutover* (`0c8a61a`): `config.ts` (validated `CONSOLE_*`
+  configuration), `app.ts` (one composition for production, the HTTP
+  tests, and verification), `boot.ts` (validate → open with the
+  reset-required check → construct → recover → refuse admission while
+  `RecoveryReport.blobs.complete` is false → reconstruct runnable Runs and
+  outstanding Publications → serve; shutdown stops admission, interrupts
+  executing Attempts with cause `shutdown`, waits a bounded time, closes),
+  `main.ts`; the `host/` driver around `RunScheduler` (coalesced
+  notifications after operator actions, completions, and capacity;
+  bounded concurrency; fairness on `action_limit`; one cancellable
+  one-shot timer per Run from the scheduler's `wakeAt`, never an interval;
+  bounded retry after infrastructure failure; reconstruction from rows;
+  a stop signal the scheduler consults before each action); the
+  `events/` committed-event stream over the transaction commit listener
+  (journal replay by sequence, reconnect from `Last-Event-ID`, filters,
+  bounded pages and buffers, transient Attempt output routed by Attempt
+  and never persisted); the `operator/` services and projections; the
+  `api/` routes (membership validation, replay and refusal semantics, no
+  generic status edit, signoff separate from publication, no actor from
+  request fields, no credentials or storage keys in responses, bounded
+  Artifact content and download, browse-root protections; every legacy
+  route a standard 404). Evidence: `config.test.ts`, `host/run-host.test.ts`,
+  `events/stream.test.ts`, `api/api.test.ts` (every contract route served,
+  every removed route 404, validation, membership, admission),
+  `boot.test.ts` (recovery before admission, `recovery_incomplete`
+  refusal, shutdown keeps a soft pause and records the interruption, the
+  real `main.ts` refuses a legacy database with exit code 2 and an invalid
+  variable with exit code 1).
+- *The web application* (`0c8a61a`): Workspaces (gate, wizard, browse
+  roots), Conversations and messages, Run creation with the canonical
+  defaults (the final reserve from the allocation rules), the Run views
+  (overview with the derived phase and the next step, Requirements and
+  proposals, the plan graph with node and Invocation inspection, the Task
+  ledger, Decisions with the dedicated operations, verification with
+  Gates and Evaluations and the final report, signoff and publication,
+  usage and Budget, Agent Definitions, Artifacts with bounded content),
+  the operator controls (pause soft/hard, resume, cancel with
+  confirmation), the event subscription that refreshes projections
+  (no polling driver), and the loading, empty, validation, stale,
+  disconnected, and recovery-unavailable states.
+- *The application-level path* (`5936f14`): `api/application.e2e.test.ts`
+  drives the production composition through HTTP alone — Workspace,
+  Conversation, a coding Run whose goal and completion check become the
+  operator's Requirement, the Orchestrator's `propose_requirements` and
+  blocking `request_decision`, the operator's approval and resolution
+  through the API, `create_tasks` and `revise_execution_plan`, the
+  Worker's change in an isolated worktree with `write_artifact` and
+  `update_task` output and evidence, real integration, a real subprocess
+  completion check, completion and the final report, signoff acceptance,
+  and a separate publication whose receipt names the Target head — plus
+  three file-backed restarts (the blocked proposal-and-Decision boundary,
+  a Worker Attempt interrupted by the shutdown and retried, a Target
+  update committed before the SQLite record). `web/tests/application.test.tsx`
+  renders the application against a separately spawned server process for
+  the normal flow and the operator controls.
 
-**Remaining.** Everything above. Specifically reserved for this phase from
-earlier corrections: the production startup order *open database → recover
-(refuse to admit work while `RecoveryReport.blobs.complete` is false) →
-start the scheduler*, which the test harnesses model
-(`recoverOrRefuse` in `recovery-test-support.ts`) and no production
-entrypoint yet performs.
+**Evidence.** The suites named above; the root `npm run verify`; the
+startup smoke of `main.ts`; drizzle `check`/`generate` reporting no
+schema change against the single baseline migration.
 
-**Dependencies.** Phases 2–5 complete enough for one real Run; Phase 3
-item 1 and Phase 4 item 1 in particular.
+**Deviations recorded.** No `plan-nodes/:id/cancel` route exists: the
+execution model defines operator control at Run level only (§3: cancel,
+pause soft/hard, resume) and node removal as the Orchestrator's plan
+revision (§4); legacy-removal §5 now maps the legacy interrupt route to
+the Run-level operations. The retained-variable list of legacy-removal
+§9 named `CONSOLE_SKILLS_DIR`, `CONSOLE_AUTO_INIT_GIT`,
+`CONSOLE_MCP_TOOL_TIMEOUT_MS`, `CONSOLE_WORKTREES`, and
+`CONSOLE_ATTEMPT_START_TIMEOUT_MS`; the new configuration consumes none
+of them (skills are not loaded into Attempts; the console never
+initializes git — a Workspace is adopted as it is, a repository root as
+`git` and anything else as `directory`; MCP tool timeouts and Attempt
+start timeouts are the adapter's bounds; worktree isolation is the git
+provider's only mode) and, per the same section, ignores unknown
+`CONSOLE_*` names.
 
 **Completion condition.** Contract §9 acceptance: every route served,
 every legacy route 404, a fresh database starts, a legacy database is
 refused, `npm run verify` green.
 
-**Status: not implemented.**
+**Status: complete.**
 
 ## Phase 10 — Eradicate legacy architecture and harden the result
 
@@ -539,16 +615,34 @@ and `docs/` replaced; the terminology test over the whole tree; every
 invariant of execution-model §15 referenced by a test; the merge to
 `main`.
 
-**Implemented.** Nothing (construction coexistence per contract rule 8 is
-in force).
+**Implemented.**
 
-**Remaining.** Everything above.
+- *The inventory executed* (`0c8a61a`): the `shared/` package; the legacy
+  server modules (`agent-profiles`, `agent-sessions`, `capacity`,
+  `completion`, `compose`, `continuation`, `db`, `handoffs`,
+  `lane-runtime`, `orchestrator`, `portfolio`, `runtime`, `sdk`,
+  `sessions`, `system`, `tasks`, `timeline`, the legacy `workspaces`,
+  `api`, and `events`), the legacy entrypoints and helpers, the
+  evaluation harness, the legacy scripts, the doctrine skills; the legacy
+  web sources; the legacy database (a database not created by the
+  baseline migration is refused without modification, with reset
+  instructions); workspace, script, dependency, and lockfile entries.
+  The seven legacy real-git failures of the baseline disappeared with
+  their files.
+- *Documents and terminology* (this commit): `README.md` and `docs/README.md`
+  rewritten; the four legacy documents deleted; the retained skills
+  reworded; the terminology test now also scans the skills, the
+  repository scripts, and the top-level documents, with no new exception.
+- *Invariant coverage* (`5936f14`, this commit): every invariant 1–29 of
+  execution-model §15 is referenced by number in at least one test, and
+  `persistence/boundaries.test.ts` asserts that coverage against the
+  document.
 
-**Dependencies.** Phase 9.
+**Remaining.** The merge to `main`, pending review of the branch.
 
 **Completion condition.** Contract §9 in full.
 
-**Status: not implemented.**
+**Status: implemented on the branch; merge pending review.**
 
 ## Formerly deferred tools and behaviour
 
@@ -583,11 +677,9 @@ been delivered under its original phase:
 
 ## Next unfinished deliverable
 
-The earliest unfinished original-phase deliverable is Phase 9, the
-complete application cutover (the API, the web application, the rewritten
-entrypoints over `server/src/composition/`, with the startup order *open
-database → recover → start the scheduler*), followed by Phase 10.
-Phases 0–8 are complete.
+No original-phase deliverable is unfinished on the branch. Phases 0–9 are
+complete; Phase 10 is implemented and its one remaining item, the merge to
+`main`, awaits review of the branch.
 
 ## Revision history
 
@@ -616,3 +708,10 @@ Phases 0–8 are complete.
   migration was regenerated for `requirement_proposals`,
   `orchestrator_inputs`, the `xhigh` effort, and an Orchestrator's own
   `orchestrator_choice`. The next unfinished deliverable is Phase 9.
+- 2026-09-02 — Phases 9 and 10 delivered on the branch: the publication
+  correction (non-destructive checkout, directory refusal, preparation
+  repair), the API contract, the server and web cutover with the legacy
+  inventory executed, the application-level HTTP path with three
+  file-backed restarts and the browser flow, the documents and terminology
+  pass, and the §15 invariant coverage audit. Merge to `main` pending
+  review.

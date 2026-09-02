@@ -4112,6 +4112,8 @@ mechanism, if ever added, is a new feature with its own design.
 | Failure | Handling |
 |---|---|
 | Provider error, transient | New Attempt (`retry`) after backoff, within the Invocation's Attempt allocation. |
+| Process shutdown while Attempts execute | The host stops admitting work (the scheduler pass ends before its next action), the executor interrupts every executing Attempt through the provider's interruption path, and each is recorded `interrupted` with cause `shutdown` (retry permitted); the process waits a bounded time for them to settle and closes the database. No Run is cancelled, no operator pause is erased, and no Decision, Gate, or publication changes. |
+| Process restart | Startup opens the database (refusing one the current schema did not create), runs recovery before any work is admitted (interrupted Attempts, pending blob writes, outstanding publications; admission stays refused while the blob reconciliation is incomplete), then reconstructs every runnable Run and every outstanding Publication from rows and resumes them through the one scheduler. A Run blocked on a Decision or proposal stays blocked; an interrupted Attempt is retried under its Invocation's allocation; a Publication in `applying` replays its receipt. |
 | Provider error, permanent | Invocation `failed`; Pattern decides node outcome. |
 | Provider capacity refused by the governor | Attempt not started; Run `waiting` (`provider_capacity`); the scheduler retries when the governor signals capacity or the retry-after time passes. |
 | Invocation returns an invalid result | New Attempt (`retry`) with the validation error in the rendering. |

@@ -1,349 +1,172 @@
-# Agentique Console v2
+# Agentique Console
 
-> **Architecture rewrite in progress.** The authoritative orchestration
-> architecture is defined under [`docs/architecture/`](docs/README.md). This
-> README describes the current implementation, which that architecture
-> replaces in full; see `docs/architecture/migration-contract.md`.
+A local console for durable, inspectable agent work on a codebase. An
+operator states a goal for a Workspace; an Orchestrator turns it into
+Requirements and an Execution Plan; Workers carry out bounded Tasks in
+isolated worktrees; the runtime integrates their changes, runs the
+deterministic completion check and the Gate Evaluator, and asks the
+operator to sign the result off. Publication to the Target branch is a
+separate, atomic, receipted step that the operator requests explicitly.
 
-A deliberately narrow console for observable, coordinated agent work. It is a
-single npm-workspaces application backed by SQLite and the Claude Agent SDK.
+Everything the runtime knows is in one SQLite database plus a
+content-addressed blob store; the process can be killed at any point and
+resumes from the durable record. The Claude Agent SDK is the only provider.
 
-## Execution model
-
-- A **Workspace** is a local directory.
-- A **UserSession** is the Human Operator's conversation with the main
-  Orchestrator.
-- **The requirement graph is the committed specification.** Main proposes an
-  outline of declarative requirement statements (`propose_requirements`); the
-  operator edits it in place and approves; the Console mints stable ids
-  (`r1`, `r2`, …) and derives every parent's status mechanically from its
-  children (`all`/`any` composition). Statuses are semantic — open,
-  satisfied, violated, infeasible, retired — never numeric; a terminal status
-  is a journaled claim carrying evidence and a verification tier (self /
-  independent / operator) the Console DERIVES from who stood behind the
-  claim — never chosen by the reporting model. A committed node may declare
-  the verification its satisfaction deserves (`(verify: independent)`), and
-  the Console derives the gaps (satisfied below the declared tier) and the
-  reversals (terminal claims the run later withdrew) — displayed everywhere,
-  never a gate. Commissions name the requirement ids they serve
-  and seats report or decompose only within those delegated subtrees; the
-  run verdict can be `infeasible`, with evidence. Amendments supersede
-  revisions while unchanged statements keep their status; refinement below a
-  committed node needs no approval, changed meaning does.
-  `docs/requirements.md` has the full model.
-- An **AgentSession** is a Console-managed team of named agents running an
-  **orchestration pattern**. Each agent has its own resumable provider session
-  and a snapshotted agent profile. Idle agents park (process closed, resume
-  handle kept) and wake on the next delivery.
-- **Patterns are topology contracts.** At creation the chosen pattern's builder
-  compiles a per-session contract — roles with tool grants, a route table,
-  fan-in joins, a composite termination policy, a completion spec, and per-role
-  prompts — snapshotted onto the session row. The Console executes contracts
-  and never branches on pattern names. The catalog: `hub_and_spoke` (the default:
-  one coordinator + 1–20 specialists), `pipeline` (the agents are the stages,
-  in order), `evaluator_optimizer` (generate → judge cycles with a round cap),
-  `map_reduce` (a reducer fans out runtime-minted mappers with
-  `dispatch_work_items`; the join delivers all reports in one turn), `debate`
-  (independent positions, console-seated judge), `peer_to_peer` (a bounded
-  mesh: hard handoff cap, oscillation detection, a designated closer), and
-  `plan_execute` (a planner over the task DAG the Console dispatches on).
-- **Depth-capped nesting.** A controller agent (hub coordinator, planner —
-  or the entry agent of a session commissioned with `allowChildSessions`) may
-  spawn a child AgentSession running any pattern with
-  `create_child_session`. The child's `main` resolves to that controller — its
-  final crosses the boundary as a milestone — and a parent's own final is
-  withheld until every child has reported (or is abandoned).
-  `CONSOLE_MAX_SESSION_DEPTH` bounds ancestry depth (0 = top-level): only
-  seats in sessions BELOW the cap receive the spawn tools, so the cap is the
-  granting itself — a controller in a child session below the cap can nest
-  again. Lifecycle follows the tree: closing or abandoning a session archives
-  its whole subtree, and inspection (timeline, portfolio, UI) renders every
-  depth the runtime permits.
-- Agents transfer work with one console-owned tool, `send_handoff`. Its
-  parameters *are* the handoff core, so the provider validates the shape and
-  nothing is serialized by hand. Every transfer is route-checked against the
-  session's contract (hub sessions keep the familiar
-  `main ↔ coordinator ↔ specialist` star) and journaled to SQLite
-  before it is carried, then pushed into the recipient's live lane — waking a
-  parked agent or steering a running turn. One transport, every direction.
-  A coordinator can pass a specialist's report upward verbatim with
-  `forward_message` — the operator reads the specialist's words, not a
-  paraphrase.
-- **Native for capability, console for coordination**, with no exceptions. The
-  SDK supplies `Bash` (including backgrounded work read back with
-  `TaskOutput`/`Monitor`), git worktrees behind `EnterWorktree`, and model
-  invocation; anything beyond that — a browser, a database client — is an MCP
-  server a profile declares and the Console launches. The Console builds no
-  capability tools of its own. It used to: browser automation, process
-  management and an HTTP probe. They were deleted after a live run in which
-  `browser_evaluate` failed on every call behind a green test suite, every
-  screenshot cost a second round trip to look at, and one keypress per call
-  made real verification unaffordable. Addressing, delivery, the task ledger,
-  context lifetime and the operator obligation stay console-owned, because the
-  console holds invariants the native versions do not know about: a fixed
-  roster, an agent that outlives many provider sessions, journal-as-truth, and
-  a human who is owed a report. The native cross-session `SendMessage` mesh and the native
-  `Task*` ledger were tried for those jobs and removed; both keyed durable
-  state to the provider session — an identity the Console deliberately never
-  treats as durable.
-- The task ledger is console-owned (`task_list`/`task_create`/`task_update`),
-  keyed to the AgentSession — never a provider session — so every agent reads
-  the same list; a task may name the requirement it discharges.
-  An assignment whose task still has incomplete dependencies is
-  scheduled rather than delivered, and dispatches the moment its last blocker
-  completes. Main wakes itself later with the console-owned `set_deadline`
-  (the native cron and wakeup tools are denied). In-process subagents
-  (`Agent`/`Task`) are denied everywhere — they would fork ungoverned context.
-  Main holds Read, Bash, Write and Edit for unblocking, verifying and operator
-  deliverables; commissioned implementation goes through seats.
-- Main wakes only for a decision, failure, milestone, or final result. Repeated
-  pending reports from one AgentSession coalesce; ordinary updates never wake
-  it. Runtime state is rendered as trace data instead of chat narration.
-
-SQLite is the authoritative event and mailbox store. It records messages,
-delivery transitions, tool calls/results, runtime notices, retries, failures,
-turns, and termination. Large tool payloads and screenshots
-become durable artifacts referenced by bounded event rows. The SDK's eager `SessionStore` mirror is also SQLite-backed, so provider
-history is available for recovery even when a participant crashes before it
-can send a closing message.
-
-## Agent profiles
-
-Immutable built-ins are `coordinator`, `explorer`, `planner`, `implementer`,
-`frontend-implementer`, `reviewer`, `visual-reviewer`, and `researcher`.
-Profiles define purpose, instructions, exact tools, permission mode, model and
-effort overrides, turn limit, and any MCP servers its agents get. Every
-profile declares a **role archetype** — `orchestrator`, `explorer`,
-`planner`, `implementer`, or `reviewer` — naming the kind of progress the
-seat produces (main is the run-level orchestrator); minted variants inherit
-their base's role, and a write-isolated reviewer-archetype seat is the ONE
-kind whose requirement claims the Console records as `independent` — the
-tier follows the snapshotted facts, not the model's say-so, so reviewer
-seats hold `report_requirement` wherever they sit in a topology.
-
-Every lane sees the workspace as an interactive Claude Code session would: the
-CLI's user, project and local settings load (CLAUDE.md, permissions, skills,
-hooks), and every discovered skill is visible to every agent — a profile's
-`skills` list is the set its brief recommends, not a filter. The console's own
-skills plugin (`server/skills`) loads for main and every seat alike; it ships
-the six `git-gud-*` skills (commits, conflicts, coordinate, recover, sync,
-worktrees), which govern every git operation an agent runs itself, and the
-three orchestration-doctrine skills main reaches for at decision points
-(`orchestration-patterns`, `requirements-mechanics`, `wrap-up-and-landing` —
-the standing prompts keep the invariants; these carry the procedure). Only
-the composer's rewrite pass runs hermetically.
-
-**Three agent concepts, deliberately distinct.** *Project-native Claude
-agents* (`.claude/agents/*.md`) and *plugin-native agents* are workspace
-configuration Claude owns; *Agentique AgentSessions* are the durable
-orchestration participants the Console instantiates FROM a native definition
-(the native `Agent` tool stays denied — the Console is the execution engine).
-
-Add custom profiles as **native Claude agent files** in
-`.claude/agents/<name>.md` — real YAML frontmatter (parsed with a real YAML
-parser, never a home-grown subset) over a markdown body that becomes the
-agent's instructions. Native fields keep their native meaning: `name`,
-`description`, `tools` (list or comma string; **omitted means "inherits all
-tools"**, bounded by console policy — never normalized into a list),
-`disallowedTools`, `model`, `permissionMode`, and `mcpServers` (the full
-native surface: stdio, SSE, HTTP, and name refs). Agentique-owned governance
-rides a namespaced `agentique:` map — `role`, `recommendedSkills`,
-`assignmentTurnBudget`, `handoffExtension`, `exemptFromOwnership` — or an
-equivalent `.agentique/agents/<name>.overlay.json` sidecar. Example:
-
-```markdown
----
-name: database-reviewer
-description: Review SQLite schema and migrations
-tools: Read, Glob, Grep, Bash
-agentique:
-  role: reviewer
-  recommendedSkills: [handoff-discipline]
-  assignmentTurnBudget: 30
----
-Review only. Run focused tests and report concrete defects.
-```
-
-Every definition carries three independent states: **Claude-valid** (parses
-as a legitimate native definition), **Agentique-compatible** (instantiable
-with every execution-affecting field's semantics preserved — a valid file
-using a native feature the Console cannot execute faithfully, such as
-`skills:` preloading or `maxTurns`, shows valid + incompatible with the
-reason and the `agentique:` alternative), and **Agentique-trusted** (the
-operator approved that exact source revision). Only all three run. Trust
-binds to the definition SOURCE — path, native name, file bytes, overlay
-bytes — so moving, renaming, or editing a trusted definition requires
-re-trust, and a higher-precedence same-name file never inherits a shadowed
-file's trust. Running AgentSessions stay frozen to their resolved snapshot
-across edits. Built-in profiles are immutable — clone to a new id.
-`npx tsx server/scripts/migrate-profile.ts` converts a legacy
-`.agentique/agents/<id>/` bundle (still dual-read for one transition
-release) into a native file; the migrated definition is a new source and
-requires re-trust.
-
-**Four governance layers, separately computed, never mixed into one list:**
-(1) the **native-definition tool ceiling** — what the author granted
-(`tools`/`disallowedTools`, omission = native inheritance); (2) the
-**Agentique product-policy ceiling** (`sdk/native-capability-policy.ts`),
-which classifies the SDK's ENTIRE native tool surface and denies seats the
-coordination, task-state, scheduling, human-surface, and host-surface
-natives; (3) **console tool grants** (`agent-sessions/grants.ts`) — the
-orchestration tools (`mcp__console_agent__*`) a seat's role earns, a
-separate grant surface from native tools; and (4) **worktree containment**,
-which is never authorization. A seat's effective native tools are a pure
-intersection — `ceiling ∩ policy` (or `policy \ disallowedTools` when
-`tools` is omitted) — identical with or without a worktree, and everything
-in the surface outside that set is denied by name. Nothing is ever added
-because of a worktree or a console convenience; a policy tripwire test
-parses the installed SDK's tool schemas and fails CI when an unclassified
-tool appears.
-
-Capability is native or declared, never console-built. `Bash` gives an agent
-a shell — long-running work is backgrounded and read back with the native
-`TaskOutput`/`TaskStop`/`Monitor` (author-declared in `tools` like any
-native tool). Anything more comes from `mcpServers`, with **one launcher per
-declaration**: the workspace root `.mcp.json` and settings-configured
-servers stay SDK-owned with native semantics untouched; a profile's
-stdio/SSE/HTTP declarations are console-executed (trust-gated, per-call
-timeout, auto-approved whole); a bare name ref keeps its native meaning —
-"attach an already-configured server" — so the workspace's own config
-launches it and the Console only grants `mcp__<name>` (an unresolvable ref
-is a compatibility finding). The built-in `frontend-implementer` and
-`visual-reviewer` declare a browser server. `CONSOLE_MCP_DISABLED` drops
-servers by name and `CONSOLE_BROWSER_MCP` replaces the browser one
-install-wide. Any agent can dereference an artifact it or a teammate
-produced with `read_artifact`.
-
-**The Console runs no sandbox.** The SDK's gave every Bash call its own network
-and PID namespace, so a dev server died with the call that started it and was
-unreachable from the browser sent to verify it — the two things a coding agent
-most needs. Containment is the worktree: every non-coordinator agent in a git
-workspace works in its own tree, and only a write profile's tree merges when
-its session reports; a read-only profile's tree is a snapshot that is
-discarded, and the agent is told so. The worktree changes what a seat can
-TOUCH, never what it is granted. Each agent is told its own capabilities at
-spawn — the same intersection the runtime enforces — so a limit is a stated
-fact rather than something to discover by failing.
-
-## Context and decisions
-
-Within a generation, a lane keeps one provider session and the CLI's native
-auto-compaction manages its context exactly as it does for an interactive
-session. Native compaction bounds the context WINDOW, not replay: a resumed
-provider session replays its whole retained history on every later API call,
-so a seat whose parked provider session has carried occupancy at or above
-`CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS` (default 150K; 0 disables) is not
-resumed at its next wake — the Console journals a deterministic continuation
-checkpoint and the SAME seat (assignment, tasks, ownership, worktree)
-continues as a fresh generation. The retired transcript stays journaled for
-audit; it just never taxes a future turn. (The old settle-time rotation
-subsystem and its `CONSOLE_CONTEXT_*`/`CONSOLE_CHECKPOINT_*` knobs remain
-removed — setting one is a boot error.) CRASH recovery shares the same
-reconstruction: when a lane dies before it can report, the Console rebuilds
-a checkpoint from state it owns (operator decisions, the governing
-requirements, the task ledger, ownership, the worktree branch and diff, the
-agent's own last report), so a successor always inherits something true. The
-occupancy figure the UI shows is a per-provider-session high-water mark;
-after a native compaction it stays at the peak.
-
-An AgentSession owes the operator a reply. If it goes idle without its
-coordinator reporting, the Console closes the loop itself from the journal —
-labelled as Console-assembled, never as a coordinator result.
-
-Every agent — not just coordinators — has the typed `ask_operator` tool.
-Blocking operator decisions surface immediately as cards. Nonblocking
-decisions travel as coalesced milestones. Product scope, fidelity, licensing,
-budget, security, and irreversible choices belong to the operator; routine
-technical sequencing and local integration do not.
-
-Each ask participates in a project-level **decision issue** — the durable
-human choice it refers to. Asks from different agents or sessions sharing an
-explicit `issueKey` become one issue: the operator sees one question, and one
-answer resolves every attached ask. A chat reply binds automatically only
-while a single issue is open; with several open, the orchestrator binds the
-operator's words to the named issue explicitly, so one message can never
-resolve unrelated questions. Issues outlive their askers and their session,
-carry every asker's recommendation, and keep superseded answers as history.
+The architecture is defined under [`docs/architecture/`](docs/README.md);
+those four documents are authoritative over this README.
 
 ## Running
 
-```bash
+Requirements: Node 22.22 or later, git on `PATH`, and the Claude Agent SDK
+credentials the provider needs in the environment.
+
+```
 npm install
-npm start                    # http://localhost:4400
-npm run dev                  # Vite HMR + watched server
-npm run verify               # credential-free tests (fake SDK; worktree suites use real git)
+npm start          # builds the web application and serves it with the API on one port
+npm run dev        # the API (tsx watch) and the vite dev server side by side
 ```
 
-Data defaults to `~/.agentique-console/console.db`; point `CONSOLE_DATA_DIR`
-somewhere fresh to make a run's database a self-contained artifact, then
-summarize it afterwards with
-`npx tsx server/scripts/report-run.ts [path/to/console.db]`.
+The server prints the address it listens on. State lives under
+`CONSOLE_DATA_DIR` (default `~/.agentique-console`): `console.sqlite`, the
+blob store, provider continuation state, and per-Workspace worktrees.
 
-The orchestrator runs on `claude-opus-5` by default. `CONSOLE_MODEL` moves that
-default, and the composer's model chip overrides it per session (opus-5,
-fable-5, sonnet-5) — a change recycles the lane, so it takes effect on the next
-turn rather than mid-turn. Agent models come from profiles and are unaffected;
-every builtin profile runs on `claude-opus-5`. Effort: main and the write and
-review profiles run at `xhigh`, coordination and evidence-gathering at `high`;
-`CONSOLE_EFFORT` (one of low, medium, high, xhigh, max) overrides every lane.
+Startup validates the configuration, opens the database (a database the
+current schema did not create is refused with instructions to reset the
+data directory; there is no migration path from any earlier version),
+recovers durable state (interrupted Attempts, pending blob writes,
+outstanding publications), and only then admits work and serves requests.
+While the blob reconciliation is incomplete, mutating requests are refused
+with `503 unavailable`; reads keep working. The process assumes it is the
+exclusive owner of its data directory.
 
-Settings (`server/src/config.ts` is authoritative): `CONSOLE_DATA_DIR`,
-`CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_SKILLS_DIR`, `CONSOLE_FS_ROOTS`,
-`CONSOLE_MODEL`, `CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`,
-`CONSOLE_AUTO_INIT_GIT=0`, `CONSOLE_MCP_DISABLED`, `CONSOLE_BROWSER_MCP`.
-Agent-residency knobs — these bound RESIDENT LANES (live provider
-processes), never durable seats: a parked seat still exists, and an
-AgentSession's roster may exceed what is resident.
-`CONSOLE_MAX_RESIDENT_AGENTS` (the machine-wide lane cap, default sized to
-host RAM: `min(12, max(4, totalmem/1.5GiB))`),
-`CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION` (the per-AgentSession lane cap,
-default 4 — per session, deliberately NOT shared across a parent and its
-children: each child session brings its own residency under the global cap,
-so nesting adds parallel capacity), `CONSOLE_AGENT_IDLE_REAP_MS` (default 300000),
-`CONSOLE_AGENT_SPAWN_TIMEOUT_MS` (default 30000),
-`CONSOLE_PEER_NAME_PREFIX` (default `console-`, the session-registry
-namespace), and `CONSOLE_AGENT_WORKTREES=0` to disable agent worktree
-isolation.
-Supervision and governance knobs: `CONSOLE_MCP_TOOL_TIMEOUT_MS` (default
-300000, per-call wall clock on every console-executed MCP server),
-`CONSOLE_TOOL_ALARM_MS` (600000), `CONSOLE_TURN_QUIET_ALARM_MS` (300000),
-`CONSOLE_WATCHDOG_IDENTICAL_CALLS` (5), `CONSOLE_WATCHDOG_ERROR_STREAK`
-(10), `CONSOLE_MAX_REDELIVERY_ATTEMPTS` (2), `CONSOLE_GOVERNANCE_SWEEP_MS`
-(30000), `CONSOLE_OPERATOR_ASK_DETACH_MS` (300000),
-`CONSOLE_DEFERRED_AUTO_PROCEED_MS` (900000),
-`CONSOLE_BLOCKING_ASK_ESCALATE_MS` (900000), `CONSOLE_COMPLETION_QUIET_MS`
-(2000), `CONSOLE_PATTERN_HANDOFF_CAP` (120), `CONSOLE_PATTERN_STALL_MS`
-(600000), `CONSOLE_CHILD_SESSIONS=0`, `CONSOLE_MAX_CHILD_SESSIONS` (5),
-`CONSOLE_MAX_SESSION_DEPTH` (2).
-Retired names fail the boot with the replacement named — among them the four
-rotation knobs (`CONSOLE_CONTEXT_ROTATION`, `CONSOLE_CONTEXT_TOKEN_LIMIT`,
-`CONSOLE_CONTEXT_TURN_LIMIT`, `CONSOLE_CHECKPOINT_TIMEOUT_MS`; native
-compaction manages context) and the old `*_SEAT_*`/`*_PER_TREE` spellings.
+Shutdown (SIGINT/SIGTERM) stops admission, lets the scheduler drain,
+interrupts running Attempts through the provider's interruption path (they
+are recorded as interrupted with cause `shutdown`, never as failed work),
+waits a bounded time for them to settle, and closes the database. A Run is
+never cancelled and an operator pause is never erased by a shutdown; the
+next start reconstructs every runnable Run and every outstanding
+publication from the rows.
 
-Historical SDK JSONL can be copied into the authoritative provider journal:
+### Configuration
 
-```bash
-npm run import-legacy --workspace server -- /path/to/session.jsonl [session-id] [subpath]
+All variables are optional and prefixed `CONSOLE_`. An invalid value fails
+startup with exit code 1 naming the variable. Unknown `CONSOLE_*` names are
+ignored.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATA_DIR` | `~/.agentique-console` | State directory. |
+| `PORT`, `HOST` | `4400`, `127.0.0.1` | The listener. `0` picks a free port. |
+| `FS_ROOTS` | home and its filesystem root | Directories the Workspace browser may list, separated by the platform path delimiter. Every Workspace root must lie under one. |
+| `MODEL`, `EFFORT` | `claude-fable-5-1`, `medium` | The provider model and reasoning effort. |
+| `CONTINUATION`, `CONTINUATION_TTL_MS` | `1`, unset | Provider session continuation across Attempts and its retention. |
+| `MCP_DISABLED`, `BROWSER_MCP` | `0`, unset | Disable the approved MCP catalog; the browser MCP server command. |
+| `PROVIDER_MAX_CONCURRENCY`, `PROCESS_MAX_ATTEMPTS`, `MAX_WORKTREES` | `4`, `6`, unset | Resource governor limits. |
+| `MAX_CONCURRENT_RUNS`, `DIAGNOSTICS_RETAINED` | `4`, `500` | Host driver limits: Runs advanced concurrently; diagnostics kept in memory. |
+| `DEFAULT_MAX_COST_USD`, `DEFAULT_MAX_TOKENS`, `DEFAULT_MAX_ATTEMPTS`, `DEFAULT_MAX_CONCURRENCY`, `DEFAULT_MAX_WALL_CLOCK_MS` | `50`, `5000000`, `60`, `3`, unset | The Budget a Run gets when the operator does not state one. |
+| `ORCHESTRATOR_COST_USD`, `ORCHESTRATOR_TOKENS`, `ORCHESTRATOR_ATTEMPTS` | `5`, `500000`, `8` | The Orchestrator's allocation; the final reserve is at least one such allocation, by the canonical allocation rules. |
+| `NODE_COST_USD`, `NODE_TOKENS`, `NODE_ATTEMPTS` | `4`, `400000`, `4` | The default allocation of a plan node. |
+| `ATTEMPT_MAX_WALL_CLOCK_MS`, `CHECK_TIMEOUT_MS` | `600000`, `600000` | Bounds on one Attempt and on one deterministic check. |
+| `DEFAULT_COMPLETION_CHECK` | `npm test` | The completion check of a coding Run when the operator states none; empty declares none. |
+| `DEFAULT_EVALUATOR` | `reviewer` | The Gate Evaluator: the built-in reviewer or `none`. |
+
+### Verification
+
+```
+npm run verify     # typecheck and the test suites of every workspace
+npm test           # the test suites alone
+npm run build      # core, server, and the web bundle
 ```
 
-## Minimal architecture
+`npm run verify:coding-run --workspace server` runs one real coding Run
+against the live provider over a disposable repository; it is the only
+step that needs credentials. The live smoke test in the server suite is
+skipped unless `AGENTIQUE_LIVE_SMOKE=1`.
 
-```text
-shared/  domain, REST, and event contracts
-server/
-  orchestrator/runner.ts       serialized main turns + coalesced material wakes
-  orchestrator/requirements.ts the requirement graph: revisions, statuses, delegations
-  agent-sessions/service.ts    managed participants, strict routing, mailbox
-  agent-profiles/registry.ts   immutable built-ins + trusted native .claude/agents
-  sdk/native-capability-policy.ts  the whole native tool surface, classified
-  events/bus.ts                replayable event journal + artifacts
-  sdk/session-store.ts         eager provider-entry journal
-  runtime/worktree-manager.ts  console-owned git worktrees per seat
-web/
-  live/                        one replay-then-tail EventSource
-  session/, agents/            conversation and complete execution inspector
+## What an operator does
+
+1. Add a **Workspace**: a directory under a browse root, usually a git
+   repository. A git Workspace publishes to a branch; a plain directory
+   can run everything but cannot be published atomically, and the console
+   says so before anything is attempted.
+2. Open a **Conversation** and start a **Run** from a goal. The goal and
+   the completion check become the operator's Requirement; the Budget, the
+   Orchestrator allocation, and the final reserve have validated defaults.
+3. Answer what the Orchestrator asks: approve or edit its **Requirement
+   proposal**, resolve **Decisions**, approve **Budget Increases**, steer
+   it with messages. Every operator input is a durable record the next
+   Orchestrator turn receives; nothing is a chat transcript.
+4. Watch the **Execution Plan** (a compiled graph of pattern and join
+   nodes), the **Task ledger**, the Invocations and Attempts, usage and
+   Budget, Gates and Evaluations, and the live output of running Attempts.
+5. When the completion check and the Gate Evaluator pass, review the
+   **final report** and accept the **signoff** or request changes.
+   Accepting records the final Changeset and completes the Run; it does
+   not touch the Target.
+6. Request **publication** and confirm it. The runtime prepares a
+   candidate, verifies the accepted result on it, and updates the Target
+   branch and a receipt ref in one atomic git transaction; a Target that
+   moved meanwhile refuses the update and nothing is applied. A checkout
+   of the Target branch is brought forward only when that is safe; local
+   changes are never discarded.
+
+Pause (soft: no new Attempts; hard: interrupt running ones), resume, and
+cancel are available at every point. A cancelled Run stays inspectable.
+
+## HTTP API
+
+`core/src/api.ts` is the one route contract: every route, its method and
+path, its request schema, its response type, the pagination and body
+bounds, and the error codes. The server registers exactly those routes and
+the web application calls them by name. Highlights:
+
+- `GET /api/health`, `/api/config`, `/api/system/capacity`
+- `/api/workspaces`, `/api/fs/roots`, `/api/fs/dirs` (browse roots only)
+- `/api/conversations`, messages, Requirements and Acceptance Criteria,
+  Decisions, Runs
+- `/api/runs/:runId` — the overview with the derived phase; `/plan`,
+  `/invocations`, `/tasks`, `/decisions`, `/budget`, `/evaluations`,
+  `/gates`, `/snapshots`, `/changesets`, `/artifacts`, `/usage`,
+  `/signoff`, `/publications`; `start`, `cancel`, `pause`, `resume`,
+  Budget Increases, signoff accept / request changes, publication request
+  / resolve
+- Records by id: plan nodes, Invocations, Attempts and their transcripts,
+  Tasks, Handoffs, Decisions (resolve, supersede), Evaluations, Gates,
+  Snapshots, Changesets, Artifacts (metadata, bounded content, download),
+  Publications (advance)
+- `GET /api/events` — the committed-event stream (server-sent events) with
+  sequence replay from `Last-Event-ID`, filters by Workspace, Conversation,
+  or Run, and the transient output of running Attempts.
+
+Every mutation is an idempotent operator operation: an identical replay
+returns the recorded outcome; a request the domain refuses (a different
+resolution of a resolved Decision, an action on a terminal Run) is
+`409 refused` with the typed reason; a stale state transition is
+`409 conflict`. Nothing
+in a request names the actor; the server is the authority on identity,
+state, and storage. Responses carry no credentials, provider payloads, or
+storage paths.
+
+## Layout
+
+```
+core/       @agentique-console/core — domain types, schemas, transitions, the API contract
+server/src/
+  persistence/    SQLite schema and baseline migration, stores, transactions, journal, blob store
+  execution/      scheduler, Invocation and Attempt execution, runtime tools, Gates, completion,
+                  signoff, publication, Budget growth, run control, recovery
+  provider/       Claude Agent SDK adapter and fixture
+  workspace-state/ git and directory providers behind the six Workspace ports
+  agents/         Agent Definitions (built-in and Workspace files)
+  composition/    the one runtime composition; the live verification entrypoint
+  host/ events/ operator/ api/ workspaces/   process host, event stream, operator services, routes
+  main.ts app.ts boot.ts config.ts           entrypoint, application, startup order, configuration
+web/src/    the operator web application
+docs/       the architecture documents and the delivery roadmap
 ```
 
-The intended vertical slice is intentionally small: orchestration, managed
-agent sessions, reliable events, bounded context, profiles, and enough runtime
-tooling for agents to validate their work.
+`server/src/persistence/boundaries.test.ts` enforces the import rules
+between these boundaries, the retired vocabulary across the tree, the
+single scheduler, and the startup order. The test suites run real git,
+real subprocesses, and real process death where the guarantee needs it;
+no guarantee is claimed for power loss.

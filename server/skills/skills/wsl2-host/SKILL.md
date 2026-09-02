@@ -44,7 +44,7 @@ Conclusions that are wrong on WSL2 unless you know the substrate:
   neither. Bound link parallelism (`CARGO_BUILD_JOBS=4` or `cargo ... -j4`)
   and prefer package-scoped builds (`cargo test -p <crate>`) over
   `--workspace` when the question is package-scoped.
-- Never run more than one full-workspace build/test at a time across seats;
+- Never run more than one full-workspace build/test at a time across agents;
   say so in your report if you queued behind a teammate's build.
 - If a build is OOM-killed (exit 137 / "signal: 9"), report it as memory
   pressure with the concurrent load you observed — do not retry into the

@@ -1,14 +1,14 @@
-# Worktree Topology and Repair
+# Worktree Layout and Repair
 
 ## Contents
 
-1. Recommended topology
+1. Recommended layout
 2. Common-dir implications
 3. Creation patterns
 4. Cleanup gate
 5. Repair cases
 
-## Recommended topology
+## Recommended layout
 
 ```text
 repo/                       coordinator or primary checkout
@@ -39,7 +39,7 @@ Consequences:
 | Existing branch | `git worktree add <path> <branch>` | Confirm branch is not checked out elsewhere |
 | Read-only inspection | `git worktree add --detach <path> <oid>` | Do not make durable unbranched commits |
 | Remote branch | `git worktree add --track -b <local> <path> <remote>/<branch>` | Verify remote and upstream explicitly |
-| Long-lived lane | `git worktree lock --reason <reason> <path>` | Record owner and unlock condition |
+| Long-lived worktree | `git worktree lock --reason <reason> <path>` | Record owner and unlock condition |
 
 Avoid `--guess-remote` when several remotes contain the same branch name.
 

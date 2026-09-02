@@ -7,7 +7,7 @@ status: validated
 requires:
   tools: [Bash]
 whenToUse: Before creating, inspecting, repairing or removing a git worktree — including diagnosing already-checked-out or registry problems.
-costNote: ~105 lines when invoked; references/worktree-topology.md and scripts/git-gud-worktree.sh on demand.
+costNote: ~105 lines when invoked; references/worktree-layout.md and scripts/git-gud-worktree.sh on demand.
 ---
 
 # Manage Git Worktrees
@@ -65,7 +65,7 @@ Create a branch before making durable changes there.
 - Put worktrees beside the main checkout, not inside it.
 - Record the absolute path, branch, owner, task, and base OID.
 - Avoid symbolic-link aliases that make the same path appear under different names.
-- Lock worktrees on removable volumes or long-lived agent lanes:
+- Lock worktrees on removable volumes or long-lived agent worktrees:
 
 ```bash
 git worktree lock --reason 'agent task in progress' <path>
@@ -110,4 +110,4 @@ Delete the retained branch only after a separate reachability check. Never combi
 - Lock a temporarily unavailable worktree instead of pruning it.
 - If Git says a branch is checked out elsewhere, inspect `git worktree list --porcelain`; do not bypass the guard with force.
 
-Read [references/worktree-topology.md](references/worktree-topology.md) for shared-state behavior, patterns, and repair cases.
+Read [references/worktree-layout.md](references/worktree-layout.md) for shared-state behavior, patterns, and repair cases.

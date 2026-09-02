@@ -1002,8 +1002,13 @@ describe("terminology", () => {
   /** Lines that name a retired term only to forbid or test it. */
   const ALLOWED_CONTEXT = /(retired|forbid|prohib|never|not |reject|toThrow|expect\(|CHECK|no \w+ table|legacy|\/\/ )/i;
 
-  it("is absent from the new source, schema, migration, and tests except where a term is explicitly prohibited", () => {
-    const files = [...NEW_SOURCE_DIRS, ...WEB_SOURCE_DIRS].flatMap((dir) => listFiles(dir, isSource));
+  /** The shipped prose beside the source: the retained Workspace-facing skills, the repository scripts, and the top-level documents. */
+  const PROSE_DIRS = ["server/skills", "scripts"];
+  const PROSE_FILES = ["README.md", "docs/README.md"];
+  const isProse = (f: string) => /\.(md|sh|mjs|json)$/.test(f);
+
+  it("is absent from the new source, schema, migration, tests, skills, scripts, and top-level documents except where a term is explicitly prohibited", () => {
+    const files = [...[...NEW_SOURCE_DIRS, ...WEB_SOURCE_DIRS].flatMap((dir) => listFiles(dir, isSource)), ...PROSE_DIRS.flatMap((dir) => listFiles(dir, isProse)), ...PROSE_FILES.map((f) => path.join(repoRoot, f))];
     const offences: string[] = [];
     for (const file of files) {
       if (rel(file) === "server/src/persistence/boundaries.test.ts") continue;
@@ -1015,6 +1020,28 @@ describe("terminology", () => {
       });
     }
     expect(offences).toEqual([]);
+  });
+
+  it("every invariant of execution-model §15 (1–29) is referenced by number in at least one test", () => {
+    const model = fs.readFileSync(path.join(repoRoot, "docs/architecture/execution-model.md"), "utf8");
+    const section = model.slice(model.indexOf("## 15. Invariants"), model.indexOf("## 16. Non-goals"));
+    const numbered = [...section.matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
+    expect(numbered).toEqual(Array.from({ length: 29 }, (_, i) => i + 1));
+    const referenced = new Map<number, string[]>();
+    const isTestFile = (f: string) => /\.test\.tsx?$/.test(f);
+    for (const file of [...NEW_SOURCE_DIRS, ...WEB_SOURCE_DIRS].flatMap((dir) => listFiles(dir, isTestFile))) {
+      const text = fs.readFileSync(file, "utf8");
+      const phrases = [...text.matchAll(/invariants?(?: §15)?:? ((?:\d+(?:\s*(?:,|–|-|and|, and)\s*)?)+)/gi), ...text.matchAll(/§15 invariants exercised here: ([\d, ]+)/g)];
+      for (const phrase of phrases) {
+        for (const n of phrase[1]!.match(/\d+/g) ?? []) {
+          const number = Number(n);
+          if (number < 1 || number > 29) continue;
+          referenced.set(number, [...(referenced.get(number) ?? []), rel(file)]);
+        }
+      }
+    }
+    const missing = numbered.filter((n) => !referenced.has(n));
+    expect(missing, `invariants without a test reference: ${missing.join(", ")}`).toEqual([]);
   });
 
   it("does not model a domain Session type", () => {

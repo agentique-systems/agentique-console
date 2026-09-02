@@ -1,6 +1,6 @@
 ---
 name: git-gud-sync
-description: Safely synchronize, rebase, merge, cherry-pick, transplant, publish, and integrate Git branches in concurrent development. Use when updating an agent branch from its upstream, choosing rebase versus merge, integrating several branches, handling stacked branches, preserving merge topology, comparing rewritten series, or pushing rewritten private history with a precise lease.
+description: Safely synchronize, rebase, merge, cherry-pick, transplant, publish, and integrate Git branches in concurrent development. Use when updating an agent branch from its upstream, choosing rebase versus merge, integrating several branches, handling stacked branches, preserving merge structure, comparing rewritten series, or pushing rewritten private history with a precise lease.
 version: 1.0.0
 provenance: git-gud skill pack, imported 2026-08-17
 status: validated
@@ -63,7 +63,7 @@ git branch "$backup" HEAD
 git rebase --rebase-merges <new-base>
 ```
 
-Use `--rebase-merges` only when branch-local merge topology is intentional. Use plain rebase for a linear topic. Avoid `--update-refs` unless all potentially moved branch owners agree.
+Use `--rebase-merges` only when the branch-local merge structure is intentional. Use plain rebase for a linear topic. Avoid `--update-refs` unless all potentially moved branch owners agree.
 
 For stacked branches:
 
