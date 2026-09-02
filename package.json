@@ -14,7 +14,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "verify": "npm run typecheck && npm test"
+    "verify": "npm run typecheck && npm test",
+    "test:browser": "npm run build --workspace web && npm run test:browser --workspace web"
   },
   "engines": {
     "node": ">=22.22.0"

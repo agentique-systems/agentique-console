@@ -8,6 +8,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
+    // The driven-browser suite runs under its own configuration (`vitest.browser.config.ts`), in Node with a real browser.
+    exclude: ["**/node_modules/**", "tests/browser/**"],
     setupFiles: ["tests/setup.ts"],
     // jsdom 29 and its encoding dependency require() ES modules, which Node unflagged in 22.12; this build's
     // declared engine is >= 22.22, and the flag makes a 22.11 host load them the same way.
