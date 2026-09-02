@@ -51,7 +51,15 @@ const FIXED_VARIABLES: Readonly<Record<string, string>> = Object.freeze({
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 });
 
-export function providerEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export interface ProviderEnvironmentOptions {
+  /** The console's bound on one MCP tool call (`CONSOLE_MCP_TOOL_TIMEOUT_MS`), set as the SDK's `MCP_TOOL_TIMEOUT`; `null` leaves the inherited value or the SDK's default. */
+  mcpToolTimeoutMs?: number | null;
+}
+
+/** The SDK's environment variable bounding one MCP tool call, in milliseconds. */
+export const MCP_TOOL_TIMEOUT_VARIABLE = "MCP_TOOL_TIMEOUT";
+
+export function providerEnvironment(source: NodeJS.ProcessEnv = process.env, options: ProviderEnvironmentOptions = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined || HOST_COUPLING_VARIABLES.has(key)) continue;
@@ -60,6 +68,7 @@ export function providerEnvironment(source: NodeJS.ProcessEnv = process.env): Re
   for (const flag of STRIPPED_FEATURE_FLAGS) delete env[flag];
   env.CLAUDE_CODE_MAX_RETRIES = env.CLAUDE_CODE_MAX_RETRIES ?? DEFAULT_SDK_MAX_RETRIES;
   for (const [key, value] of Object.entries(FIXED_VARIABLES)) env[key] = value;
+  if (options.mcpToolTimeoutMs !== undefined && options.mcpToolTimeoutMs !== null) env[MCP_TOOL_TIMEOUT_VARIABLE] = String(options.mcpToolTimeoutMs);
   return env;
 }
 

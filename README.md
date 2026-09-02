@@ -60,7 +60,9 @@ ignored.
 | `FS_ROOTS` | home and its filesystem root | Directories the Workspace browser may list, separated by the platform path delimiter. Every Workspace root must lie under one. |
 | `MODEL`, `EFFORT` | `claude-fable-5-1`, `medium` | The provider model and reasoning effort. |
 | `CONTINUATION`, `CONTINUATION_TTL_MS` | `1`, unset | Provider session continuation across Attempts and its retention. |
-| `MCP_DISABLED`, `BROWSER_MCP` | `0`, unset | Disable the approved MCP catalog; the browser MCP server command. |
+| `MCP_DISABLED` | unset | Comma-separated names of approved MCP servers (`browser`) to drop from the catalog an Attempt may receive. Not a flag: an entry that names no approved server fails startup. |
+| `BROWSER_MCP` | unset | The `browser` MCP server command, whitespace separated. |
+| `MCP_TOOL_TIMEOUT_MS` | unset | The bound on one MCP tool call of an Attempt, in milliseconds (at least 1000), applied through the SDK's own per-call limit; unset uses the SDK's default. |
 | `PROVIDER_MAX_CONCURRENCY`, `PROCESS_MAX_ATTEMPTS`, `MAX_WORKTREES` | `4`, `6`, unset | Resource governor limits. |
 | `MAX_CONCURRENT_RUNS`, `DIAGNOSTICS_RETAINED` | `4`, `500` | Host driver limits: Runs advanced concurrently; diagnostics kept in memory. |
 | `DEFAULT_MAX_COST_USD`, `DEFAULT_MAX_TOKENS`, `DEFAULT_MAX_ATTEMPTS`, `DEFAULT_MAX_CONCURRENCY`, `DEFAULT_MAX_WALL_CLOCK_MS` | `50`, `5000000`, `60`, `3`, unset | The Budget a Run gets when the operator does not state one. |
@@ -77,6 +79,12 @@ npm run verify     # typecheck and the test suites of every workspace
 npm test           # the test suites alone
 npm run build      # core, server, and the web bundle
 ```
+
+`npm run test:browser` builds the web application and drives it in a real
+Chromium (Playwright) against a real server process over a disposable
+repository: the normal operator path through publication, pagination,
+pause and resume, a reconnect, deep links, and a narrow viewport. It needs
+Playwright's browser once: `npx playwright install chromium`.
 
 `npm run verify:coding-run --workspace server` runs one real coding Run
 against the live provider over a disposable repository; it is the only
@@ -137,6 +145,13 @@ the web application calls them by name. Highlights:
 - `GET /api/events` — the committed-event stream (server-sent events) with
   sequence replay from `Last-Event-ID`, filters by Workspace, Conversation,
   or Run, and the transient output of running Attempts.
+
+Every list pages by keyset: `limit` (at most 200), `order` (`asc` by
+default, `desc` for newest first), and an opaque `cursor` that names its
+collection and order (`nextCursor` continues, `reverseCursor` turns
+around); a page is also bounded to 1 MiB of serialized records and ends
+before the record that would cross it, and any JSON response above 4 MiB
+is refused as `413 payload_too_large` rather than truncated.
 
 Every mutation is an idempotent operator operation: an identical replay
 returns the recorded outcome; a request the domain refuses (a different

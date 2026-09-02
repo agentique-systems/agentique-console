@@ -97,7 +97,9 @@ const silent: Logger = { info: () => {}, warn: () => {}, error: () => {} };
 
 function mcpCatalog(config: Config): Record<string, McpServerConfig> {
   const catalog: Record<string, McpServerConfig> = {};
-  for (const [name, server] of Object.entries(config.provider.mcpServers)) catalog[name] = { type: "stdio", command: server.command, args: server.args };
+  const timeout = config.provider.mcpToolTimeoutMs;
+  // The per-server bound states the same limit the subprocess environment carries; the SDK honours whichever it reads first.
+  for (const [name, server] of Object.entries(config.provider.mcpServers)) catalog[name] = { type: "stdio", command: server.command, args: server.args, ...(timeout === null ? {} : { timeout }) };
   return catalog;
 }
 
@@ -113,7 +115,7 @@ export function createApp(options: CreateAppOptions): App {
     blobRoot: config.blobRoot,
     continuations: { root: config.continuationRoot, ttlMs: config.provider.continuationTtlMs },
     stateRoot: config.stateRoot,
-    provider: { sdk: options.sdk, continuation: config.provider.continuation, mcpServers: mcpCatalog(config), fallbackWorkingDirectory: config.dataDir },
+    provider: { sdk: options.sdk, continuation: config.provider.continuation, mcpServers: mcpCatalog(config), mcpToolTimeoutMs: config.provider.mcpToolTimeoutMs, fallbackWorkingDirectory: config.dataDir },
     agents: { model: config.provider.model, effort: config.provider.effort, maxContextOccupancy: 0.8, allocation: workerAllocation, orchestratorAllocation: config.defaults.orchestratorAllocation, maxWallClockMs: config.defaults.maxWallClockMs },
     planning: { ...DEFAULT_PLANNING_CONFIG, defaults: { ...DEFAULT_PLANNING_CONFIG.defaults, nodeAllocation: config.defaults.nodeAllocation } },
     runCreation: {

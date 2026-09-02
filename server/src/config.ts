@@ -11,7 +11,8 @@
  *   CONSOLE_MODEL, CONSOLE_EFFORT     the model and effort of the built-in Agent Definitions
  *   CONSOLE_CONTINUATION              1/0: provider session resumption for retries (1)
  *   CONSOLE_CONTINUATION_TTL_MS       how long a continuation payload stays resumable; unset: unbounded
- *   CONSOLE_MCP_DISABLED              approved MCP servers dropped from the catalog, comma separated
+ *   CONSOLE_MCP_DISABLED              approved MCP servers dropped from the catalog, comma separated (names: browser); unknown names are refused
+ *   CONSOLE_MCP_TOOL_TIMEOUT_MS       the bound on one MCP tool call of an Attempt (at least 1000); unset: the SDK's default
  *   CONSOLE_BROWSER_MCP               the `browser` MCP server command, whitespace separated
  *   CONSOLE_PROVIDER_MAX_CONCURRENCY  concurrent provider Attempts (4)
  *   CONSOLE_PROCESS_MAX_ATTEMPTS      concurrent Attempts in this process (6)
@@ -36,6 +37,9 @@ export interface McpServerCommand {
   args: string[];
 }
 
+/** The approved MCP server names a `CONSOLE_MCP_DISABLED` entry may name. */
+export const APPROVED_MCP_SERVERS = ["browser"] as const;
+
 export interface Config {
   dataDir: string;
   databaseFile: string;
@@ -54,6 +58,8 @@ export interface Config {
     continuationTtlMs: number | null;
     /** The approved MCP server catalog an Attempt may receive by capability name. */
     mcpServers: Record<string, McpServerCommand>;
+    /** The wall-clock bound on one MCP tool call of an Attempt (the SDK's per-call limit), or `null` for the SDK's default. */
+    mcpToolTimeoutMs: number | null;
   };
   governor: { providerMaxConcurrency: number; processMaxAttempts: number; maxWorktrees: number | null };
   driver: { maxConcurrentRuns: number; diagnosticsRetained: number };
@@ -147,7 +153,10 @@ function mcpServers(env: NodeJS.ProcessEnv): Record<string, McpServerCommand> {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
-  for (const name of disabled) delete catalog[name];
+  for (const name of disabled) {
+    if (!(APPROVED_MCP_SERVERS as readonly string[]).includes(name)) throw new ConfigError("CONSOLE_MCP_DISABLED", `expected approved MCP server names (${APPROVED_MCP_SERVERS.join(", ")}), got ${JSON.stringify(name)}`);
+    delete catalog[name];
+  }
   return catalog;
 }
 
@@ -195,6 +204,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, home: string = 
       continuation: flag(env, "CONSOLE_CONTINUATION", true),
       continuationTtlMs: optionalInteger(env, "CONSOLE_CONTINUATION_TTL_MS", { min: 1 }),
       mcpServers: mcpServers(env),
+      mcpToolTimeoutMs: optionalInteger(env, "CONSOLE_MCP_TOOL_TIMEOUT_MS", { min: 1_000 }),
     },
     governor: {
       providerMaxConcurrency: integer(env, "CONSOLE_PROVIDER_MAX_CONCURRENCY", 4, { min: 1 }),

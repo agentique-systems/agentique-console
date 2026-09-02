@@ -35,6 +35,13 @@ describe("providerEnvironment", () => {
     expect(isStrippedVariable("PATH")).toBe(false);
   });
 
+  it("sets the SDK's MCP tool-call bound from the console's configuration, and leaves the inherited value alone when the console states none", () => {
+    expect(providerEnvironment({ MCP_TOOL_TIMEOUT: "1" }, { mcpToolTimeoutMs: 5_000 }).MCP_TOOL_TIMEOUT).toBe("5000");
+    expect(providerEnvironment({}, { mcpToolTimeoutMs: 30_000 }).MCP_TOOL_TIMEOUT).toBe("30000");
+    expect(providerEnvironment({ MCP_TOOL_TIMEOUT: "1" }, { mcpToolTimeoutMs: null }).MCP_TOOL_TIMEOUT).toBe("1");
+    expect(providerEnvironment({}).MCP_TOOL_TIMEOUT).toBeUndefined();
+  });
+
   it("keeps an explicit retry cap and overrides an inherited traffic switch", () => {
     const env = providerEnvironment({ CLAUDE_CODE_MAX_RETRIES: "1", DISABLE_AUTOUPDATER: "0" });
     expect(env.CLAUDE_CODE_MAX_RETRIES).toBe("1");

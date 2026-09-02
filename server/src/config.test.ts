@@ -49,8 +49,21 @@ describe("configuration", () => {
     expect(config.defaults.completionCheck).toBeNull();
     expect(config.defaults.evaluator).toBe("none");
     expect(JSON.stringify(config)).not.toMatch(/resident|worktrees":true|advisory/);
-    // A disabled server leaves the catalog.
+    // A disabled server leaves the catalog: the value is a comma-separated list of approved server names, never a flag.
     expect(loadConfig({ CONSOLE_BROWSER_MCP: "cmd", CONSOLE_MCP_DISABLED: "browser" }, HOME).provider.mcpServers).toEqual({});
+    expect(loadConfig({ CONSOLE_BROWSER_MCP: "cmd", CONSOLE_MCP_DISABLED: " browser , " }, HOME).provider.mcpServers).toEqual({});
+    expect(loadConfig({ CONSOLE_BROWSER_MCP: "cmd", CONSOLE_MCP_DISABLED: "" }, HOME).provider.mcpServers).toEqual({ browser: { command: "cmd", args: [] } });
+    expect(loadConfig({ CONSOLE_MCP_DISABLED: "browser" }, HOME).provider.mcpServers).toEqual({});
+    // The MCP tool-call bound is a real limit of the Attempt's subprocess, or the SDK's default when unset.
+    expect(loadConfig({}, HOME).provider.mcpToolTimeoutMs).toBeNull();
+    expect(loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "5000" }, HOME).provider.mcpToolTimeoutMs).toBe(5_000);
+  });
+
+  it("refuses a CONSOLE_MCP_DISABLED entry that names no approved server, and a flag-like value", () => {
+    expect(() => loadConfig({ CONSOLE_MCP_DISABLED: "1" }, HOME)).toThrow(/CONSOLE_MCP_DISABLED/);
+    expect(() => loadConfig({ CONSOLE_MCP_DISABLED: "browser,other" }, HOME)).toThrow(/CONSOLE_MCP_DISABLED.*other/);
+    expect(() => loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "500" }, HOME)).toThrow(/CONSOLE_MCP_TOOL_TIMEOUT_MS/);
+    expect(() => loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "soon" }, HOME)).toThrow(/CONSOLE_MCP_TOOL_TIMEOUT_MS/);
   });
 
   it("refuses an invalid value naming the variable", () => {

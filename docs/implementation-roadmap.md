@@ -590,20 +590,111 @@ schema change against the single baseline migration.
 execution model defines operator control at Run level only (§3: cancel,
 pause soft/hard, resume) and node removal as the Orchestrator's plan
 revision (§4); legacy-removal §5 now maps the legacy interrupt route to
-the Run-level operations. The retained-variable list of legacy-removal
-§9 named `CONSOLE_SKILLS_DIR`, `CONSOLE_AUTO_INIT_GIT`,
-`CONSOLE_MCP_TOOL_TIMEOUT_MS`, `CONSOLE_WORKTREES`, and
-`CONSOLE_ATTEMPT_START_TIMEOUT_MS`; the new configuration consumes none
-of them (skills are not loaded into Attempts; the console never
-initializes git — a Workspace is adopted as it is, a repository root as
-`git` and anything else as `directory`; MCP tool timeouts and Attempt
-start timeouts are the adapter's bounds; worktree isolation is the git
-provider's only mode) and, per the same section, ignores unknown
-`CONSOLE_*` names.
+the Run-level operations.
+
+**Acceptance corrections (2026-09-02, after review of the branch).** Five
+defects of the cutover were reproduced and corrected; each has its
+regression beside it, and none introduced a phase, a compatibility
+mechanism, a polling scheduler, or an unrelated feature.
+
+1. *Capacity release.* At `99d72a1` the host requeued only Runs that still
+   held a process-local mark, so a Run whose pass ended `waiting` on
+   `provider_capacity` with no resumption time stayed waiting after the
+   holder's lease was released (reproduced by
+   `api/capacity-release.e2e.test.ts` against the starting commit: B never
+   ran). The lease store now delivers one committed-release notice per
+   root transaction (`afterCommit`, never inside the transaction and never
+   after a rollback); the governor exposes it as its capacity signal
+   (`onCapacityReleased`, execution-model §7.8, §14); the host re-projects
+   every Run the rows record `waiting` on `provider_capacity`
+   (`RunStore.listWaitingOn`) plus every Run whose last pass reported a
+   capacity wait while its row stayed `running`, through the same
+   coalesced marks, bounded and fair, and drops the signal at `stop`.
+   Readiness and admission stay the scheduler's and the governor's; a
+   paused, cancelled, or terminal Run projects nothing; a Decision or
+   budget wait is untouched; repeated notices duplicate nothing; startup
+   reconstructs the same from rows. Evidence: `host/run-host.test.ts`
+   (rows-listed and remembered waiters, coalescing, nothing after stop),
+   `api/capacity-release.e2e.test.ts` (real scheduler, governor, SQLite,
+   and host with a barrier-held Attempt; a Decision waiter untouched; a
+   shutdown that releases the holder's lease admits nothing; the next
+   process reconstructs both Runs).
+2. *Run launch.* `RunLaunchService.launch` authored the Requirement
+   revision before creating the Run, so a refused launch (another Run
+   active) left the revision and criteria committed, and a deferred start
+   (`start: false`) recorded no goal at all and later started with the
+   placeholder "Proceed.". The launch is now one root transaction over
+   the revision, the Run creation with its Workspace preparation and
+   compensation, the goal message, and the start; every refusal or
+   failure (active Run, validation, preparation, Event, COMMIT) rolls
+   everything back; the complete goal is the Run's first operator
+   message whatever `start` says, a deferred start delivers exactly it
+   once (a replacement message instead when given), and a repeated or
+   concurrent start refuses without a message or Invocation. A kept
+   Requirement keeps the Acceptance Criteria it holds at the current
+   revision when the operator authors the next one (its new tree entry
+   lists them), so a second Run's goal no longer silently drops the
+   first goal's check or leaves a criterion-less leaf for the completion
+   Gate. Evidence: `operator/run-launch.test.ts` over the public API.
+3. *Pagination.* Every list route pages by keyset over the stores
+   (`persistence/stores/paging.ts`, one indexed query per page in either
+   order) with an opaque cursor validated for collection, order, and key
+   shape; a page is bounded by `PAGE_MAX_BYTES` beside its record count
+   and ends before the record that would cross it, reporting its cursor;
+   every JSON response is bounded by `API_RESPONSE_MAX_BYTES` and refused
+   as `payload_too_large` rather than truncated; the aggregate responses
+   window their growing nested histories beside the totals (Plan Node
+   detail) or page them (the Task ledger, usage by Invocation, Agent
+   Definition revisions), with the full history one filtered page route
+   away. The web application follows `nextCursor` everywhere
+   (`usePage`, `PagedList`); the message view anchors one newest page and
+   pages older history on demand without ever refetching it, while the
+   live side above the anchor refreshes on the Conversation's Events; the
+   open Decisions and the open proposal are their own bounded facts,
+   never behind history; every query key carries its scope. Evidence:
+   `api/pagination.test.ts` (multi-page walks in both orders, cursor
+   refusals, the byte bound, `reverseCursor`, the response bound, the
+   aggregate windows), the jsdom suite, and the browser suite below.
+4. *Event stream.* `handleEvents` referenced its cleanup before defining
+   it, so a subscription the stream closed synchronously inside
+   `subscribe` (the initial replay crossing the buffer bound) threw in
+   the closure callback and left the response and heartbeat open. The
+   attachment is now one idempotent `end` over an explicit transport
+   boundary (`attachEventStream`, `SseTransport`), correct for closure
+   during subscription, backpressure on the first or a later replay page,
+   a disconnect during replay or live delivery, the stream's shutdown, a
+   throwing write, and repeated closures; replay pages are handed over
+   one event-loop turn apart so the bound measures the peer's real
+   backlog; an ended SSE response closes its socket. Evidence:
+   `api/events-sse.test.ts` (a scripted transport in every ordering),
+   `api/events.test.ts` (a real listener with a client that stops
+   reading: closed for backpressure, released, resumed from the last
+   frame it received until caught up, nothing lost or repeated, nothing
+   written).
+5. *Real-browser acceptance and the configuration contract.*
+   `web/tests/browser/acceptance.browser.test.ts` (`npm run test:browser`)
+   drives Playwright's Chromium over the built application and a real
+   server process: Workspace and Conversation creation, a Run launch, the
+   Requirement proposal reviewed and approved, a Decision resolved,
+   visible progress, completion and signoff, a separately authorized
+   publication to the disposable Target; pagination past the old
+   first-page boundary and a Decision beyond a page boundary resolved;
+   pause and resume; a reconnect after the network dropped; deep-link
+   reloads; no significant console error; a narrow viewport. The five
+   configuration names are reconciled in legacy-removal §9:
+   `CONSOLE_MCP_TOOL_TIMEOUT_MS` is implemented as the SDK's per-call
+   bound; `CONSOLE_MCP_DISABLED` is a validated list of approved server
+   names (the README said a flag); `CONSOLE_SKILLS_DIR`,
+   `CONSOLE_AUTO_INIT_GIT`, `CONSOLE_WORKTREES`, and
+   `CONSOLE_ATTEMPT_START_TIMEOUT_MS` are deleted with no replacement,
+   each with the resulting constraint stated. Unknown `CONSOLE_*` names
+   are still ignored, and none of the five is a no-op, an alias, or a
+   translation.
 
 **Completion condition.** Contract §9 acceptance: every route served,
 every legacy route 404, a fresh database starts, a legacy database is
-refused, `npm run verify` green.
+refused, `npm run verify` green; and, since the corrections above, the
+driven-browser suite green under the declared Node engine.
 
 **Status: complete.**
 
@@ -638,7 +729,8 @@ invariant of execution-model §15 referenced by a test; the merge to
   `persistence/boundaries.test.ts` asserts that coverage against the
   document.
 
-**Remaining.** The merge to `main`, pending review of the branch.
+**Remaining.** The merge to `main`, pending review of the branch (the
+acceptance corrections of Phase 9 are on the branch and verified).
 
 **Completion condition.** Contract §9 in full.
 
@@ -715,3 +807,12 @@ complete; Phase 10 is implemented and its one remaining item, the merge to
   file-backed restarts and the browser flow, the documents and terminology
   pass, and the §15 invariant coverage audit. Merge to `main` pending
   review.
+- 2026-09-02 — Final acceptance corrections of Phases 9–10 (see "Acceptance
+  corrections" under Phase 9): committed capacity releases re-project the
+  waiting Runs; the operator's Run launch is one transaction and a deferred
+  start delivers the recorded goal; keyset pagination with validated
+  cursors and serialized bounds through the API and the web application;
+  the event stream's cleanup is correct in every ordering; a driven-browser
+  acceptance suite; the five configuration names reconciled. Verified
+  under Node 22.23.2 (the declared engine is `>=22.22.0`). Merge to `main`
+  still pending review.

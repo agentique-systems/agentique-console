@@ -101,11 +101,13 @@ describe("ClaudeAgentSdkAdapter: SDK configuration", () => {
   it("hands the SDK exactly the exposed native tools, denies every other classified tool by name, pre-approves nothing, keeps the default permission mode, loads no ambient settings, and binds one PreToolUse hook and a fail-closed prompt", async () => {
     const sdk = new FakeClaudeSdk();
     sdk.script(turn([returnResult()]));
-    const adapter = adapterWith(sdk);
+    const adapter = adapterWith(sdk, { mcpToolTimeoutMs: 45_000 });
     const { request } = build({ tools: ["read", "search", "shell"] });
     const outcome = await adapter.execute(request);
     expect(outcome.completion).toEqual({ kind: "completed" });
     const options = sdk.captured.options[0]!;
+    // The console's MCP tool-call bound reaches the subprocess as the SDK's own limit.
+    expect(options.env?.MCP_TOOL_TIMEOUT).toBe("45000");
     expect(options.tools).toEqual(["Read", "Glob", "Grep", "Bash"]);
     expect(options.allowedTools).toEqual([]);
     expect(options.disallowedTools).toEqual([...CAPABILITY_TOOL_SURFACE.filter((t) => !["Read", "Glob", "Grep", "Bash"].includes(t)), ...ALWAYS_DENIED_NATIVE_TOOLS]);

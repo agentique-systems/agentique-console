@@ -86,6 +86,8 @@ export interface ClaudeAdapterConfig {
   limits?: Partial<ClaudeAdapterLimits>;
   /** The approved MCP server catalog; an Attempt receives exactly the catalog servers its effective capability set declares. */
   mcpServers?: Readonly<Record<string, McpServerConfig>>;
+  /** The wall-clock bound on one MCP tool call, handed to the subprocess as the SDK's `MCP_TOOL_TIMEOUT`; `null` or absent leaves the SDK's default. */
+  mcpToolTimeoutMs?: number | null;
   pathToClaudeCodeExecutable?: string;
   /** The working directory of an Attempt whose Run has no Workspace path (`os.tmpdir()` by default). */
   fallbackWorkingDirectory?: string;
@@ -396,7 +398,7 @@ class AttemptExecution {
     if (request.workingDirectory === null) this.#diagnostics.workingDirectory = "fallback";
     return {
       cwd,
-      env: providerEnvironment(adapter.settings.environment),
+      env: providerEnvironment(adapter.settings.environment, { mcpToolTimeoutMs: adapter.settings.mcpToolTimeoutMs ?? null }),
       model: request.model,
       effort: request.effort satisfies ModelEffort,
       systemPrompt: ATTEMPT_SYSTEM_PROMPT,

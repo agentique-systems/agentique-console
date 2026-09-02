@@ -65,7 +65,8 @@ and `web/`, the single scheduler, and the startup order.
 
 - [Implementation roadmap](implementation-roadmap.md) — the original
   phases 0–10 of the replacement, what each shipped, the evidence, and
-  each phase's completion condition. Phases 0–9 are complete; Phase 10 is
+  each phase's completion condition, including the final acceptance
+  corrections of Phases 9–10. Phases 0–9 are complete; Phase 10 is
   implemented on the branch with its merge to `main` pending review. The
   architecture documents define the semantics; the roadmap is a ledger.
 
