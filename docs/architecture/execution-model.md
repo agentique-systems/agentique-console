@@ -3627,12 +3627,22 @@ every external-call/record crash window is bridged explicitly:
    identity, even when the Target has since moved again; success is never
    inferred from the Target merely equalling or containing the candidate,
    and no force update exists. A failed compare-and-swap is the definite
-   `target_changed`: nothing was applied. One transaction then records
-   `succeeded` (Target-after = the candidate) or `failed`, the canonical
-   publication-report Artifact
+   `target_changed`: nothing was applied. The operator's working checkout
+   of the Target is distinct from the Target and never decides the result:
+   after the atomic update the provider may bring a checked-out Target
+   branch forward non-destructively (for git, a two-tree fast-forward of
+   index and working tree that git refuses as a whole over local changes
+   on a published path or an untracked file it would overwrite; a branch
+   whose head moved again is left alone) and reports exactly what it did
+   as the closed `checkout` fact — `synchronized`, `unchanged` with its
+   reason, `not_checked_out`, or `unknown` for a receipt replay. Nothing
+   is ever reset, staged work and untracked files survive, and a checkout
+   left unchanged is reported as such, never as synchronized. One
+   transaction then records `succeeded` (Target-after = the candidate) or
+   `failed`, the canonical publication-report Artifact
    (`application/vnd.agentique.publication-report.v1+json`; bounded
-   canonical facts, raw diagnostics in a separate referenced Artifact),
-   and the Events.
+   canonical facts including the checkout fact, raw diagnostics in a
+   separate referenced Artifact), and the Events.
 5. *Release*: a terminal Publication's staging resources carry a durable
    cleanup obligation, released through the idempotent port operation
    outside every transaction, retried by recovery until `released`; a
@@ -3640,6 +3650,19 @@ every external-call/record crash window is bridged explicitly:
    Successful Publication releases only publication-specific staging; the
    Run's Integration Workspace is retained until an explicit
    retention/disposal policy exists.
+
+**Capability.** Only a Workspace kind whose provider can perform the one
+atomic update-plus-receipt publishes. The git kind does (the reference
+transaction). The plain-directory kind cannot — a directory offers no
+atomic replacement of its contents together with a durable receipt — so
+its provider refuses every publication request with `strategy_unsupported`
+before the directory is read or touched; nothing is ever written to a
+directory Target file by file. A directory Run still executes, integrates,
+verifies, and is signed off exactly like a git Run; its accepted result
+stays available as the Run's `final` Changeset (the exact diff Artifact)
+and its retained Integration Workspace, and the capability is stated by
+the provider's capability matrix, the API, and the operator interface
+rather than discovered by a failed attempt.
 
 **Recovery** (`reconcileOutstanding`) scans every nonterminal Publication
 and every terminal row with pending cleanup and re-drives each through
@@ -4147,7 +4170,10 @@ mechanism, if ever added, is a new feature with its own design.
 | Publication candidate verification fails | Target untouched; Publication `failed` with `verification_failed` naming the criteria; as above (§9.4). |
 | Target changed between preparation and apply | The compare-and-swap definitely did not apply; Publication `failed` with `target_changed`; Target untouched by this Publication (§9.4). |
 | Publication provider unavailable (prepare, verify, or apply result unknown) | Nonterminal state is kept — `requested`, `prepared`, or `applying` — and recovery retries or reconciles through the idempotent port operations; no terminal outcome is fabricated (§9.4). |
-| Crash after the atomic Target update and durable receipt, before SQLite records success | The Publication stays `applying`; the retried apply finds the durable receipt and reports the applied identity — even when the Target has since moved again — and success is recorded exactly once (§9.4). |
+| Crash after the atomic Target update and durable receipt, before SQLite records success | The Publication stays `applying`; the retried apply finds the durable receipt and reports the applied identity — even when the Target has since moved again — and success is recorded exactly once with the checkout fact `unknown` (§9.4). |
+| Operator work in the checkout of the Target branch around the atomic update (an uncommitted edit, staged or untracked files, a commit made between the update and the checkout handling) | The Target update is the authoritative result and stands; the checkout is left exactly as it was and reported `unchanged` with its reason (`local_changes`, `head_moved`, `operation_failed`); nothing is reset or discarded (§9.4). |
+| Publication requested for a plain-directory Workspace | Refused before the directory is touched: `failed` with `strategy_unsupported` naming the strategy, the Target byte-for-byte unchanged; the operator applies the final Changeset themselves (§9.4). |
+| Publication preparation interrupted, or its prepared marker damaged | The candidate ref keeps the constructed candidate reachable; a missing or damaged marker is discarded and the candidate is constructed again deterministically to the same identity; a lost staging worktree is rebuilt from the candidate ref; the persisted prepared facts never change (§9.4). |
 | Crash during a Publication (between the Decision, the resolution-plus-creation transaction, external preparation, the prepared facts, the deterministic checks, `verified`, `applying`, the apply, the success or failure record, or the staging release) | Every step is one transaction or one idempotent external step recorded once; `reconcileOutstanding` re-drives the Publication from canonical rows and the provider's durable state, repeating nothing (§9.4). |
 | Publication staging release fails | The terminal outcome never changes; the obligation stays `pending` with a bounded diagnostic and recovery retries until `released` (§9.4). |
 | Provider continuation payload missing, expired, or corrupt | The Attempt starts `fresh`; no other effect. |

@@ -4,11 +4,10 @@
  * per Workspace id, one per Run id, with stable, identity-derived paths for
  * the Integration Workspace, every Invocation worktree, every check view,
  * every publication staging area, and — for a plain-directory Workspace —
- * the console-owned shadow repository and publication receipts.
+ * the console-owned shadow repository.
  *
  *   <stateRoot>/workspaces/<workspaceId>/
  *     shadow.git/                       the directory kind's shadow repository
- *     publications/<publicationId>.json the directory kind's publication receipts
  *     runs/<runId>/
  *       integration/                    the Run's Integration Workspace
  *       worktrees/<invocationId>/       a writing Invocation's worktree
@@ -56,10 +55,6 @@ export function workspaceDir(layout: WorkspaceStateLayout, workspaceId: string):
 
 export function shadowRepositoryDir(layout: WorkspaceStateLayout, workspaceId: string): string {
   return path.join(workspaceDir(layout, workspaceId), "shadow.git");
-}
-
-export function receiptPath(layout: WorkspaceStateLayout, workspaceId: string, publicationId: string): string {
-  return path.join(workspaceDir(layout, workspaceId), "publications", `${id(publicationId, "Publication id")}.json`);
 }
 
 export function runDir(layout: WorkspaceStateLayout, workspaceId: string, runId: string): string {

@@ -130,7 +130,7 @@ describe("publication advance", () => {
       expect(await h.publication.advance(publicationId)).toEqual({ kind: "applying", publicationId });
       expect(h.publicationWorkspace.applies).toEqual([]);
       // applying → succeeded: one atomic compare-and-swap plus receipt; the Target-after is exactly the candidate.
-      expect(await h.publication.advance(publicationId)).toEqual({ kind: "succeeded", publicationId, targetAfterSnapshotId: prepared.candidateSnapshotId, alreadyApplied: false });
+      expect(await h.publication.advance(publicationId)).toEqual({ kind: "succeeded", publicationId, targetAfterSnapshotId: prepared.candidateSnapshotId, alreadyApplied: false, checkout: { kind: "not_checked_out" } });
       const succeeded = h.stores.publications.get(publicationId);
       expect(succeeded.targetAfterSnapshotId).toBe(prepared.candidateSnapshotId);
       expect(h.publicationWorkspace.currentTarget({ workspaceId: run.workspaceId, target: run.target })).toEqual(candidate.identity);

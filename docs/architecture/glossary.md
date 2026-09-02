@@ -54,7 +54,11 @@ repository. Holds no orchestration state itself; the runtime keeps all state
 outside it (except worktrees and the Run's Integration Workspace, see
 Snapshot and Changeset). A Workspace has a **Workspace provider** — the
 runtime component that implements Snapshots, worktrees, Changeset
-integration, and publishing for its kind (git, or plain directory).
+integration, and publishing for its kind. The git kind publishes through
+one atomic reference transaction; the plain-directory kind cannot update
+its Target atomically with a durable receipt and therefore publishes
+nothing (its provider refuses before the directory is touched), while it
+executes, integrates, verifies, and is signed off like a git Workspace.
 
 - Id prefix: `ws_`
 - Owned by: the operator

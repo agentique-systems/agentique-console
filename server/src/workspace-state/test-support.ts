@@ -96,6 +96,15 @@ export function layoutIn(dir: string): WorkspaceStateLayout {
   return { stateRoot: path.join(dir, "state") };
 }
 
+/** The porcelain status lines, untrimmed (the two status columns are significant), sorted; empty for a clean checkout. */
+export function statusLines(dir: string): string[] {
+  return gitSync(["status", "--porcelain", "--untracked-files=all"], { cwd: dir })
+    .stdout.toString("utf8")
+    .split(/\r?\n/)
+    .filter((line) => line !== "")
+    .sort();
+}
+
 export function statusOf(dir: string): string {
   return text(gitSync(["status", "--porcelain", "--untracked-files=all"], { cwd: dir }));
 }

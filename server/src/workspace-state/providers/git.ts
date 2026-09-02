@@ -3,18 +3,21 @@
  * repository root, the Target is one of its branches, and every runtime copy
  * is a worktree of that repository under the state root. The operator's own
  * checkout is never modified by a Run; a Publication moves the Target ref in
- * one reference transaction together with its receipt ref, and synchronizes
- * the operator's working copy of that branch only when it was clean.
+ * one reference transaction together with its receipt ref, then brings a
+ * checked-out working copy of that branch forward non-destructively or
+ * leaves it exactly as it was — it is never reset.
  */
 import fs from "node:fs";
 import path from "node:path";
-import type { RunTarget, SnapshotIdentity } from "@agentique-console/core";
+import type { PublicationCheckout, RunTarget, SnapshotIdentity } from "@agentique-console/core";
 import { git, gitSync, isObjectId, text } from "../git.ts";
 import { WorkspaceStateError } from "../paths.ts";
 import { identityOfCommit } from "../snapshots.ts";
 
 export const RUN_BRANCH_PREFIX = "agentique/run/";
 export const PUBLICATION_RECEIPT_REF_PREFIX = "refs/agentique/publications/";
+/** A prepared candidate stays reachable through this ref until the Publication's staging is released. */
+export const PUBLICATION_CANDIDATE_REF_PREFIX = "refs/agentique/candidates/";
 export const INTEGRATION_REF_PREFIX = "refs/agentique/integrations/";
 
 function samePath(a: string, b: string): boolean {
@@ -81,19 +84,33 @@ export async function publishRefTransaction(root: string, targetRef: string, exp
   return { kind: "rejected", message: result.stderr.trim() };
 }
 
+export function candidateRefOf(publicationId: string): string {
+  return `${PUBLICATION_CANDIDATE_REF_PREFIX}${publicationId}`;
+}
+
+/** The messages git prints when a two-tree fast-forward would overwrite local work: the update was refused as a whole. */
+const LOCAL_CHANGES = /not uptodate|would be overwritten|would be lost|Untracked working tree|Your local changes|needs merge/i;
+
 /**
- * After a Publication moved a branch the operator has checked out at the
- * Workspace root, the working copy still shows the previous state. When it
- * was clean before the update, the runtime resets it to the new branch tip so
- * the operator sees the published result; a dirty working copy is left
- * untouched (the operator's edits are never discarded).
+ * Brings the operator's checked-out working copy of the Target branch
+ * forward after the ref transaction moved the branch from `before` to
+ * `candidate`, without ever discarding anything: a two-tree fast-forward of
+ * the index and the working tree (`git read-tree -m -u`) that touches only
+ * the paths that differ between the two trees and that git refuses as a
+ * whole when such a path carries local changes or an untracked file would
+ * be overwritten. A checkout of another branch, and a branch whose head has
+ * moved again since the transaction, are left exactly as they are. The
+ * returned fact is what happened, never a claim; it is distinct from the
+ * authoritative Target update, which the reference transaction already made.
  */
-export async function synchronizeCheckout(root: string, targetRef: string, candidate: string, wasClean: boolean): Promise<"synchronized" | "not_checked_out" | "dirty"> {
+export async function fastForwardCheckout(root: string, targetRef: string, before: string, candidate: string): Promise<PublicationCheckout> {
   const head = await git(["symbolic-ref", "-q", "HEAD"], { cwd: root, allowFailure: true });
-  if (head.exitCode !== 0 || text(head) !== targetRef) return "not_checked_out";
-  if (!wasClean) return "dirty";
-  await git(["reset", "--hard", candidate], { cwd: root, identity: true });
-  return "synchronized";
+  if (head.exitCode !== 0 || text(head) !== targetRef) return { kind: "not_checked_out" };
+  const resolved = await git(["rev-parse", "--verify", "-q", "HEAD^{commit}"], { cwd: root, allowFailure: true });
+  if (resolved.exitCode !== 0 || text(resolved) !== candidate) return { kind: "unchanged", reason: "head_moved" };
+  const updated = await git(["read-tree", "-m", "-u", before, candidate], { cwd: root, allowFailure: true });
+  if (updated.exitCode !== 0) return { kind: "unchanged", reason: LOCAL_CHANGES.test(updated.stderr) ? "local_changes" : "operation_failed" };
+  return { kind: "synchronized" };
 }
 
 export function identityOf(root: string, commit: string): Promise<SnapshotIdentity> {

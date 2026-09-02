@@ -5,10 +5,11 @@
  * inside it. Instead a console-owned bare **shadow repository** under the
  * state root receives every imported state as a commit: a Snapshot is the
  * content digest of the imported tree, the Integration Workspace and every
- * Invocation worktree are worktrees of the shadow, and a Publication writes
- * the candidate tree's files back into the directory after a compare-and-
- * swap on its current digest. The shadow is storage housekeeping: nothing
- * canonical depends on it beyond the identities it reproduces.
+ * Invocation worktree are worktrees of the shadow. A plain directory offers no atomic
+ * update-plus-receipt, so the kind publishes nothing: a publication request
+ * is refused before the directory is touched (`capabilities.ts`). The shadow
+ * is storage housekeeping: nothing canonical depends on it beyond the
+ * identities it reproduces.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -108,67 +109,4 @@ export async function importDirectory(layout: WorkspaceStateLayout, workspaceId:
   } finally {
     fs.rmSync(indexFile, { force: true });
   }
-}
-
-/**
- * Writes the difference between two trees of the shadow into the directory:
- * every path present in `fromTree` and absent from `toTree` is removed (and
- * its emptied parent directories), every path of `toTree` that differs is
- * written from the shadow's blob. Not atomic: a crash mid-way leaves the
- * directory with a digest the next compare-and-swap refuses.
- */
-export async function materializeTree(shadow: string, root: string, fromTree: string, toTree: string): Promise<{ written: number; removed: number }> {
-  const changes = text(await git(["diff-tree", "-r", "--no-renames", "--name-status", "-z", fromTree, toTree], { cwd: shadow }));
-  const entries = changes === "" ? [] : changes.split("\0").filter((part) => part !== "");
-  let written = 0;
-  let removed = 0;
-  for (let i = 0; i < entries.length; i += 2) {
-    const status = entries[i]!;
-    const relative = entries[i + 1]!;
-    const target = path.join(root, relative);
-    assertInside(root, target);
-    if (status.startsWith("D")) {
-      fs.rmSync(target, { force: true });
-      removeEmptyParents(root, path.dirname(target));
-      removed += 1;
-      continue;
-    }
-    const entry = text(await git(["ls-tree", "-z", toTree, "--", relative], { cwd: shadow })).replace(/\0$/, "");
-    const [meta] = entry.split("\t");
-    const [mode, , object] = (meta ?? "").split(" ");
-    if (object === undefined) throw new WorkspaceStateError("unknown_snapshot", `the candidate tree does not hold ${relative}`);
-    const blob = await git(["cat-file", "blob", object], { cwd: shadow });
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, blob.stdout);
-    if (process.platform !== "win32" && mode === "100755") fs.chmodSync(target, 0o755);
-    written += 1;
-  }
-  return { written, removed };
-}
-
-function assertInside(root: string, target: string): void {
-  const relative = path.relative(path.resolve(root), path.resolve(target));
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) throw new WorkspaceStateError("path_not_owned", "a candidate path escapes the Workspace directory");
-}
-
-function removeEmptyParents(root: string, dir: string): void {
-  let current = path.resolve(dir);
-  const stop = path.resolve(root);
-  while (current !== stop && current.startsWith(stop)) {
-    try {
-      if (fs.readdirSync(current).length > 0) return;
-      fs.rmdirSync(current);
-    } catch {
-      return;
-    }
-    current = path.dirname(current);
-  }
-}
-
-export function treeOfCommitSync(cwd: string, commit: string): string {
-  return text(gitSync(["rev-parse", "--verify", `${commit}^{tree}`], { cwd }));
-}
-
-export async function treeOfCommit(cwd: string, commit: string): Promise<string> {
-  return text(await git(["rev-parse", "--verify", `${commit}^{tree}`], { cwd }));
 }

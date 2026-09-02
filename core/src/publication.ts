@@ -219,6 +219,38 @@ export type PublicationTransition =
   | { to: "failed"; failure: PublicationFailure; reportArtifactId: ArtifactId };
 
 // ---------------------------------------------------------------------------
+// Checkout handling (distinct from the authoritative publication result)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the Workspace provider did with the operator's working checkout of the
+ * Target after the atomic Target update (execution-model §9.4). The Target
+ * update is the authoritative result; the checkout is a courtesy the provider
+ * handles non-destructively afterwards and reports exactly: `synchronized`
+ * when the checked-out Target branch now shows the candidate, `unchanged`
+ * when the branch is checked out but was left alone (its files carried local
+ * changes on a published path, its head had already moved past the candidate,
+ * or the non-destructive update failed), `not_checked_out` when no working
+ * checkout of the Target existed, and `unknown` when the call replayed a
+ * durable receipt and handled no checkout at all. Nothing is ever reset.
+ */
+export const PUBLICATION_CHECKOUT_UNCHANGED_REASONS = ["local_changes", "head_moved", "operation_failed"] as const;
+export type PublicationCheckoutUnchangedReason = (typeof PUBLICATION_CHECKOUT_UNCHANGED_REASONS)[number];
+
+export type PublicationCheckout =
+  | { kind: "not_checked_out" }
+  | { kind: "synchronized" }
+  | { kind: "unchanged"; reason: PublicationCheckoutUnchangedReason }
+  | { kind: "unknown" };
+
+export const publicationCheckoutSchema: z.ZodType<PublicationCheckout> = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("not_checked_out") }),
+  z.strictObject({ kind: z.literal("synchronized") }),
+  z.strictObject({ kind: z.literal("unchanged"), reason: z.enum(PUBLICATION_CHECKOUT_UNCHANGED_REASONS) }),
+  z.strictObject({ kind: z.literal("unknown") }),
+]);
+
+// ---------------------------------------------------------------------------
 // Publication report
 // ---------------------------------------------------------------------------
 
@@ -250,6 +282,8 @@ export interface PublicationReport {
   evaluationIds: EvaluationId[];
   /** Bounded raw diagnostics (a conflict report, a provider message), stored separately; never inlined. */
   diagnosticArtifactId: ArtifactId | null;
+  /** How the provider handled the operator's working checkout after a successful Target update; `null` for a failed Publication. */
+  checkout: PublicationCheckout | null;
 }
 
 export const publicationReportSchema: z.ZodType<PublicationReport> = z
@@ -268,8 +302,10 @@ export const publicationReportSchema: z.ZodType<PublicationReport> = z
     failure: publicationFailureSchema.nullable(),
     evaluationIds: uniqueIds(idSchema("evaluation")).refine((ids) => ids.every((id, i) => i === 0 || ids[i - 1]! < id), { message: "evaluation ids are in canonical order" }),
     diagnosticArtifactId: idSchema("artifact").nullable(),
+    checkout: publicationCheckoutSchema.nullable(),
   })
-  .refine((r) => (r.outcome === "failed") === (r.failure !== null), { message: "the failure is reported exactly when the Publication failed", path: ["failure"] });
+  .refine((r) => (r.outcome === "failed") === (r.failure !== null), { message: "the failure is reported exactly when the Publication failed", path: ["failure"] })
+  .refine((r) => (r.outcome === "succeeded") === (r.checkout !== null), { message: "the checkout outcome is reported exactly when the Target was updated", path: ["checkout"] });
 
 /** The deterministic bytes of a publication report: equal reports serialize identically. */
 export function canonicalPublicationReport(report: PublicationReport): string {

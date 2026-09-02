@@ -39,7 +39,15 @@
  *   inferred from the Target merely equalling or containing the candidate.
  *   A failed compare-and-swap is the definite `target_changed` outcome and
  *   modified nothing; `unavailable` means the result is unknown and the
- *   runtime stays `applying`. There is no force update.
+ *   runtime stays `applying`. There is no force update. The operator's
+ *   working checkout of the Target is distinct from the Target: after the
+ *   atomic update the implementation may bring a checked-out Target branch
+ *   forward non-destructively (never a reset, never over local changes,
+ *   never when the branch has moved again) and reports exactly what it did
+ *   as `checkout`; a replay from a receipt handles no checkout (`unknown`).
+ * - A Workspace kind that cannot perform one atomic update-plus-receipt
+ *   (the plain-directory kind) refuses `prepare` with `strategy_unsupported`
+ *   before it touches the Target; it never publishes file by file.
  * - `release` is idempotent, runs only after a terminal Publication, and
  *   removes the Publication's staging resources (never the Run's
  *   Integration Workspace and never the Target). Releasing staging that was
@@ -51,7 +59,7 @@
  * deterministic fake that models the atomic update-plus-receipt guarantee
  * durably across process lifetimes.
  */
-import type { PublicationId, PublicationStrategy, PublicationStrategyRequest, RunId, RunTarget, SnapshotIdentity, WorkspaceId } from "@agentique-console/core";
+import type { PublicationCheckout, PublicationId, PublicationStrategy, PublicationStrategyRequest, RunId, RunTarget, SnapshotIdentity, WorkspaceId } from "@agentique-console/core";
 import type { ArtifactContentSource } from "./integration-workspace.ts";
 
 /** The identities every publication operation names; never a path to content, a store, or a credential. */
@@ -107,7 +115,7 @@ export type PublicationApplyOutcome =
    * update-plus-receipt, or a receipt from an earlier call was found (`alreadyApplied: true`), whose recorded
    * resulting identity is returned even when the Target has since moved again.
    */
-  | { kind: "applied"; targetSnapshot: SnapshotIdentity; alreadyApplied: boolean }
+  | { kind: "applied"; targetSnapshot: SnapshotIdentity; alreadyApplied: boolean; checkout: PublicationCheckout }
   /** The definite not-applied result: the Target no longer holds the expected identity and was not modified. */
   | { kind: "target_changed"; currentTargetSnapshot: SnapshotIdentity }
   /** The result of the Target update is unknown; nothing may be concluded and the runtime stays `applying`. */

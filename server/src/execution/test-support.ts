@@ -272,7 +272,7 @@ export class FakePublicationWorkspace implements PublicationWorkspacePort {
     this.observedTransactions.push(this.transactionProbe?.() ?? null);
     // The durable receipt decides replays first: even when the Target has since moved again, the recorded resulting identity is returned.
     const receipt = this.receipts.get(request.publicationId);
-    if (receipt) return { kind: "applied", targetSnapshot: receipt.targetSnapshot, alreadyApplied: true };
+    if (receipt) return { kind: "applied", targetSnapshot: receipt.targetSnapshot, alreadyApplied: true, checkout: { kind: "unknown" } };
     if (this.applyUnavailableNext > 0) {
       this.applyUnavailableNext -= 1;
       return { kind: "unavailable", message: "the Target update result is unknown" };
@@ -290,7 +290,7 @@ export class FakePublicationWorkspace implements PublicationWorkspacePort {
       this.crashAfterApply = false;
       throw new Error("process died after the atomic Target update and receipt");
     }
-    return { kind: "applied", targetSnapshot: request.candidateSnapshot, alreadyApplied: false };
+    return { kind: "applied", targetSnapshot: request.candidateSnapshot, alreadyApplied: false, checkout: { kind: "not_checked_out" } };
   }
 
   async release(request: PublicationReleaseRequest): Promise<PublicationReleaseOutcome> {

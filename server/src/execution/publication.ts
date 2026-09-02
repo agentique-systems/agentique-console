@@ -58,6 +58,7 @@ import {
   type DecisionId,
   type EvaluationId,
   type Publication,
+  type PublicationCheckout,
   type PublicationFailure,
   type PublicationId,
   type PublicationReport,
@@ -107,7 +108,7 @@ export type PublicationAdvanceOutcome =
   | { kind: "prepared"; publicationId: PublicationId }
   | { kind: "verified"; publicationId: PublicationId; checks: number }
   | { kind: "applying"; publicationId: PublicationId }
-  | { kind: "succeeded"; publicationId: PublicationId; targetAfterSnapshotId: SnapshotId; alreadyApplied: boolean }
+  | { kind: "succeeded"; publicationId: PublicationId; targetAfterSnapshotId: SnapshotId; alreadyApplied: boolean; checkout: PublicationCheckout }
   | { kind: "failed"; publicationId: PublicationId; failure: PublicationFailure }
   | { kind: "released"; publicationId: PublicationId }
   /** Terminal and released: nothing remains to do. */
@@ -583,14 +584,16 @@ export class RunPublicationService {
     if (canonicalJson(outcome.targetSnapshot) !== canonicalJson(candidate)) {
       throw new InvariantViolationError(`the apply receipt of Publication ${publication.id} names a state other than the prepared candidate`, { publicationId: publication.id });
     }
+    const checkout = outcome.checkout;
     return this.ctx.tx.write((): PublicationAdvanceOutcome => {
       const current = this.stores.publications.get(publication.id);
-      if (current.status === "succeeded") return { kind: "succeeded", publicationId: publication.id, targetAfterSnapshotId: current.targetAfterSnapshotId!, alreadyApplied: true };
+      if (current.status === "succeeded") return { kind: "succeeded", publicationId: publication.id, targetAfterSnapshotId: current.targetAfterSnapshotId!, alreadyApplied: true, checkout };
       if (current.status !== "applying") return { kind: "stale", publicationId: publication.id };
       const meta = this.meta(options, publication.id);
-      const report = this.report(current, "succeeded", null, null, meta);
+      // The checkout fact is recorded in the report beside the authoritative result; it never decides the outcome.
+      const report = this.report(current, "succeeded", null, null, meta, checkout);
       const next = this.stores.publications.transition(publication.id, { to: "succeeded", reportArtifactId: report.id }, this.chain(meta));
-      return { kind: "succeeded", publicationId: publication.id, targetAfterSnapshotId: next.targetAfterSnapshotId!, alreadyApplied: outcome.alreadyApplied };
+      return { kind: "succeeded", publicationId: publication.id, targetAfterSnapshotId: next.targetAfterSnapshotId!, alreadyApplied: outcome.alreadyApplied, checkout };
     });
   }
 
@@ -667,7 +670,7 @@ export class RunPublicationService {
   }
 
   /** The canonical publication-report Artifact of a terminal outcome; bounded raw diagnostics go into their own Artifact, referenced by id. */
-  private report(publication: Publication, outcome: "succeeded" | "failed", failure: PublicationFailure | null, diagnostic: string | null, meta: WriteOptions): Artifact {
+  private report(publication: Publication, outcome: "succeeded" | "failed", failure: PublicationFailure | null, diagnostic: string | null, meta: WriteOptions, checkout: PublicationCheckout | null = null): Artifact {
     const diagnosticArtifact =
       diagnostic === null
         ? null
@@ -691,6 +694,7 @@ export class RunPublicationService {
       failure,
       evaluationIds: this.stores.evaluations.publicationCriterionEvaluationsOf(publication.id).map((e) => e.id).sort(),
       diagnosticArtifactId: diagnosticArtifact?.id ?? null,
+      checkout: outcome === "succeeded" ? checkout : null,
     };
     return this.stores.artifacts.create(
       { runId: publication.runId, mediaType: PUBLICATION_REPORT_MEDIA_TYPE, producer: { kind: "runtime", component: "publication" }, taskId: null, title: `publication report of ${publication.id}` },

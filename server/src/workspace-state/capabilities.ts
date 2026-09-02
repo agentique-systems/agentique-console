@@ -33,7 +33,7 @@ export const WORKSPACE_CAPABILITIES: Readonly<Record<WorkspaceKind, WorkspaceKin
     integration: "the exact verified diff bytes applied with a three-way `git apply --index` and committed onto the Integration Workspace; conflicts leave it unchanged; idempotent by a Changeset-keyed integration ref and commit trailer",
     target: "branch",
     publicationStrategies: ["fast_forward", "merge"],
-    publicationApply: "one reference transaction moves the Target branch to the candidate (compare-and-swap on the persisted Target-before commit) and creates the publication receipt ref; the checked-out working copy of the Target branch is synchronized only when it was clean",
+    publicationApply: "one reference transaction moves the Target branch to the candidate (compare-and-swap on the persisted Target-before commit) and creates the publication receipt ref; afterwards a checked-out working copy of the Target branch is brought forward non-destructively (a two-tree fast-forward of index and files that git refuses over local changes) and is otherwise left unchanged and reported as such; nothing is ever reset",
     atomicPublication: true,
   },
   directory: {
@@ -42,12 +42,17 @@ export const WORKSPACE_CAPABILITIES: Readonly<Record<WorkspaceKind, WorkspaceKin
     isolation: "a console-owned shadow repository under the runtime's state root holds every imported state; the Integration Workspace, Invocation worktrees, check views, and publication staging are worktrees of it; the directory itself is read at Run start and at publication only",
     integration: "the same three-way apply onto the Integration Workspace worktree of the shadow repository; identical idempotence",
     target: "directory",
-    publicationStrategies: ["fast_forward"],
-    publicationApply: "compare-and-swap on the directory's current content digest, then the candidate tree's files are written and removed files deleted, then a receipt file is written; not atomic, so a crash during the write leaves a Target the next apply refuses as changed",
+    publicationStrategies: [],
+    publicationApply: "none: a plain directory offers no atomic update-plus-receipt, so every publication request is refused as strategy_unsupported before the Target is touched; the accepted result stays available as the Run's final Changeset and its Integration Workspace",
     atomicPublication: false,
   },
 });
 
 export function supportsStrategy(kind: WorkspaceKind, strategy: PublicationStrategy): boolean {
   return WORKSPACE_CAPABILITIES[kind].publicationStrategies.includes(strategy.kind);
+}
+
+/** Whether the kind can publish at all: at least one strategy performs the atomic update-plus-receipt. */
+export function supportsPublication(kind: WorkspaceKind): boolean {
+  return WORKSPACE_CAPABILITIES[kind].publicationStrategies.length > 0;
 }

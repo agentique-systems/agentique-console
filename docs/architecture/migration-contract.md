@@ -867,7 +867,16 @@ the passing total alone.
   is durably persisted before the apply; the apply is one idempotent
   atomic compare-and-swap-plus-receipt with no force update, a definite
   not-applied failure when the Target moved, and success never inferred
-  from a Target that merely equals the candidate; terminal outcomes record
+  from a Target that merely equals the candidate; the operator's checkout
+  is handled after the update, non-destructively, and reported as it went
+  (a later uncommitted edit on a published path, unrelated staged,
+  unstaged, and untracked work, and a commit made between the update and
+  the checkout handling all survive, over a real repository); a
+  plain-directory Workspace is refused before its Target is touched with
+  every byte and entry unchanged; a real child process killed after the
+  atomic update and before SQLite records success converges through the
+  receipt exactly once; an interrupted preparation and a damaged prepared
+  marker re-prepare to identical facts; terminal outcomes record
   the closed failure and the versioned publication-report Artifact with
   raw diagnostics in a separate Artifact; staging cleanup is a durable
   retried obligation; and twenty file-backed crash and concurrency windows

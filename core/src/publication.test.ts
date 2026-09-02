@@ -160,6 +160,7 @@ describe("publication report", () => {
       failure: null,
       evaluationIds: [newId("evaluation")],
       diagnosticArtifactId: null,
+      checkout: { kind: "synchronized" },
     };
   };
 
@@ -171,7 +172,12 @@ describe("publication report", () => {
     expect(canonicalPublicationReport(r).startsWith('{"candidateSnapshotId"')).toBe(true);
     expect(publicationReportSchema.safeParse({ ...r, failure: { kind: "target_changed" } }).success).toBe(false);
     expect(publicationReportSchema.safeParse({ ...r, outcome: "failed", failure: null }).success).toBe(false);
-    expect(publicationReportSchema.safeParse({ ...r, outcome: "failed", failure: { kind: "target_changed" } }).success).toBe(true);
+    expect(publicationReportSchema.safeParse({ ...r, outcome: "failed", failure: { kind: "target_changed" }, checkout: null }).success).toBe(true);
+    // The checkout fact is reported exactly for a successful Target update, and only as one of its closed shapes.
+    expect(publicationReportSchema.safeParse({ ...r, outcome: "failed", failure: { kind: "target_changed" } }).success).toBe(false);
+    expect(publicationReportSchema.safeParse({ ...r, checkout: null }).success).toBe(false);
+    expect(publicationReportSchema.safeParse({ ...r, checkout: { kind: "unchanged", reason: "local_changes" } }).success).toBe(true);
+    expect(publicationReportSchema.safeParse({ ...r, checkout: { kind: "reset" } }).success).toBe(false);
     // Evaluation ids are canonical and unique; raw output has no field to hide in.
     const ids = [newId("evaluation"), newId("evaluation")].sort().reverse();
     expect(publicationReportSchema.safeParse({ ...r, evaluationIds: ids }).success).toBe(false);
