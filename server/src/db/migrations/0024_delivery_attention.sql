@@ -1,1 +1,0 @@
-ALTER TABLE `mailbox_deliveries` ADD `attention` text DEFAULT 'wake' NOT NULL;

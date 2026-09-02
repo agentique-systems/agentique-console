@@ -1,1 +1,0 @@
-ALTER TABLE `agents` ADD `pending_checkpoint_handoff_id` text;

@@ -1,1 +1,0 @@
-ALTER TABLE `run_summaries` ADD `waivers` text DEFAULT '[]' NOT NULL;
