@@ -13,7 +13,7 @@ costNote: ~35 lines when invoked; the run it comes from committed 556MB of targe
 # Build hygiene
 
 A live run committed 556MB of `target/` into git history in its first wave;
-three separate seats escalated it, nobody could rewrite history mid-run, and
+three separate agents escalated it, nobody could rewrite history mid-run, and
 every subsequent clone/diff/summary paid for it.
 
 ## Before the first build

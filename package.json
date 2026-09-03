@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "workspaces": [
-    "shared",
+    "core",
     "server",
     "web"
   ],
@@ -15,11 +15,7 @@
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "verify": "npm run typecheck && npm test",
-    "eval:handoffs": "npm run eval:handoffs --workspace server",
-    "eval:orchestration": "npm run eval:orchestration --workspace server",
-    "eval:orchestration:live": "npm run eval:orchestration:live --workspace server",
-    "eval:orchestration:judge": "npm run eval:orchestration:judge --workspace server",
-    "eval:orchestration:compare": "npm run eval:orchestration:compare --workspace server"
+    "test:browser": "npm run build --workspace web && npm run test:browser --workspace web"
   },
   "engines": {
     "node": ">=22.22.0"

@@ -16,7 +16,7 @@
 | Private and unpublished | Update onto new base | Rebase | No collaborators depend on old OIDs |
 | Published but single-owner | Rewrite with explicit coordination | Rebase plus exact lease | Preserves control while protecting remote movement |
 | Shared by several agents | Incorporate upstream | Merge | Avoid invalidating collaborators' bases |
-| Accepted branch contains destination | Integrate | Fast-forward | Adds no unnecessary topology |
+| Accepted branch contains destination | Integrate | Fast-forward | Adds no unnecessary merge structure |
 | Need only selected commits | Transplant | Cherry-pick | Keeps accepted scope explicit |
 | Patch already exists under different OID | Avoid duplicate | `--cherry-pick` inspection / `patch-id` | Detects equivalent changes |
 | Stacked topic changes parent | Retarget child | `rebase --onto` | Moves only the intended range |

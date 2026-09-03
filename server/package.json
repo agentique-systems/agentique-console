@@ -8,15 +8,10 @@
     "start": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "eval:handoffs": "tsx scripts/eval-handoffs.ts",
-    "eval:orchestration": "vitest run evals/orchestration/structural.eval.test.ts",
-    "eval:orchestration:live": "tsx evals/orchestration/live/run-live.ts",
-    "eval:orchestration:judge": "tsx evals/orchestration/live/judge.ts",
-    "eval:orchestration:compare": "tsx evals/orchestration/live/compare.ts",
-    "import-legacy": "tsx scripts/import-legacy.ts"
+    "verify:coding-run": "tsx src/composition/verify-coding-run.ts"
   },
   "dependencies": {
-    "@agentique-console/shared": "*",
+    "@agentique-console/core": "*",
     "@anthropic-ai/claude-agent-sdk": "0.3.226",
     "@fastify/static": "^10.1.2",
     "better-sqlite3": "^12.4.1",

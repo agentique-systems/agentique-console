@@ -1,331 +1,229 @@
+/**
+ * The console's configuration (legacy-removal §9): every value the process
+ * runs with, read from `CONSOLE_*` environment variables, validated once at
+ * startup with an error that names the variable, and never re-read. Unknown
+ * `CONSOLE_*` names are ignored; nothing translates a retired name, and no
+ * value selects an alternative behaviour.
+ *
+ *   CONSOLE_DATA_DIR                  state directory (database, blobs, continuations, Workspace state); ~/.agentique-console
+ *   CONSOLE_PORT, CONSOLE_HOST        the HTTP listener; 4400 on 127.0.0.1
+ *   CONSOLE_FS_ROOTS                  browse roots for Workspace creation, path-separator separated; home and the filesystem root
+ *   CONSOLE_MODEL, CONSOLE_EFFORT     the model and effort of the built-in Agent Definitions
+ *   CONSOLE_CONTINUATION              1/0: provider session resumption for retries (1)
+ *   CONSOLE_CONTINUATION_TTL_MS       how long a continuation payload stays resumable; unset: unbounded
+ *   CONSOLE_MCP_DISABLED              approved MCP servers dropped from the catalog, comma separated (names: browser); unknown names are refused
+ *   CONSOLE_MCP_TOOL_TIMEOUT_MS       the bound on one MCP tool call of an Attempt (at least 1000); unset: the SDK's default
+ *   CONSOLE_BROWSER_MCP               the `browser` MCP server command, whitespace separated
+ *   CONSOLE_PROVIDER_MAX_CONCURRENCY  concurrent provider Attempts (4)
+ *   CONSOLE_PROCESS_MAX_ATTEMPTS      concurrent Attempts in this process (6)
+ *   CONSOLE_MAX_WORKTREES             concurrent Invocation worktrees; unset: unlimited
+ *   CONSOLE_MAX_CONCURRENT_RUNS       Runs the host drives at once (4)
+ *   CONSOLE_DEFAULT_MAX_COST_USD, CONSOLE_DEFAULT_MAX_TOKENS, CONSOLE_DEFAULT_MAX_ATTEMPTS,
+ *   CONSOLE_DEFAULT_MAX_WALL_CLOCK_MS, CONSOLE_DEFAULT_MAX_CONCURRENCY      the default Run Budget
+ *   CONSOLE_DEFAULT_COMPLETION_CHECK  the default deterministic completion command of a coding Run ("npm test"); "" for none
+ *   CONSOLE_DEFAULT_EVALUATOR         reviewer|none: the default Gate Evaluator of a Run (reviewer)
+ *   CONSOLE_ORCHESTRATOR_COST_USD, CONSOLE_ORCHESTRATOR_TOKENS, CONSOLE_ORCHESTRATOR_ATTEMPTS  the Orchestrator's allocation per turn
+ *   CONSOLE_NODE_COST_USD, CONSOLE_NODE_TOKENS, CONSOLE_NODE_ATTEMPTS                          the default Plan Node allocation
+ *   CONSOLE_ATTEMPT_MAX_WALL_CLOCK_MS the default Invocation wall-clock bound of the built-in definitions (600000)
+ *   CONSOLE_CHECK_TIMEOUT_MS          the deterministic check command deadline (600000)
+ *   CONSOLE_DIAGNOSTICS_RETAINED      diagnostics kept in memory for the health view (500)
+ */
 import os from "node:os";
 import path from "node:path";
+import { MODEL_EFFORTS, type Allocation, type BudgetLimits, type ModelEffort, type RunKind } from "@agentique-console/core";
 
-import { DEFAULT_ORCHESTRATOR_MODEL, isOrchestratorModel } from "@agentique-console/shared";
-import { EFFORT_LEVELS, isEffortLevel, type EffortLevel } from "./sdk/effort.ts";
-
-/** Where the console runs: paths, network, models, filesystem reach. */
-export interface InfraConfig {
-  dataDir: string;
-  dbFile: string;
-  port: number;
-  host: string;
-  /** The built web bundle; served at / when present (absent in vite dev). */
-  webDir: string;
-  /**
-   * The console's own skills plugin (server/skills). Shipped with the
-   * server, trusted like builtin profiles; loaded into every seat alongside
-   * the user/project skills the settings sources discover. A profile's
-   * `skills` names the ones its brief recommends; every skill stays visible.
-   */
-  skillsPluginDir: string;
-  /**
-   * Browse roots for the workspace directory picker, and the containment
-   * allow-list for workspace creation. Defaults to the whole filesystem with
-   * home as a shortcut; narrow it with CONSOLE_FS_ROOTS (colon-separated).
-   */
-  fsRoots: { path: string; label: string }[];
-  /**
-   * Default orchestrator-lane model (also the lane's rotation checkpoint). A session that records its own `model` wins
-   * over this; sessions created internally record none and land here. Agents
-   * carry their own profile models; they never read this. CONSOLE_MODEL
-   * overrides the default for new sessions.
-   */
-  model: string;
-  /**
-   * Model for the composer's rewrite pass. Deliberately NOT `model`: this is a
-   * one-shot text edit, so it runs on a cheaper tier than the orchestrator.
-   */
-  improveModel: string;
-  /**
-   * The operator's install-wide effort override. Set, it wins over every
-   * lane's own default (main's `xhigh`, a profile's `effort`); unset, each
-   * lane runs at its own default. CONSOLE_EFFORT.
-   */
-  effort: EffortLevel | undefined;
-  /**
-   * `git init` a non-repo workspace so agent isolation can engage. Off makes
-   * the Console leave operator directories alone at the cost of running every
-   * agent in one shared tree.
-   */
-  autoInitGit: boolean;
-  /**
-   * MCP servers to drop from every profile that declares them, by name.
-   * CONSOLE_MCP_DISABLED (comma-separated). Capability is declared per profile
-   * and launched by the Console; this is the operator's off switch.
-   */
-  mcpDisabled: string[];
-  /**
-   * Replaces the `browser` server's command for every profile that declares
-   * one, as `[command, ...args]`. CONSOLE_BROWSER_MCP, whitespace-separated.
-   * Undefined leaves each profile's own declaration alone.
-   */
-  browserMcp: string[] | undefined;
+export interface McpServerCommand {
+  command: string;
+  args: string[];
 }
 
-/** How the console orchestrates: budgets, timers, caps, protocol knobs. */
-export interface PolicyConfig {
-  /** Close an idle agent's process (socket included) after this long; resume-on-wake. */
-  agentIdleReapMs: number;
-  /**
-   * Max resident agent processes machine-wide. Each resident seat is a full
-   * CLI node process (~400-600MB RSS), and they share the machine with the
-   * builds and browsers those seats launch — the default is therefore sized
-   * to RAM (~1.5GB per seat, clamped 4..12) rather than fixed: a 10GB WSL VM
-   * that ran a fixed cap of 8 alongside concurrent cargo links spent the end
-   * of a live run deep in swap. CONSOLE_MAX_RESIDENT_AGENTS overrides.
-   */
-  agentMaxResident: number;
-  /**
-   * Resident agent processes per SESSION. Deliberately not per tree: a child
-   * session brings its own residency (under the global cap), so nesting adds
-   * parallel capacity — the old shared-tree budget was one of five structural
-   * reasons a 12-hour live run created zero child sessions.
-   */
-  agentMaxResidentPerSession: number;
-  /** How long a delivery waits for its recipient agent to spawn or unpark. */
-  agentSpawnTimeoutMs: number;
-  /**
-   * Write-profile agents in git workspaces work in isolated worktrees with
-   * atomic merge-on-completion. CONSOLE_AGENT_WORKTREES=0 disables.
-   */
-  agentWorktrees: boolean;
-  /**
-   * Wake-boundary generation retirement: a parked seat whose provider session
-   * has carried context occupancy at or above this many tokens is NOT resumed
-   * — the Console journals a deterministic continuation checkpoint and the
-   * seat continues as a fresh generation (same seat, assignment, worktree and
-   * task truth; fresh provider cognition). Occupancy is the per-API-call
-   * prompt size (`input + cache_creation + cache_read`), i.e. what every
-   * later call in that session replays: a live run's seats retained up to
-   * ~551K tokens this way and 94% of its 279M input tokens was cache replay.
-   * The default sits below the CLI's native auto-compaction band, so
-   * retirement normally replaces the in-session compaction cliff with a
-   * structured checkpoint at a park boundary — compaction still manages the
-   * window WITHIN a session; this bounds replay ACROSS a seat's lifetime.
-   * Generous by design: rotation is for genuinely large retained histories,
-   * not a cadence. CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS overrides; 0 disables.
-   */
-  agentContextRetireTokens: number;
-  /**
-   * How long an agent may sit parked inside `ask_operator` before the Console
-   * detaches the wait. The question stays open and answerable; only the held
-   * process is released, so a worst case is an agent idle for this long rather
-   * than one pinned until a human happens to return.
-   */
-  operatorAskDetachMs: number;
-  /** Registry namespace for console session names ("console-scout-8fbb2c"). */
-  peerNamePrefix: string;
-  /**
-   * Hard wall-clock cap per MCP tool call on the DECLARED capability servers
-   * (browser, database, …). Applied per-server via the SDK's `timeout` field —
-   * never as the blanket MCP_TOOL_TIMEOUT env, which would also bound the
-   * console's own server, where `ask_operator` legitimately parks for up to
-   * operatorAskDetachMs. A timed-out call returns an error result the agent
-   * can adapt to (and the error-streak watchdog bounds the retries). 0 = off.
-   */
-  mcpToolTimeoutMs: number;
-  /**
-   * Liveness alarm: an in-flight tool call older than this wakes MAIN with a
-   * console-authored failure handoff carrying the call's name, preview and
-   * age. Deliberately ABOVE the mechanical mcpToolTimeoutMs floor: declared
-   * MCP calls fail mechanically first, so the alarm covers only floor-less
-   * calls (foreground Bash, native tools). It was once below the floor "so
-   * main can act with judgment first" — a live run showed what that buys:
-   * 20 of 21 alarms fired on healthy cargo builds (which routinely run 5–9
-   * minutes) and main killed them. 0 = off.
-   */
-  toolCallAlarmMs: number;
-  /** Liveness alarm: a live turn with no stream event for this long. 0 = off. */
-  turnQuietAlarmMs: number;
-  /** Identical consecutive tool calls before the watchdog kills an agent's turn. */
-  watchdogIdenticalCalls: number;
-  /** Consecutive tool errors before the watchdog kills an agent's turn. */
-  watchdogErrorStreak: number;
-  /** Failed-turn redeliveries per delivery row before the console gives up. */
-  maxRedeliveryAttempts: number;
-  /** Governance sweep period: stale-ask detach + pattern stall checks. */
-  governanceSweepIntervalMs: number;
-  /**
-   * A pending DEFERRED ask with a recommendation auto-resolves to that
-   * recommendation after this long, as a provisional (operator-overridable)
-   * decision. "Deferred" means "you can keep going" — a live run held 5h23m
-   * behind four deferred asks because nothing enforced that. 0 = off.
-   */
-  deferredAutoProceedMs: number;
-  /**
-   * A pending BLOCKING ask older than this escalates once (main is woken to
-   * re-route work); in "away" autonomy a blocking ask WITH a recommendation
-   * auto-proceeds instead. 0 = off.
-   */
-  blockingAskEscalateMs: number;
-  /**
-   * Debounce before the run-completion predicate re-evaluates. Long enough
-   * that a settle followed 1ms later by the next turn is a non-event, short
-   * enough that the operator does not notice it.
-   */
-  completionQuietWindowMs: number;
-  /**
-   * How strictly sign-off consumes the completion coverage report.
-   * `waiver_required` (default): accepting a run whose coverage carries
-   * exceptions requires a typed waiver per exception. `advisory`: exceptions
-   * are enumerated on the card but one-click accept stays legal. Snapshotted
-   * into every report, so changing this never reinterprets an old acceptance.
-   */
-  completionPolicy: import("@agentique-console/shared").CompletionPolicy;
-  /**
-   * Agent-authored handoffs per session before the console asks MAIN to
-   * re-brief (which resets the budgets) or close. Sized for a real multi-seat
-   * session: 40 counted every assignment, update, and report, and three
-   * healthy sessions in one live run died at 40/40 mid-productive-work.
-   * 0 = off.
-   */
-  patternHandoffCap: number;
-  /** Quiet-time stall: unreported session with no hop for this long trips. 0 = off. */
-  patternStallMs: number;
-  /** Kill switch for nesting: gates only the create_child_session grant. */
-  enableChildSessions: boolean;
-  /** Open child sessions one parent may have at a time. */
-  maxChildSessionsPerParent: number;
-  /**
-   * Maximum session-tree depth (0 = top-level). Controllers in sessions with
-   * depth < cap receive create_child_session; the cap IS the granting. The
-   * resident-process budgets still bound machine load whatever the shape.
-   */
-  maxSessionDepth: number;
-}
+/** The approved MCP server names a `CONSOLE_MCP_DISABLED` entry may name. */
+export const APPROVED_MCP_SERVERS = ["browser"] as const;
 
 export interface Config {
-  infra: InfraConfig;
-  policy: PolicyConfig;
+  dataDir: string;
+  databaseFile: string;
+  blobRoot: string;
+  continuationRoot: string;
+  stateRoot: string;
+  port: number;
+  host: string;
+  /** The built web bundle, served at `/` when present. */
+  webDir: string;
+  fsRoots: { path: string; label: string }[];
+  provider: {
+    model: string;
+    effort: ModelEffort;
+    continuation: boolean;
+    continuationTtlMs: number | null;
+    /** The approved MCP server catalog an Attempt may receive by capability name. */
+    mcpServers: Record<string, McpServerCommand>;
+    /** The wall-clock bound on one MCP tool call of an Attempt (the SDK's per-call limit), or `null` for the SDK's default. */
+    mcpToolTimeoutMs: number | null;
+  };
+  governor: { providerMaxConcurrency: number; processMaxAttempts: number; maxWorktrees: number | null };
+  driver: { maxConcurrentRuns: number; diagnosticsRetained: number };
+  defaults: {
+    runKind: RunKind;
+    budget: BudgetLimits;
+    orchestratorAllocation: Allocation;
+    nodeAllocation: Allocation;
+    maxWallClockMs: number;
+    completionCheck: { command: string; expectedExitCode: number } | null;
+    evaluator: "reviewer" | "none";
+  };
+  checks: { commandTimeoutMs: number; maxOutputBytes: number };
 }
 
-/**
- * Env names retired by THE RENAME — and by the removal of the old settle-time
- * rotation subsystem (its successor, wake-boundary generation retirement, has
- * different semantics and its own knob). A retired name that is still set
- * fails the boot loudly: the alternative is the knob silently falling back to
- * its default, which is indistinguishable from working until it matters.
- */
-const RETIRED_ENV_NAMES: Record<string, string> = {
-  CONSOLE_CONTEXT_ROTATION: "CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS — settle-time rotation was removed; wake-boundary generation retirement replaced it",
-  CONSOLE_CONTEXT_TOKEN_LIMIT: "CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS — settle-time rotation was removed; wake-boundary generation retirement replaced it",
-  CONSOLE_CONTEXT_TURN_LIMIT: "nothing — removed; retirement has no turn-count trigger",
-  CONSOLE_CHECKPOINT_TIMEOUT_MS: "nothing — removed with the model-queried checkpoint; retirement checkpoints are Console-reconstructed",
-  CONSOLE_SEAT_IDLE_REAP_MS: "CONSOLE_AGENT_IDLE_REAP_MS",
-  CONSOLE_MAX_RESIDENT_SEATS: "CONSOLE_MAX_RESIDENT_AGENTS",
-  CONSOLE_MAX_RESIDENT_SEATS_PER_TREE: "CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION",
-  CONSOLE_MAX_RESIDENT_AGENTS_PER_TREE: "CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION",
-  CONSOLE_SEAT_SPAWN_TIMEOUT_MS: "CONSOLE_AGENT_SPAWN_TIMEOUT_MS",
-  CONSOLE_SEAT_WORKTREES: "CONSOLE_AGENT_WORKTREES",
-};
-
-function rejectRetiredEnvNames(env: NodeJS.ProcessEnv): void {
-  const found = Object.keys(RETIRED_ENV_NAMES).filter((name) => env[name] !== undefined);
-  if (found.length === 0) return;
-  throw new Error(
-    "retired environment variable name(s) set: " +
-      found.map((name) => `${name} (use ${RETIRED_ENV_NAMES[name]})`).join(", "),
-  );
-}
-
-function parseRoots(
-  configured: string | undefined,
-  home: string,
-): { path: string; label: string }[] {
-  if (configured !== undefined && configured.trim() !== "") {
-    return configured
-      .split(":")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry !== "")
-      .map((entry) => ({ path: entry, label: entry }));
+export class ConfigError extends Error {
+  constructor(
+    readonly variable: string,
+    message: string,
+  ) {
+    super(`${variable}: ${message}`);
+    this.name = "ConfigError";
   }
-  // Home first so the picker opens somewhere useful; "/" makes the whole
-  // filesystem reachable, since a workspace may live anywhere on this machine.
+}
+
+function integer(env: NodeJS.ProcessEnv, name: string, fallback: number, options: { min?: number; max?: number } = {}): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value)) throw new ConfigError(name, `expected an integer, got ${JSON.stringify(raw)}`);
+  if (options.min !== undefined && value < options.min) throw new ConfigError(name, `expected at least ${options.min}, got ${value}`);
+  if (options.max !== undefined && value > options.max) throw new ConfigError(name, `expected at most ${options.max}, got ${value}`);
+  return value;
+}
+
+function decimal(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new ConfigError(name, `expected a non-negative number, got ${JSON.stringify(raw)}`);
+  return value;
+}
+
+function optionalInteger(env: NodeJS.ProcessEnv, name: string, options: { min?: number } = {}): number | null {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return null;
+  return integer(env, name, 0, options);
+}
+
+function flag(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  if (raw === "1" || raw === "true") return true;
+  if (raw === "0" || raw === "false") return false;
+  throw new ConfigError(name, `expected 1 or 0, got ${JSON.stringify(raw)}`);
+}
+
+function effort(env: NodeJS.ProcessEnv): ModelEffort {
+  const raw = env.CONSOLE_EFFORT;
+  if (raw === undefined || raw.trim() === "") return "medium";
+  if (!(MODEL_EFFORTS as readonly string[]).includes(raw)) throw new ConfigError("CONSOLE_EFFORT", `expected one of ${MODEL_EFFORTS.join(", ")}, got ${JSON.stringify(raw)}`);
+  return raw as ModelEffort;
+}
+
+function roots(env: NodeJS.ProcessEnv, home: string): { path: string; label: string }[] {
+  const raw = env.CONSOLE_FS_ROOTS;
+  if (raw !== undefined && raw.trim() !== "") {
+    const entries = raw
+      .split(path.delimiter)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== "");
+    for (const entry of entries) if (!path.isAbsolute(entry)) throw new ConfigError("CONSOLE_FS_ROOTS", `every root is an absolute path; got ${JSON.stringify(entry)}`);
+    if (entries.length === 0) throw new ConfigError("CONSOLE_FS_ROOTS", "at least one root is required when set");
+    return entries.map((entry) => ({ path: entry, label: entry }));
+  }
   return [
     { path: home, label: "Home" },
-    { path: "/", label: "Filesystem" },
+    { path: path.parse(home).root, label: "Filesystem" },
   ];
 }
 
-/**
- * CONSOLE_MODEL goes through the same validation the API route enforces: a
- * typo'd id must fail at boot, not silently drop every session's rotation
- * ceiling to the conservative default.
- */
-function validatedModel(id: string | undefined): string {
-  if (id === undefined) return DEFAULT_ORCHESTRATOR_MODEL;
-  if (!isOrchestratorModel(id)) {
-    throw new Error(`CONSOLE_MODEL "${id}" is not an orchestrator model (expected one of the ids in shared/models.ts)`);
+function mcpServers(env: NodeJS.ProcessEnv): Record<string, McpServerCommand> {
+  const catalog: Record<string, McpServerCommand> = {};
+  const browser = env.CONSOLE_BROWSER_MCP;
+  if (browser !== undefined && browser.trim() !== "") {
+    const [command, ...args] = browser.split(/\s+/).filter((entry) => entry !== "");
+    if (command === undefined) throw new ConfigError("CONSOLE_BROWSER_MCP", "expected a command");
+    catalog.browser = { command, args };
   }
-  return id;
+  const disabled = (env.CONSOLE_MCP_DISABLED ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  for (const name of disabled) {
+    if (!(APPROVED_MCP_SERVERS as readonly string[]).includes(name)) throw new ConfigError("CONSOLE_MCP_DISABLED", `expected approved MCP server names (${APPROVED_MCP_SERVERS.join(", ")}), got ${JSON.stringify(name)}`);
+    delete catalog[name];
+  }
+  return catalog;
 }
 
-/** Same rule for CONSOLE_COMPLETION_POLICY: a typo fails at boot, never as a silently-default gate. */
-function validatedCompletionPolicy(raw: string | undefined): import("@agentique-console/shared").CompletionPolicy {
-  if (raw === undefined) return "waiver_required";
-  if (raw !== "advisory" && raw !== "waiver_required") {
-    throw new Error(`CONSOLE_COMPLETION_POLICY "${raw}" is not a completion policy (expected "advisory" or "waiver_required")`);
-  }
+function completionCheck(env: NodeJS.ProcessEnv): Config["defaults"]["completionCheck"] {
+  const raw = env.CONSOLE_DEFAULT_COMPLETION_CHECK;
+  if (raw === undefined) return { command: "npm test", expectedExitCode: 0 };
+  if (raw.trim() === "") return null;
+  return { command: raw.trim(), expectedExitCode: 0 };
+}
+
+function evaluator(env: NodeJS.ProcessEnv): "reviewer" | "none" {
+  const raw = env.CONSOLE_DEFAULT_EVALUATOR;
+  if (raw === undefined || raw.trim() === "") return "reviewer";
+  if (raw !== "reviewer" && raw !== "none") throw new ConfigError("CONSOLE_DEFAULT_EVALUATOR", `expected reviewer or none, got ${JSON.stringify(raw)}`);
   return raw;
 }
 
-/** Same rule for CONSOLE_EFFORT: a typo fails at boot, not silently at the CLI. */
-function validatedEffort(raw: string | undefined): EffortLevel | undefined {
-  if (raw === undefined) return undefined;
-  if (!isEffortLevel(raw)) {
-    throw new Error(`CONSOLE_EFFORT "${raw}" is not an effort level (expected one of ${EFFORT_LEVELS.join(", ")})`);
-  }
-  return raw;
-}
-
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  rejectRetiredEnvNames(env);
-  const dataDir =
-    env.CONSOLE_DATA_DIR ?? path.join(os.homedir(), ".agentique-console");
-  const home = os.homedir();
+/** Reads and validates the configuration; throws `ConfigError` naming the offending variable. */
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): Config {
+  const dataDir = path.resolve(env.CONSOLE_DATA_DIR ?? path.join(home, ".agentique-console"));
+  const orchestratorAllocation: Allocation = { costUsd: decimal(env, "CONSOLE_ORCHESTRATOR_COST_USD", 5), tokens: integer(env, "CONSOLE_ORCHESTRATOR_TOKENS", 500_000, { min: 1 }), attempts: integer(env, "CONSOLE_ORCHESTRATOR_ATTEMPTS", 8, { min: 1 }) };
+  const nodeAllocation: Allocation = { costUsd: decimal(env, "CONSOLE_NODE_COST_USD", 4), tokens: integer(env, "CONSOLE_NODE_TOKENS", 400_000, { min: 1 }), attempts: integer(env, "CONSOLE_NODE_ATTEMPTS", 4, { min: 1 }) };
+  const budget: BudgetLimits = {
+    maxCostUsd: decimal(env, "CONSOLE_DEFAULT_MAX_COST_USD", 50),
+    maxTokens: integer(env, "CONSOLE_DEFAULT_MAX_TOKENS", 5_000_000, { min: 1 }),
+    maxAttempts: integer(env, "CONSOLE_DEFAULT_MAX_ATTEMPTS", 60, { min: 1 }),
+    maxWallClockMs: optionalInteger(env, "CONSOLE_DEFAULT_MAX_WALL_CLOCK_MS", { min: 1 }),
+    maxConcurrency: integer(env, "CONSOLE_DEFAULT_MAX_CONCURRENCY", 3, { min: 1 }),
+  };
+  const port = integer(env, "CONSOLE_PORT", 4400, { min: 0, max: 65_535 });
+  const model = env.CONSOLE_MODEL?.trim() || "claude-fable-5-1";
   return {
-    infra: {
-      dataDir,
-      dbFile: path.join(dataDir, "console.db"),
-      port: Number(env.CONSOLE_PORT ?? 4400),
-      host: env.CONSOLE_HOST ?? "127.0.0.1",
-      webDir: path.resolve(import.meta.dirname, "../../web/dist"),
-      skillsPluginDir: env.CONSOLE_SKILLS_DIR ?? path.resolve(import.meta.dirname, "../skills"),
-      fsRoots: parseRoots(env.CONSOLE_FS_ROOTS, home),
-      model: validatedModel(env.CONSOLE_MODEL),
-      improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
-      effort: validatedEffort(env.CONSOLE_EFFORT),
-      autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
-      mcpDisabled: (env.CONSOLE_MCP_DISABLED ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),
-      browserMcp: env.CONSOLE_BROWSER_MCP === undefined ? undefined
-        : env.CONSOLE_BROWSER_MCP.split(/\s+/).filter((entry) => entry !== ""),
+    dataDir,
+    databaseFile: path.join(dataDir, "console.db"),
+    blobRoot: path.join(dataDir, "blobs"),
+    continuationRoot: path.join(dataDir, "continuations"),
+    stateRoot: dataDir,
+    port,
+    host: env.CONSOLE_HOST?.trim() || "127.0.0.1",
+    webDir: path.resolve(import.meta.dirname, "../../web/dist"),
+    fsRoots: roots(env, home),
+    provider: {
+      model,
+      effort: effort(env),
+      continuation: flag(env, "CONSOLE_CONTINUATION", true),
+      continuationTtlMs: optionalInteger(env, "CONSOLE_CONTINUATION_TTL_MS", { min: 1 }),
+      mcpServers: mcpServers(env),
+      mcpToolTimeoutMs: optionalInteger(env, "CONSOLE_MCP_TOOL_TIMEOUT_MS", { min: 1_000 }),
     },
-    policy: {
-      agentIdleReapMs: Number(env.CONSOLE_AGENT_IDLE_REAP_MS ?? 300_000),
-      agentMaxResident: Number(env.CONSOLE_MAX_RESIDENT_AGENTS ?? Math.min(12, Math.max(4, Math.floor(os.totalmem() / (1.5 * 1024 ** 3))))),
-      agentMaxResidentPerSession: Number(env.CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION ?? 4),
-      agentSpawnTimeoutMs: Number(env.CONSOLE_AGENT_SPAWN_TIMEOUT_MS ?? 30_000),
-      agentWorktrees: env.CONSOLE_AGENT_WORKTREES !== "0",
-      agentContextRetireTokens: Number(env.CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS ?? 150_000),
-      operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
-      peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
-      mcpToolTimeoutMs: Number(env.CONSOLE_MCP_TOOL_TIMEOUT_MS ?? 300_000),
-      toolCallAlarmMs: Number(env.CONSOLE_TOOL_ALARM_MS ?? 600_000),
-      turnQuietAlarmMs: Number(env.CONSOLE_TURN_QUIET_ALARM_MS ?? 300_000),
-      watchdogIdenticalCalls: Number(env.CONSOLE_WATCHDOG_IDENTICAL_CALLS ?? 5),
-      watchdogErrorStreak: Number(env.CONSOLE_WATCHDOG_ERROR_STREAK ?? 10),
-      maxRedeliveryAttempts: Number(env.CONSOLE_MAX_REDELIVERY_ATTEMPTS ?? 2),
-      governanceSweepIntervalMs: Number(env.CONSOLE_GOVERNANCE_SWEEP_MS ?? 30_000),
-      deferredAutoProceedMs: Number(env.CONSOLE_DEFERRED_AUTO_PROCEED_MS ?? 900_000),
-      blockingAskEscalateMs: Number(env.CONSOLE_BLOCKING_ASK_ESCALATE_MS ?? 900_000),
-      completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
-      completionPolicy: validatedCompletionPolicy(env.CONSOLE_COMPLETION_POLICY),
-      patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 120),
-      patternStallMs: Number(env.CONSOLE_PATTERN_STALL_MS ?? 600_000),
-      enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",
-      maxChildSessionsPerParent: Number(env.CONSOLE_MAX_CHILD_SESSIONS ?? 5),
-      maxSessionDepth: Number(env.CONSOLE_MAX_SESSION_DEPTH ?? 2),
+    governor: {
+      providerMaxConcurrency: integer(env, "CONSOLE_PROVIDER_MAX_CONCURRENCY", 4, { min: 1 }),
+      processMaxAttempts: integer(env, "CONSOLE_PROCESS_MAX_ATTEMPTS", 6, { min: 1 }),
+      maxWorktrees: optionalInteger(env, "CONSOLE_MAX_WORKTREES", { min: 1 }),
     },
+    driver: {
+      maxConcurrentRuns: integer(env, "CONSOLE_MAX_CONCURRENT_RUNS", 4, { min: 1 }),
+      diagnosticsRetained: integer(env, "CONSOLE_DIAGNOSTICS_RETAINED", 500, { min: 10, max: 100_000 }),
+    },
+    defaults: {
+      runKind: "code",
+      budget,
+      orchestratorAllocation,
+      nodeAllocation,
+      maxWallClockMs: integer(env, "CONSOLE_ATTEMPT_MAX_WALL_CLOCK_MS", 600_000, { min: 1_000 }),
+      completionCheck: completionCheck(env),
+      evaluator: evaluator(env),
+    },
+    checks: { commandTimeoutMs: integer(env, "CONSOLE_CHECK_TIMEOUT_MS", 600_000, { min: 1_000 }), maxOutputBytes: 65_536 },
   };
 }

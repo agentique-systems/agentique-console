@@ -76,7 +76,7 @@ Resolve handoff OIDs immediately. Branch names can move; OIDs make the accepted 
 Choose a history policy before starting:
 
 - Rebase private agent branches before handoff when the project wants a linear history.
-- Merge shared or review-visible branches when preserving published topology matters.
+- Merge shared or review-visible branches when preserving the published history shape matters.
 - Cherry-pick cohesive commits when only part of a task is accepted; use `-x` when provenance matters.
 - Squash only when intermediate commits have no review or diagnostic value.
 

@@ -1,68 +1,79 @@
-/** Config defaults, env overrides, and the loud rejection of retired env names. */
-import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "./config.ts";
+import { ConfigError, loadConfig } from "./config.ts";
 
-describe("loadConfig agent-lane knobs", () => {
-  it("has resident/wake/naming defaults", () => {
-    const config = loadConfig({});
-    expect(config.policy.agentIdleReapMs).toBe(300_000);
-    expect(config.policy.agentMaxResident)
-      .toBe(Math.min(12, Math.max(4, Math.floor(os.totalmem() / (1.5 * 1024 ** 3)))));
-    expect(config.policy.agentMaxResidentPerSession).toBe(4);
-    expect(config.policy.agentSpawnTimeoutMs).toBe(30_000);
-    expect(config.policy.peerNamePrefix).toBe("console-");
+const HOME = path.resolve("/home/operator");
+
+describe("configuration", () => {
+  it("derives every path from the data directory and applies validated defaults", () => {
+    const config = loadConfig({}, HOME);
+    expect(config.dataDir).toBe(path.join(HOME, ".agentique-console"));
+    expect(config.databaseFile).toBe(path.join(config.dataDir, "console.db"));
+    expect(config.blobRoot).toBe(path.join(config.dataDir, "blobs"));
+    expect(config.stateRoot).toBe(config.dataDir);
+    expect(config).toMatchObject({ port: 4400, host: "127.0.0.1", provider: { effort: "medium", continuation: true, continuationTtlMs: null, mcpServers: {} }, governor: { providerMaxConcurrency: 4, processMaxAttempts: 6, maxWorktrees: null }, driver: { maxConcurrentRuns: 4 } });
+    expect(config.defaults.completionCheck).toEqual({ command: "npm test", expectedExitCode: 0 });
+    expect(config.defaults.evaluator).toBe("reviewer");
+    expect(config.fsRoots.map((r) => r.label)).toEqual(["Home", "Filesystem"]);
   });
 
-  it("env overrides win", () => {
-    const config = loadConfig({
-      CONSOLE_AGENT_IDLE_REAP_MS: "1000",
-      CONSOLE_MAX_RESIDENT_AGENTS: "2",
-      CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION: "1",
-      CONSOLE_AGENT_SPAWN_TIMEOUT_MS: "500",
-      CONSOLE_PEER_NAME_PREFIX: "lab-",
-    });
-    expect(config.policy.agentIdleReapMs).toBe(1000);
-    expect(config.policy.agentMaxResident).toBe(2);
-    expect(config.policy.agentMaxResidentPerSession).toBe(1);
-    expect(config.policy.agentSpawnTimeoutMs).toBe(500);
-    expect(config.policy.peerNamePrefix).toBe("lab-");
+  it("reads the retained and new variables, ignores unknown CONSOLE_* names, and translates no retired name", () => {
+    const config = loadConfig(
+      {
+        CONSOLE_DATA_DIR: "/data/console",
+        CONSOLE_PORT: "5000",
+        CONSOLE_HOST: "0.0.0.0",
+        CONSOLE_FS_ROOTS: ["/srv/a", "/srv/b"].join(path.delimiter),
+        CONSOLE_MODEL: "claude-haiku-4-5-20251001",
+        CONSOLE_EFFORT: "low",
+        CONSOLE_CONTINUATION: "0",
+        CONSOLE_CONTINUATION_TTL_MS: "3600000",
+        CONSOLE_BROWSER_MCP: "npx -y @browser/mcp --headless",
+        CONSOLE_PROVIDER_MAX_CONCURRENCY: "2",
+        CONSOLE_PROCESS_MAX_ATTEMPTS: "3",
+        CONSOLE_MAX_WORKTREES: "5",
+        CONSOLE_DEFAULT_MAX_COST_USD: "12.5",
+        CONSOLE_DEFAULT_COMPLETION_CHECK: "",
+        CONSOLE_DEFAULT_EVALUATOR: "none",
+        // Retired names are neither honoured nor translated: unknown CONSOLE_* names are ignored.
+        CONSOLE_AGENT_WORKTREES: "0",
+        CONSOLE_MAX_RESIDENT_AGENTS: "99",
+        CONSOLE_COMPLETION_POLICY: "advisory",
+      },
+      HOME,
+    );
+    expect(config.dataDir).toBe(path.resolve("/data/console"));
+    expect(config).toMatchObject({ port: 5000, host: "0.0.0.0", provider: { model: "claude-haiku-4-5-20251001", effort: "low", continuation: false, continuationTtlMs: 3_600_000, mcpServers: { browser: { command: "npx", args: ["-y", "@browser/mcp", "--headless"] } } }, governor: { providerMaxConcurrency: 2, processMaxAttempts: 3, maxWorktrees: 5 } });
+    expect(config.fsRoots.map((r) => r.path)).toEqual(["/srv/a", "/srv/b"]);
+    expect(config.defaults.budget.maxCostUsd).toBe(12.5);
+    expect(config.defaults.completionCheck).toBeNull();
+    expect(config.defaults.evaluator).toBe("none");
+    expect(JSON.stringify(config)).not.toMatch(/resident|worktrees":true|advisory/);
+    // A disabled server leaves the catalog: the value is a comma-separated list of approved server names, never a flag.
+    expect(loadConfig({ CONSOLE_BROWSER_MCP: "cmd", CONSOLE_MCP_DISABLED: "browser" }, HOME).provider.mcpServers).toEqual({});
+    expect(loadConfig({ CONSOLE_BROWSER_MCP: "cmd", CONSOLE_MCP_DISABLED: " browser , " }, HOME).provider.mcpServers).toEqual({});
+    expect(loadConfig({ CONSOLE_BROWSER_MCP: "cmd", CONSOLE_MCP_DISABLED: "" }, HOME).provider.mcpServers).toEqual({ browser: { command: "cmd", args: [] } });
+    expect(loadConfig({ CONSOLE_MCP_DISABLED: "browser" }, HOME).provider.mcpServers).toEqual({});
+    // The MCP tool-call bound is a real limit of the Attempt's subprocess, or the SDK's default when unset.
+    expect(loadConfig({}, HOME).provider.mcpToolTimeoutMs).toBeNull();
+    expect(loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "5000" }, HOME).provider.mcpToolTimeoutMs).toBe(5_000);
   });
 
-  it("MCP tool-call timeout defaults to 5 minutes and 0 disables it", () => {
-    expect(loadConfig({}).policy.mcpToolTimeoutMs).toBe(300_000);
-    expect(loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "60000" }).policy.mcpToolTimeoutMs).toBe(60_000);
-    expect(loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "0" }).policy.mcpToolTimeoutMs).toBe(0);
+  it("refuses a CONSOLE_MCP_DISABLED entry that names no approved server, and a flag-like value", () => {
+    expect(() => loadConfig({ CONSOLE_MCP_DISABLED: "1" }, HOME)).toThrow(/CONSOLE_MCP_DISABLED/);
+    expect(() => loadConfig({ CONSOLE_MCP_DISABLED: "browser,other" }, HOME)).toThrow(/CONSOLE_MCP_DISABLED.*other/);
+    expect(() => loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "500" }, HOME)).toThrow(/CONSOLE_MCP_TOOL_TIMEOUT_MS/);
+    expect(() => loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "soon" }, HOME)).toThrow(/CONSOLE_MCP_TOOL_TIMEOUT_MS/);
   });
 
-  it("CONSOLE_EFFORT is unset by default, accepts an SDK level, and rejects a typo at boot", () => {
-    expect(loadConfig({}).infra.effort).toBeUndefined();
-    expect(loadConfig({ CONSOLE_EFFORT: "xhigh" }).infra.effort).toBe("xhigh");
-    expect(() => loadConfig({ CONSOLE_EFFORT: "turbo" })).toThrow(/CONSOLE_EFFORT "turbo".*low, medium, high, xhigh, max/);
-  });
-
-  it("generation retirement defaults to 150K retained tokens; the env overrides and 0 disables", () => {
-    expect(loadConfig({}).policy.agentContextRetireTokens).toBe(150_000);
-    expect(loadConfig({ CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS: "80000" }).policy.agentContextRetireTokens).toBe(80_000);
-    expect(loadConfig({ CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS: "0" }).policy.agentContextRetireTokens).toBe(0);
-  });
-
-  it("the removed rotation knobs fail the boot loudly instead of silently doing nothing", () => {
-    for (const name of ["CONSOLE_CONTEXT_ROTATION", "CONSOLE_CONTEXT_TOKEN_LIMIT", "CONSOLE_CONTEXT_TURN_LIMIT", "CONSOLE_CHECKPOINT_TIMEOUT_MS"]) {
-      expect(() => loadConfig({ [name]: "1" }), name).toThrow(/native compaction|removed/);
-    }
-  });
-
-  it("rejects every retired env name loudly, naming the replacement", () => {
-    expect(() => loadConfig({ CONSOLE_SEAT_IDLE_REAP_MS: "1000" }))
-      .toThrow(/CONSOLE_SEAT_IDLE_REAP_MS \(use CONSOLE_AGENT_IDLE_REAP_MS\)/);
-    expect(() => loadConfig({ CONSOLE_MAX_RESIDENT_SEATS: "2", CONSOLE_SEAT_WORKTREES: "0" }))
-      .toThrow(/CONSOLE_MAX_RESIDENT_SEATS \(use CONSOLE_MAX_RESIDENT_AGENTS\).*CONSOLE_SEAT_WORKTREES \(use CONSOLE_AGENT_WORKTREES\)/);
-    expect(() => loadConfig({ CONSOLE_MAX_RESIDENT_SEATS_PER_TREE: "1" }))
-      .toThrow(/CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION/);
-    expect(() => loadConfig({ CONSOLE_MAX_RESIDENT_AGENTS_PER_TREE: "1" }))
-      .toThrow(/CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION/);
-    expect(() => loadConfig({ CONSOLE_SEAT_SPAWN_TIMEOUT_MS: "500" }))
-      .toThrow(/CONSOLE_AGENT_SPAWN_TIMEOUT_MS/);
+  it("refuses an invalid value naming the variable", () => {
+    expect(() => loadConfig({ CONSOLE_PORT: "http" }, HOME)).toThrow(ConfigError);
+    expect(() => loadConfig({ CONSOLE_PORT: "70000" }, HOME)).toThrow(/CONSOLE_PORT/);
+    expect(() => loadConfig({ CONSOLE_EFFORT: "extreme" }, HOME)).toThrow(/CONSOLE_EFFORT/);
+    expect(() => loadConfig({ CONSOLE_FS_ROOTS: "relative/path" }, HOME)).toThrow(/CONSOLE_FS_ROOTS/);
+    expect(() => loadConfig({ CONSOLE_CONTINUATION: "maybe" }, HOME)).toThrow(/CONSOLE_CONTINUATION/);
+    expect(() => loadConfig({ CONSOLE_DEFAULT_EVALUATOR: "judge" }, HOME)).toThrow(/CONSOLE_DEFAULT_EVALUATOR/);
+    expect(() => loadConfig({ CONSOLE_DEFAULT_MAX_COST_USD: "-1" }, HOME)).toThrow(/CONSOLE_DEFAULT_MAX_COST_USD/);
+    expect(() => loadConfig({ CONSOLE_PROVIDER_MAX_CONCURRENCY: "0" }, HOME)).toThrow(/CONSOLE_PROVIDER_MAX_CONCURRENCY/);
   });
 });

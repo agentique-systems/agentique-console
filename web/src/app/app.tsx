@@ -1,52 +1,58 @@
 import { TriangleAlert } from "lucide-react";
 import { BrowserRouter } from "react-router";
 
-import { useWorkspaces } from "@/api/queries";
+import { ApiError } from "@/api/client";
+import { useWorkspace } from "@/api/queries";
 import { Shell } from "@/app/shell";
 import { Spinner } from "@/components/ui/spinner";
 import { useScopeStore } from "@/stores/scope";
 import { WorkspaceGate } from "@/workspaces/workspace-gate";
 
 /**
- * The one branch that decides what fills the viewport. The gate renders
- * INSTEAD of the shell, never over it — a shell that mounts against a scope
- * about to be replaced would mint junk cache entries for a workspace the
- * operator never chose.
+ * The one branch that decides what fills the viewport: the Workspace gate
+ * until a Workspace is chosen (re-validated by a point read on every load,
+ * so a Workspace beyond the first page of the list is as valid as any),
+ * then the shell scoped to it.
  */
-export function App() {
-  const workspaces = useWorkspaces();
+export function App({ router = true }: { router?: boolean }) {
   const selectedWorkspaceId = useScopeStore((s) => s.selectedWorkspaceId);
+  const clear = useScopeStore((s) => s.clear);
+  const selected = useWorkspace(selectedWorkspaceId);
 
-  if (workspaces.isPending) {
+  if (selectedWorkspaceId === null) return <WorkspaceGate />;
+
+  if (selected.isPending) {
     return (
-      <div className="flex h-screen items-center justify-center">
+      <div className="flex h-screen items-center justify-center" data-testid="app-loading">
         <Spinner className="size-5 text-muted-foreground" />
       </div>
     );
   }
 
-  if (workspaces.isError) {
+  if (selected.isError) {
+    // A Workspace that no longer exists sends the operator back to the gate; anything else is the server being unreachable.
+    if (selected.error instanceof ApiError && selected.error.status === 404) {
+      clear();
+      return <WorkspaceGate />;
+    }
     return (
-      <div className="flex h-screen flex-col items-center justify-center gap-2">
+      <div className="flex h-screen flex-col items-center justify-center gap-2" data-testid="app-unreachable">
         <p className="flex items-center gap-1.5 text-sm text-status-failed">
           <TriangleAlert className="size-4" />
           The console server is unreachable.
         </p>
         <p className="text-xs text-muted-foreground">
-          Start it with <code>npm run dev</code> — this page retries on its
-          own.
+          Start it with <code>npm run dev</code>. This page retries on its own.
         </p>
       </div>
     );
   }
 
-  // A persisted id whose workspace was deleted elsewhere must not wedge the
-  // shell: re-validate against the list on every load.
-  const selected =
-    selectedWorkspaceId !== null
-      ? workspaces.data.find((w) => w.id === selectedWorkspaceId)
-      : undefined;
-
-  if (selected === undefined) return <WorkspaceGate />;
-  return <BrowserRouter><Shell /></BrowserRouter>;
+  return router ? (
+    <BrowserRouter>
+      <Shell workspace={selected.data} />
+    </BrowserRouter>
+  ) : (
+    <Shell workspace={selected.data} />
+  );
 }

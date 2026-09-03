@@ -1,5 +1,0 @@
-{
-  "version": 1,
-  "note": "Per-scenario, per-dimension medians from judged Tier B runs. Bumps are explicit human-reviewed commits citing trace evidence seqs; read judgment notes before bumping.",
-  "scenarios": {}
-}

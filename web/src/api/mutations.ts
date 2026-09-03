@@ -1,250 +1,110 @@
+/**
+ * Every operator mutation, one hook each; on success the scoped queries are
+ * invalidated at once (the live subscription refreshes them again as the
+ * Events arrive).
+ */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-
-import type {
-  AssumptionWire,
-  OperatorRequirementStatusBody,
-  RequirementNodeWire,
-  ContinueUserSessionBody,
-  CreateUserSessionBody,
-  CreateUserSessionResponse,
-  CreateWorkspaceBody,
-  ImproveMessageBody,
-  ImproveMessageResponse,
-  Interaction,
-  PatchUserSessionBody,
-  PauseSystemBody,
-  PauseSystemResponse,
-  RunSignoffBody,
-  SystemPauseState,
-  PostMessageResponse,
-  ResolveInteractionBody,
-  ScheduledAssignment,
-  UserSession,
-  Workspace,
-} from "@agentique-console/shared";
-
-import { apiFetch } from "./client";
+import type { AcceptanceCriterionBody, BudgetIncreaseRequestBody, BudgetIncreaseResolveBody, ConversationCreateBody, DecisionResolveBody, MessageBody, ProposalApproveBody, ProposalRejectBody, PublicationRequestBody, PublicationResolveBody, RequirementRevisionBody, RunCreateBody, RunPauseBody, RunStartBody, SignoffAcceptBody, SignoffRequestChangesBody, WorkspaceCreateBody } from "@agentique-console/core";
+import { api } from "./client";
 import { keys } from "./keys";
 
+function useInvalidate() {
+  const client = useQueryClient();
+  return (...prefixes: readonly (readonly unknown[])[]) => Promise.all(prefixes.map((queryKey) => client.invalidateQueries({ queryKey })));
+}
+
 export function useCreateWorkspace() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (body: CreateWorkspaceBody) =>
-      apiFetch<Workspace>("/api/workspaces", {
-        method: "POST",
-        body: JSON.stringify(body),
-      }),
-    onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: keys.workspaces }),
-  });
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: (body: WorkspaceCreateBody) => api("createWorkspace", { body }), onSuccess: () => invalidate(keys.workspaces) });
 }
 
-/** Create-on-first-message: this one call mints the session AND posts the text. */
-export function useCreateUserSession() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (body: CreateUserSessionBody) =>
-      apiFetch<CreateUserSessionResponse>("/api/user-sessions", {
-        method: "POST",
-        body: JSON.stringify(body),
-      }),
-    onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all }),
-  });
+export function useCreateConversation() {
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: (body: ConversationCreateBody) => api("createConversation", { body }), onSuccess: (c) => invalidate(keys.workspaceConversations(c.conversation.workspaceId)) });
 }
 
-/**
- * The explicit run-boundary handoff: continue the source session's project in
- * a fresh session. An open source is archived first (checkpoint recorded,
- * agents stopped) — never resumed under a new label.
- */
-export function useContinueUserSession() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, ...body }: { id: string } & ContinueUserSessionBody) =>
-      apiFetch<CreateUserSessionResponse>(`/api/user-sessions/${id}/continue`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      }),
-    onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all }),
-  });
+export function usePostMessage(conversationId: string) {
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: (body: MessageBody) => api("postConversationMessage", { params: { conversationId }, body }), onSuccess: () => invalidate(keys.conversationMessages(conversationId)) });
 }
 
-export function usePatchUserSession() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, ...body }: { id: string } & PatchUserSessionBody) =>
-      apiFetch<UserSession>(`/api/user-sessions/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      }),
-    onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all }),
-  });
+export function useCreateRun(conversationId: string) {
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: (body: RunCreateBody) => api("createRun", { params: { conversationId }, body }), onSuccess: () => invalidate(keys.conversation(conversationId), keys.conversationRuns(conversationId), keys.conversationMessages(conversationId), keys.conversationRequirements(conversationId)) });
 }
 
-/** 202: the reply arrives over the spine, not in this response. */
-export function usePostUserMessage() {
-  return useMutation({
-    mutationFn: ({ id, text }: { id: string; text: string }) =>
-      apiFetch<PostMessageResponse>(`/api/user-sessions/${id}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ text }),
-      }),
-  });
+export function useStartRun(runId: string) {
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: (body: RunStartBody) => api("startRun", { params: { runId }, body }), onSuccess: () => invalidate(keys.run(runId)) });
 }
 
-/**
- * The operator's verdict on a proposed run completion. 409 = the run is no
- * longer awaiting one (someone else resolved it, or a chat message already
- * reopened it).
- */
-export function useResolveSignoff() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ sessionId, body }: { sessionId: string; body: RunSignoffBody }) =>
-      apiFetch<UserSession>(`/api/user-sessions/${sessionId}/signoff`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      }),
-    onSuccess: (_data, { sessionId }) => {
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.detail(sessionId) });
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all });
-    },
-  });
+export function useRunControl(runId: string) {
+  const invalidate = useInvalidate();
+  const done = () => invalidate(keys.run(runId));
+  return {
+    cancel: useMutation({ mutationFn: () => api("cancelRun", { params: { runId }, body: {} }), onSuccess: done }),
+    pause: useMutation({ mutationFn: (body: RunPauseBody) => api("pauseRun", { params: { runId }, body }), onSuccess: done }),
+    resume: useMutation({ mutationFn: () => api("resumeRun", { params: { runId }, body: {} }), onSuccess: done }),
+  };
 }
 
-/** Answers a question card or decides a plan. 409 = already resolved. */
-export function useResolveInteraction() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      sessionId,
-      interactionId,
-      body,
-    }: {
-      sessionId: string;
-      interactionId: string;
-      body: ResolveInteractionBody;
-    }) =>
-      apiFetch<Interaction>(
-        `/api/user-sessions/${sessionId}/interactions/${interactionId}`,
-        { method: "POST", body: JSON.stringify(body) },
-      ),
-    onSuccess: (_data, { sessionId }) =>
-      void queryClient.invalidateQueries({
-        queryKey: keys.userSessions.detail(sessionId),
-      }),
-  });
+export function useAuthorRequirements(conversationId: string) {
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: (body: RequirementRevisionBody) => api("createRequirementRevision", { params: { conversationId }, body }), onSuccess: () => invalidate(keys.conversationRequirements(conversationId)) });
 }
 
-/** The operator's own verdict on one requirement — their word IS the gate. */
-export function useSetRequirementStatus() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ sessionId, requirementId, body }: {
-      sessionId: string;
-      requirementId: string;
-      body: OperatorRequirementStatusBody;
-    }) =>
-      apiFetch<RequirementNodeWire>(
-        `/api/user-sessions/${sessionId}/requirements/${requirementId}/status`,
-        { method: "POST", body: JSON.stringify(body) },
-      ),
-    onSuccess: (_data, { sessionId }) => {
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.requirements(sessionId) });
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all });
-    },
-  });
+export function useCreateCriterion(conversationId: string) {
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: (input: { requirementId: string; body: AcceptanceCriterionBody }) => api("createAcceptanceCriterion", { params: { requirementId: input.requirementId }, body: input.body }), onSuccess: () => invalidate(keys.conversationRequirements(conversationId)) });
 }
 
-/** The operator's verdict on one assumption — their word is its own provenance. */
-export function useResolveAssumption() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ sessionId, assumptionId, body }: {
-      sessionId: string;
-      assumptionId: string;
-      body: { outcome: "confirmed" | "falsified" | "retired"; note?: string };
-    }) =>
-      apiFetch<AssumptionWire>(
-        `/api/user-sessions/${sessionId}/assumptions/${assumptionId}/resolve`,
-        { method: "POST", body: JSON.stringify(body) },
-      ),
-    onSuccess: (_data, { sessionId }) => {
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.requirements(sessionId) });
-      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all });
-    },
-  });
+export function useProposalReview(runId: string, conversationId: string) {
+  const invalidate = useInvalidate();
+  const done = () => invalidate(keys.run(runId), keys.conversationRequirements(conversationId));
+  return {
+    approve: useMutation({ mutationFn: (input: { proposalId: string; body: ProposalApproveBody }) => api("approveRequirementProposal", { params: { proposalId: input.proposalId }, body: input.body }), onSuccess: done }),
+    reject: useMutation({ mutationFn: (input: { proposalId: string; body: ProposalRejectBody }) => api("rejectRequirementProposal", { params: { proposalId: input.proposalId }, body: input.body }), onSuccess: done }),
+  };
 }
 
-/** Withdraw a scheduled assignment before dispatch. 409 = already settled. */
-export function useCancelAssignment() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (assignmentId: string) =>
-      apiFetch<ScheduledAssignment>(`/api/scheduled-assignments/${assignmentId}/cancel`, { method: "POST" }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: keys.tasks.all });
-      void queryClient.invalidateQueries({ queryKey: keys.workspaceTasksAll });
-    },
-  });
+export function useDecisionActions(runId: string | null) {
+  const invalidate = useInvalidate();
+  const done = () => (runId === null ? Promise.resolve([]) : invalidate(keys.run(runId)));
+  return {
+    resolve: useMutation({ mutationFn: (input: { decisionId: string; body: DecisionResolveBody }) => api("resolveDecision", { params: { decisionId: input.decisionId }, body: input.body }), onSuccess: done }),
+    supersede: useMutation({ mutationFn: (input: { decisionId: string; body: DecisionResolveBody }) => api("supersedeDecision", { params: { decisionId: input.decisionId }, body: input.body }), onSuccess: done }),
+  };
 }
 
-/** A rewrite of the draft. Nothing persists, so there is nothing to invalidate. */
-export function useImproveMessage() {
-  return useMutation({
-    mutationFn: (body: ImproveMessageBody) =>
-      apiFetch<ImproveMessageResponse>("/api/compose/improve", {
-        method: "POST",
-        body: JSON.stringify(body),
-      }),
-  });
+export function useBudgetActions(runId: string) {
+  const invalidate = useInvalidate();
+  const done = () => invalidate(keys.run(runId));
+  return {
+    request: useMutation({ mutationFn: (body: BudgetIncreaseRequestBody) => api("requestBudgetIncrease", { params: { runId }, body }), onSuccess: done }),
+    resolve: useMutation({ mutationFn: (input: { decisionId: string; body: BudgetIncreaseResolveBody }) => api("resolveBudgetIncrease", { params: { runId, decisionId: input.decisionId }, body: input.body }), onSuccess: done }),
+  };
 }
 
-/**
- * The top bar's Pause: the whole system, every lane. The response IS the new
- * state, so the cache flips at once instead of waiting on the spine.
- */
-export function usePauseSystem() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (body: PauseSystemBody = {}) =>
-      apiFetch<PauseSystemResponse>("/api/system/pause", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: ({ interrupted: _interrupted, ...state }) => queryClient.setQueryData<SystemPauseState>(keys.system.pause, state),
-  });
+export function useSignoffActions(runId: string) {
+  const invalidate = useInvalidate();
+  const done = () => invalidate(keys.run(runId));
+  return {
+    accept: useMutation({ mutationFn: (body: SignoffAcceptBody) => api("acceptSignoff", { params: { runId }, body }), onSuccess: done }),
+    requestChanges: useMutation({ mutationFn: (body: SignoffRequestChangesBody) => api("requestSignoffChanges", { params: { runId }, body }), onSuccess: done }),
+  };
 }
 
-export function useResumeSystem() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => apiFetch<SystemPauseState>("/api/system/resume", { method: "POST" }),
-    onSuccess: (state) => queryClient.setQueryData<SystemPauseState>(keys.system.pause, state),
-  });
+export function usePublicationActions(runId: string) {
+  const invalidate = useInvalidate();
+  const done = () => invalidate(keys.run(runId));
+  return {
+    request: useMutation({ mutationFn: (body: PublicationRequestBody) => api("requestPublication", { params: { runId }, body }), onSuccess: done }),
+    resolve: useMutation({ mutationFn: (input: { decisionId: string; body: PublicationResolveBody }) => api("resolvePublication", { params: { runId, decisionId: input.decisionId }, body: input.body }), onSuccess: done }),
+    advance: useMutation({ mutationFn: (publicationId: string) => api("advancePublication", { params: { publicationId }, body: {} }), onSuccess: done }),
+  };
 }
 
-export function useInterruptUserSession() {
-  return useMutation({
-    mutationFn: ({ id }: { id: string }) =>
-      apiFetch<{ ok: true }>(`/api/user-sessions/${id}/interrupt`, {
-        method: "POST",
-      }),
-  });
-}
-
-/** Per-agent stop: kills one wedged turn, never the session or the process. */
-export function useInterruptAgent() {
-  return useMutation({
-    mutationFn: ({ agentSessionId, agent, reason }: { agentSessionId: string; agent: string; reason?: string }) =>
-      apiFetch<undefined>(
-        `/api/agent-sessions/${agentSessionId}/agents/${encodeURIComponent(agent)}/interrupt`,
-        { method: "POST", body: JSON.stringify({ reason: reason ?? "" }) },
-      ),
-  });
-}
-
-export function useTrustProfile() {
-  const queryClient = useQueryClient();
-  return useMutation({ mutationFn: ({ workspaceId, profileId, revision }: { workspaceId: string; profileId: string; revision: string }) => apiFetch<{ ok: true }>(`/api/workspaces/${workspaceId}/agent-profiles/${profileId}/trust`, { method: "POST", body: JSON.stringify({ revision }) }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.profiles.all }) });
+export function useLoadWorkspaceAgents(workspaceId: string) {
+  const invalidate = useInvalidate();
+  return useMutation({ mutationFn: () => api("loadWorkspaceAgentDefinitions", { params: { workspaceId }, body: {} }), onSuccess: () => invalidate(keys.workspaceAgents(workspaceId)) });
 }

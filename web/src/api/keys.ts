@@ -1,72 +1,44 @@
 /**
- * Query-key factory. The convention is load-bearing: every key starts with its
- * topic prefix, and live invalidation (the event spine) works BY PREFIX — a
- * key outside the convention silently stops updating live.
- *
- * Topics: stats · workspaces · fs · user-sessions · agent-sessions · tasks ·
- * user-transcript — each its own prefix, never a suffix on an existing one.
+ * Query keys, by scope: the live subscription invalidates by Workspace,
+ * Conversation, and Run prefix, so every key of a scoped projection starts
+ * with that scope's id. Immutable message history (`messages-seed`,
+ * `messages-older`) lives outside every scope prefix on purpose: an Event
+ * refreshes the live side only.
  */
 export const keys = {
-  stats: {
-    all: ["stats"] as const,
-  },
-  /** Server-resolved defaults. Fixed for the life of the process. */
+  health: ["health"] as const,
   config: ["config"] as const,
-  /** Install-wide switches — the whole-system pause. Fed by `system.pause.changed`. */
-  system: {
-    pause: ["system", "pause"] as const,
-  },
+  capacity: ["capacity"] as const,
   workspaces: ["workspaces"] as const,
-  userSessions: {
-    all: ["user-sessions"] as const,
-    list: (workspaceId: string) =>
-      ["user-sessions", "list", workspaceId] as const,
-    detail: (id: string) => ["user-sessions", "detail", id] as const,
-    /**
-     * Continuation discovery (workspace projects). Deliberately under the
-     * user-sessions prefix: the listing is derived from session rows, so
-     * `user_session.*` invalidations are exactly its liveness.
-     */
-    projects: (workspaceId: string) => ["user-sessions", "projects", workspaceId] as const,
-    /** The governing documents + orchestration read-models — under this prefix so their invalidations reach them. */
-    requirements: (id: string) => ["user-sessions", "requirements", id] as const,
-    orchestration: (id: string) => ["user-sessions", "orchestration", id] as const,
-    runSummary: (id: string, summaryId: string) => ["user-sessions", "run-summary", id, summaryId] as const,
-  },
-  /**
-   * Transcripts deliberately live OUTSIDE the user-sessions prefix: they are
-   * hydrate-once + SSE-continued, and must not refetch on every list-level
-   * invalidation. Reconnect's invalidate-all still reaches them, which is
-   * exactly the re-hydration path.
-   */
-  userTranscript: (id: string) => ["user-transcript", id] as const,
-  agentTranscript: (id: string) => ["agent-transcript", id] as const,
-  agentSessions: {
-    all: ["agent-sessions"] as const,
-    list: (userSessionId: string) =>
-      ["agent-sessions", "list", userSessionId] as const,
-    detail: (id: string) => ["agent-sessions", "detail", id] as const,
-  },
-  tasks: {
-    all: ["tasks"] as const,
-    list: (userSessionId: string) => ["tasks", "list", userSessionId] as const,
-  },
-  sessionTreeAll: ["session-tree"] as const,
-  sessionTree: (workspaceId: string) => ["session-tree", workspaceId] as const,
-  workspaceTasksAll: ["workspace-tasks"] as const,
-  workspaceTasks: (workspaceId: string, userSessionId?: string, agentSessionId?: string) => ["workspace-tasks", workspaceId, userSessionId ?? "", agentSessionId ?? ""] as const,
-  profiles: { all: ["agent-profiles"] as const, list: (workspaceId: string) => ["agent-profiles", workspaceId] as const, detail: (workspaceId: string, id: string) => ["agent-profiles", workspaceId, id] as const },
-  timeline: (id: string, beforeSeq?: number) => ["timeline", id, beforeSeq ?? "latest"] as const,
-  timelineAll: ["timeline"] as const,
-  /**
-   * Filesystem browsing for the workspace wizard. Its own topic on purpose:
-   * NOTHING on the event spine announces a filesystem change, so these must
-   * never be swept up by a prefix invalidation.
-   */
-  fs: {
-    all: ["fs"] as const,
-    roots: ["fs", "roots"] as const,
-    dirs: (path: string, showHidden: boolean) =>
-      ["fs", "dirs", path, showHidden] as const,
-  },
-} as const;
+  workspace: (workspaceId: string) => ["workspace", workspaceId] as const,
+  workspaceConversations: (workspaceId: string) => ["workspace", workspaceId, "conversations"] as const,
+  workspaceRuns: (workspaceId: string) => ["workspace", workspaceId, "runs"] as const,
+  workspaceAgents: (workspaceId: string) => ["workspace", workspaceId, "agent-definitions"] as const,
+  agentDefinition: (id: string) => ["agent-definition", id] as const,
+  conversation: (conversationId: string) => ["conversation", conversationId] as const,
+  conversationMessages: (conversationId: string) => ["conversation", conversationId, "messages"] as const,
+  /** The live side of the message view: under the Conversation prefix, refreshed by its Events. */
+  messagesLive: (conversationId: string, anchor: string | null) => ["conversation", conversationId, "messages", "live", anchor] as const,
+  /** The anchor page and the history below it: outside every scope prefix, never refreshed by an Event. */
+  messagesSeed: (conversationId: string) => ["messages-seed", conversationId] as const,
+  messagesOlder: (conversationId: string, anchor: string | null) => ["messages-older", conversationId, anchor] as const,
+  conversationRequirements: (conversationId: string) => ["conversation", conversationId, "requirements"] as const,
+  conversationRuns: (conversationId: string) => ["conversation", conversationId, "runs"] as const,
+  conversationDecisions: (conversationId: string) => ["conversation", conversationId, "decisions"] as const,
+  run: (runId: string) => ["run", runId] as const,
+  runPart: (runId: string, part: string) => ["run", runId, part] as const,
+  planNode: (planNodeId: string) => ["plan-node", planNodeId] as const,
+  invocation: (invocationId: string) => ["invocation", invocationId] as const,
+  attempt: (attemptId: string) => ["attempt", attemptId] as const,
+  artifact: (artifactId: string) => ["artifact", artifactId] as const,
+  artifactText: (artifactId: string) => ["artifact", artifactId, "text"] as const,
+  transcript: (attemptId: string) => ["attempt", attemptId, "transcript"] as const,
+  fsRoots: ["fs", "roots"] as const,
+  fsDirs: (path: string, hidden: boolean) => ["fs", "dirs", path, hidden] as const,
+};
+
+/** Keys an Event never refreshes: immutable message history. */
+export function isImmutableHistory(queryKey: readonly unknown[]): boolean {
+  const head = queryKey[0];
+  return head === "messages-seed" || head === "messages-older";
+}

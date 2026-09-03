@@ -1,6 +1,6 @@
 ---
 name: git-gud-coordinate
-description: Coordinate concurrent Git work by multiple AI agents with isolated branches and worktrees, explicit ownership, dependency-aware integration, safe handoffs, and shared-state safeguards. Use when planning or running multi-agent repository work, assigning parallel tasks, preventing agents from interfering with one another, setting up an integration lane, or reconciling several agents' branches.
+description: Coordinate concurrent Git work by multiple AI agents with isolated branches and worktrees, explicit ownership, dependency-aware integration, safe handoffs, and shared-state safeguards. Use when planning or running multi-agent repository work, assigning parallel tasks, preventing agents from interfering with one another, setting up an integration branch, or reconciling several agents' branches.
 version: 1.0.0
 provenance: git-gud skill pack, imported 2026-08-17
 status: validated
@@ -44,7 +44,7 @@ Record these fields before assigning work:
 
 Use a dedicated integration worktree. Do not integrate from an agent's implementation worktree.
 
-## Allocate isolated lanes
+## Allocate isolated worktrees
 
 Create one branch per task and one worktree per branch. Use `$git-gud-worktrees` for lifecycle details.
 

@@ -1,1 +1,0 @@
-ALTER TABLE `agent_sessions` ADD `allow_child_sessions` integer DEFAULT false NOT NULL;
