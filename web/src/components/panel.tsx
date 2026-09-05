@@ -1,7 +1,11 @@
 import type { ReactNode } from "react";
-import { TriangleAlert } from "lucide-react";
+import { RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
+
 import { ApiError } from "@/api/client";
-import { Spinner } from "@/components/ui/spinner";
+import { Callout, type CalloutTone } from "@/components/callout";
+import { KeyValue, type KeyValueItem } from "@/components/key-value";
+import { Button } from "@/components/ui/button";
+import { SkeletonLines } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 export function errorMessage(error: unknown): string {
@@ -9,57 +13,91 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Loading, error, and empty states rendered the same way everywhere. */
-export function Panel<T>({ query, empty, children, className }: { query: { isPending: boolean; isError: boolean; error: unknown; data: T | undefined }; empty?: (data: T) => boolean; children: (data: T) => ReactNode; className?: string }) {
+interface QueryLike<T> {
+  isPending: boolean;
+  isError: boolean;
+  error: unknown;
+  data: T | undefined;
+  refetch?: () => unknown;
+}
+
+/** Loading, error, and empty states rendered the same way everywhere; the children render the data. */
+export function Panel<T>({ query, empty, emptyState, children, className, skeleton }: { query: QueryLike<T>; empty?: (data: T) => boolean; emptyState?: ReactNode; children: (data: T) => ReactNode; className?: string; skeleton?: ReactNode }) {
   if (query.isPending) {
     return (
-      <div className={cn("flex items-center justify-center py-10", className)} data-testid="panel-loading">
-        <Spinner className="size-4 text-muted-foreground" />
+      <div className={cn("py-2", className)} data-testid="panel-loading" aria-busy="true" aria-live="polite">
+        {skeleton ?? <SkeletonLines />}
       </div>
     );
   }
   if (query.isError) {
     return (
-      <div className={cn("flex items-center gap-2 rounded-md border border-status-failed/40 p-3 text-xs text-status-failed", className)} data-testid="panel-error">
-        <TriangleAlert className="size-4 shrink-0" />
-        {errorMessage(query.error)}
+      <div className={className} data-testid="panel-error">
+        <Callout
+          tone="error"
+          icon={TriangleAlertIcon}
+          action={
+            query.refetch !== undefined ? (
+              <Button size="sm" variant="outline" onClick={() => void query.refetch?.()}>
+                <RefreshCwIcon />
+                Retry
+              </Button>
+            ) : undefined
+          }
+        >
+          {errorMessage(query.error)}
+        </Callout>
       </div>
     );
   }
   const data = query.data as T;
-  if (empty?.(data)) return <div className={cn("px-3 py-8 text-center text-xs text-muted-foreground", className)}>Nothing here yet.</div>;
+  if (empty?.(data)) return <>{emptyState ?? <div className={cn("px-3 py-8 text-center text-xs text-muted-foreground", className)}>Nothing here yet.</div>}</>;
   return <>{children(data)}</>;
 }
 
-export function Section({ title, children, actions, className }: { title: string; children: ReactNode; actions?: ReactNode; className?: string }) {
+/**
+ * A titled block of a page. `card` frames it as a surface; the default is an
+ * open section with a small heading, for stacking inside a card or a column.
+ */
+export function Section({ title, description, children, actions, className, card = false, contentClassName, testId }: { title: ReactNode; description?: ReactNode; children: ReactNode; actions?: ReactNode; className?: string; card?: boolean; contentClassName?: string; testId?: string }) {
+  if (card) {
+    return (
+      <section data-testid={testId} className={cn("surface-raised flex flex-col rounded-lg border border-border bg-card", className)}>
+        <header className="flex items-start justify-between gap-3 px-4 pt-3 pb-2">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <h3 className="text-sm font-medium leading-5">{title}</h3>
+            {description !== undefined && <p className="text-xs text-muted-foreground">{description}</p>}
+          </div>
+          {actions !== undefined && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
+        </header>
+        <div className={cn("flex flex-col gap-3 px-4 pb-4", contentClassName)}>{children}</div>
+      </section>
+    );
+  }
   return (
-    <section className={cn("flex flex-col gap-2", className)}>
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">{title}</h3>
-        {actions}
-      </div>
-      {children}
+    <section data-testid={testId} className={cn("flex flex-col gap-2", className)}>
+      <header className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-col">
+          <h3 className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">{title}</h3>
+          {description !== undefined && <p className="text-xs text-muted-foreground">{description}</p>}
+        </div>
+        {actions !== undefined && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
+      </header>
+      <div className={cn("flex flex-col gap-2", contentClassName)}>{children}</div>
     </section>
   );
 }
 
-export function Facts({ items }: { items: [string, ReactNode][] }) {
-  return (
-    <dl className="grid grid-cols-[minmax(6rem,auto)_1fr] gap-x-3 gap-y-1 text-xs">
-      {items.map(([label, value]) => (
-        <div key={label} className="contents">
-          <dt className="text-muted-foreground">{label}</dt>
-          <dd className="min-w-0 break-words font-mono text-2xs">{value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
+/** Labelled facts in a grid (the KeyValue primitive, with the historical name). */
+export function Facts({ items, columns = 2, dense }: { items: KeyValueItem[]; columns?: 1 | 2; dense?: boolean }) {
+  return <KeyValue items={items} columns={columns} dense={dense} />;
 }
 
-export function Notice({ tone = "info", children, testId }: { tone?: "info" | "warning" | "error"; children: ReactNode; testId?: string }) {
+/** A message with a tone (the Callout primitive, with the historical name). */
+export function Notice({ tone = "info", children, testId, title, action }: { tone?: CalloutTone; children?: ReactNode; testId?: string; title?: ReactNode; action?: ReactNode }) {
   return (
-    <div data-testid={testId} className={cn("rounded-md border p-3 text-xs", tone === "error" ? "border-status-failed/40 text-status-failed" : tone === "warning" ? "border-status-waiting/40 text-foreground" : "border-border text-muted-foreground")}>
+    <Callout tone={tone} testId={testId} title={title} action={action}>
       {children}
-    </div>
+    </Callout>
   );
 }

@@ -189,8 +189,9 @@ describe("the operator's web application in a real browser", () => {
     // The proposal: reviewed and approved in the Requirements tab.
     await page.getByTestId("tab-requirements").click();
     await page.getByTestId("proposal-review").waitFor({ timeout: 30_000 });
-    await expect.poll(() => page.getByTestId("proposal-review").textContent(), { timeout: 30_000 }).toContain("(kept)");
-    await expect.poll(() => page.getByTestId("proposal-review").textContent(), { timeout: 30_000 }).toContain("(new)");
+    // The proposal keeps the goal's Requirement and adds new ones; each entry says which it is.
+    await expect.poll(() => page.getByTestId("proposal-review").locator('[data-entry="kept"]').count(), { timeout: 30_000 }).toBeGreaterThan(0);
+    await expect.poll(() => page.getByTestId("proposal-review").locator('[data-entry="new"]').count(), { timeout: 30_000 }).toBeGreaterThan(0);
     await page.getByTestId("proposal-approve").click();
     await expect.poll(() => page.getByTestId("requirements-tree").textContent(), { timeout: 30_000 }).toContain("Revision 2");
     await expect.poll(() => page.getByTestId("requirements-tree").textContent(), { timeout: 30_000 }).toContain("--version");
@@ -221,6 +222,8 @@ describe("the operator's web application in a real browser", () => {
     // Signoff, then the separately authorized publication.
     await page.getByTestId("tab-publish").click();
     await page.getByTestId("signoff-accept").click();
+    // Acceptance is final for the Run, so the console asks once more before recording it.
+    await page.getByTestId("signoff-accept-confirm").click();
     await expect.poll(() => header().textContent(), { timeout: 30_000 }).toContain("Completed, not published");
     expect(cli()).toBe(OLD_CLI);
     await page.getByTestId("publish-request").click();
@@ -289,6 +292,7 @@ describe("the operator's web application in a real browser", () => {
     await header().waitFor({ timeout: 30_000 });
     const runId = new URL(page.url()).pathname.split("/")[2]!;
     await expect.poll(() => header().textContent(), { timeout: 30_000 }).toContain("Running");
+    await page.getByTestId("pause-menu").click();
     await page.getByTestId("pause-hard").click();
     await expect.poll(() => header().textContent(), { timeout: 30_000 }).toContain("Paused");
     await page.getByTestId("resume").click();
