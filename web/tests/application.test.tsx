@@ -164,7 +164,8 @@ describe("the operator's web application over the real server", () => {
     await screen.findByTestId("topbar", {}, { timeout: 30_000 });
     const workspaceId = useScopeStore.getState().selectedWorkspaceId;
     expect(workspaceId).not.toBeNull();
-    await user.click(await screen.findByTestId("new-conversation"));
+    // The page is a lazy chunk behind the top bar: give it the same patience as every other navigation.
+    await user.click(await screen.findByTestId("new-conversation", {}, { timeout: 30_000 }));
     await screen.findByTestId("conversation-pane", {}, { timeout: 30_000 });
     // 3. The scripted provider: plan one implementer node, implement in a worktree, request completion, synthesize.
     await server.script("coding", workspaceId!);
@@ -183,10 +184,12 @@ describe("the operator's web application over the real server", () => {
     // 6. Verification tab: the completion Gate passed and the final report is shown.
     await user.click(screen.getByTestId("tab-verification"));
     await screen.findByTestId("final-report", {}, { timeout: 30_000 });
-    expect(screen.getByTestId("gates")).toHaveTextContent(/run completion/);
+    expect(await screen.findByTestId("gates", {}, { timeout: 30_000 })).toHaveTextContent(/run completion/);
     // 7. Signoff: accept.
     await user.click(screen.getByTestId("tab-publish"));
     await user.click(await screen.findByTestId("signoff-accept", {}, { timeout: 30_000 }));
+    // Acceptance is final for the Run, so the console asks once more before recording it.
+    await user.click(await screen.findByTestId("signoff-accept-confirm", {}, { timeout: 30_000 }));
     await waitFor(() => expect(screen.getByTestId("run-header")).toHaveTextContent("Completed, not published"), { timeout: 30_000 });
     expect(cli()).toBe(OLD_CLI);
     // 8. Publication: a separate request and confirmation; then the Target moves once.
@@ -211,12 +214,13 @@ describe("the operator's web application over the real server", () => {
     await server.script("hang", created.body.workspace.id);
     mount(`/conversations/${conversation.body.conversation.id}`);
     await screen.findByTestId("conversation-pane", {}, { timeout: 30_000 });
-    await user.type(await screen.findByTestId("goal"), "Reorganize the notes.");
+    await user.type(await screen.findByTestId("goal", {}, { timeout: 30_000 }), "Reorganize the notes.");
     await user.click(screen.getByTestId("start-run-button"));
     await screen.findByTestId("run-header", {}, { timeout: 30_000 });
     await waitFor(() => expect(screen.getByTestId("run-header")).toHaveTextContent("Running"), { timeout: 30_000 });
-    // Pause (hard): the Run waits on the operator; the interrupted Attempt retries after resume.
-    await user.click(screen.getByTestId("pause-hard"));
+    // Pause (hard): one menu away from the soft pause; the Run waits on the operator and the interrupted Attempt retries after resume.
+    await user.click(screen.getByTestId("pause-menu"));
+    await user.click(await screen.findByTestId("pause-hard", {}, { timeout: 30_000 }));
     await waitFor(() => expect(screen.getByTestId("run-header")).toHaveTextContent("Paused"), { timeout: 30_000 });
     expect(screen.getByTestId("next-step")).toHaveTextContent(/Paused/);
     await user.click(screen.getByTestId("resume"));

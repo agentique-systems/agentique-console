@@ -7,11 +7,8 @@ import { createCodePlugin } from "@streamdown/code";
  *
  * `min-*` are the lowest-chroma bundled Shiki themes, which is what a
  * greyscale console wants: code is the one place colour may mean something
- * other than state, so it stays quiet.
- *
- * Order is [light, dark]. Streamdown emits BOTH and swaps with Tailwind's
- * `dark:` variant (`--shiki-dark`), so this follows the theme toggle with no
- * further wiring.
+ * other than state, so it stays quiet. Order is [light, dark]; Streamdown
+ * emits both and swaps with the `dark` variant.
  */
 export const markdownPlugins = {
   code: createCodePlugin({ themes: ["min-light", "min-dark"] }),

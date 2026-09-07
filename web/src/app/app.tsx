@@ -1,8 +1,9 @@
-import { TriangleAlert } from "lucide-react";
+import { TriangleAlertIcon } from "lucide-react";
 import { BrowserRouter } from "react-router";
 
 import { ApiError } from "@/api/client";
 import { useWorkspace } from "@/api/queries";
+import { BrandMark } from "@/app/brand";
 import { Shell } from "@/app/shell";
 import { Spinner } from "@/components/ui/spinner";
 import { useScopeStore } from "@/stores/scope";
@@ -21,13 +22,7 @@ export function App({ router = true }: { router?: boolean }) {
 
   if (selectedWorkspaceId === null) return <WorkspaceGate />;
 
-  if (selected.isPending) {
-    return (
-      <div className="flex h-screen items-center justify-center" data-testid="app-loading">
-        <Spinner className="size-5 text-muted-foreground" />
-      </div>
-    );
-  }
+  if (selected.isPending) return <FullScreenLoading />;
 
   if (selected.isError) {
     // A Workspace that no longer exists sends the operator back to the gate; anything else is the server being unreachable.
@@ -35,17 +30,7 @@ export function App({ router = true }: { router?: boolean }) {
       clear();
       return <WorkspaceGate />;
     }
-    return (
-      <div className="flex h-screen flex-col items-center justify-center gap-2" data-testid="app-unreachable">
-        <p className="flex items-center gap-1.5 text-sm text-status-failed">
-          <TriangleAlert className="size-4" />
-          The console server is unreachable.
-        </p>
-        <p className="text-xs text-muted-foreground">
-          Start it with <code>npm run dev</code>. This page retries on its own.
-        </p>
-      </div>
-    );
+    return <Unreachable />;
   }
 
   return router ? (
@@ -54,5 +39,28 @@ export function App({ router = true }: { router?: boolean }) {
     </BrowserRouter>
   ) : (
     <Shell workspace={selected.data} />
+  );
+}
+
+export function FullScreenLoading() {
+  return (
+    <div className="flex h-screen flex-col items-center justify-center gap-4" data-testid="app-loading">
+      <BrandMark className="size-9 rounded-lg" />
+      <Spinner className="size-4 text-muted-foreground" />
+    </div>
+  );
+}
+
+export function Unreachable() {
+  return (
+    <div className="flex h-screen flex-col items-center justify-center gap-3 px-6 text-center" data-testid="app-unreachable">
+      <span className="flex size-10 items-center justify-center rounded-lg border border-status-failed/40 bg-status-failed/10 text-status-failed">
+        <TriangleAlertIcon className="size-5" />
+      </span>
+      <p className="text-sm font-medium">The console server is unreachable.</p>
+      <p className="max-w-sm text-xs text-muted-foreground">
+        Start it with <code className="rounded-sm bg-muted px-1 py-0.5 font-mono">npm run dev</code>. This page retries on its own.
+      </p>
+    </div>
   );
 }

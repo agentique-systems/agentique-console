@@ -121,6 +121,22 @@ skipped unless `AGENTIQUE_LIVE_SMOKE=1`.
 Pause (soft: no new Attempts; hard: interrupt running ones), resume, and
 cancel are available at every point. A cancelled Run stays inspectable.
 
+### The console
+
+The web application is scoped to one Workspace (switch from the sidebar or
+the palette). Its pages: **Runs** (home: every Run of the Workspace, the
+ones that need you marked and counted on the navigation), **Conversations**
+(the thread beside the list; a Run starts from the launcher under the
+thread), **Agents**, and **System**. A Run opens on its **Overview** (what
+to do next, what needs you, progress, budget, live output) with its other
+sections beside it: Requirements, Plan (the graph with a node and Invocation
+inspector), Tasks, Decisions, Verification, Signoff & publish, Budget &
+usage, Agents. Consequential actions (cancel, accept the signoff, publish)
+confirm before they act. Keyboard: `Ctrl`/`⌘` `K` opens the palette (pages,
+sections, recent Runs and Conversations, Workspaces, theme); `[` and `]`
+step through a Run's sections; `Ctrl`/`⌘` `Enter` sends a message or starts
+a Run from its form.
+
 ## HTTP API
 
 `core/src/api.ts` is the one route contract: every route, its method and

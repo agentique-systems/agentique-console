@@ -1,153 +1,131 @@
 import { useMemo } from "react";
+import { MousePointerClickIcon, WorkflowIcon } from "lucide-react";
 import { Link, useNavigate } from "react-router";
-import type { PlanEdge, PlanNode, PlanNodeSummary, RunOverview } from "@agentique-console/core";
-import { usePlanNode, useRunPlan } from "@/api/queries";
-import { Facts, Panel, Section } from "@/components/panel";
-import { StatusBadge } from "@/components/status-badge";
-import { allocation, statusTone, TONE_CLASS, usage } from "@/lib/format";
+import type { PlanResponse, RunOverview } from "@agentique-console/core";
+
+import { useRunPlan } from "@/api/queries";
+import { EmptyState } from "@/components/empty-state";
+import { Panel } from "@/components/panel";
+import { StatusBadge } from "@/components/status";
+import { ResizableGroup, ResizableHandle, ResizablePanel } from "@/components/ui/resizable";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { count, usd, words } from "@/lib/format";
+import { useIsWide } from "@/lib/use-media-query";
 import { cn } from "@/lib/utils";
+import { PlanGraph, PlanLegend } from "@/plan/graph";
+import { NodeInspector } from "@/plan/inspector";
 import { InvocationView } from "@/plan/invocation";
 
-/** A layered layout from the edges: sources first; nodes on one layer share a column. */
-export function layout(nodes: PlanNode[], edges: PlanEdge[]): Map<string, { layer: number; row: number }> {
-  const layer = new Map<string, number>();
-  const incoming = new Map<string, string[]>();
-  for (const node of nodes) incoming.set(node.id, []);
-  for (const edge of edges) incoming.get(edge.targetNodeId)?.push(edge.sourceNodeId);
-  const visit = (id: string, seen: Set<string>): number => {
-    if (layer.has(id)) return layer.get(id)!;
-    if (seen.has(id)) return 0;
-    seen.add(id);
-    const parents = incoming.get(id) ?? [];
-    const value = parents.length === 0 ? 0 : Math.max(...parents.map((p) => visit(p, seen))) + 1;
-    layer.set(id, value);
-    return value;
-  };
-  for (const node of nodes) visit(node.id, new Set());
-  const rows = new Map<number, number>();
-  const out = new Map<string, { layer: number; row: number }>();
-  for (const node of nodes) {
-    const l = layer.get(node.id) ?? 0;
-    const row = rows.get(l) ?? 0;
-    rows.set(l, row + 1);
-    out.set(node.id, { layer: l, row });
-  }
-  return out;
-}
+export { layout } from "@/plan/layout";
 
+/**
+ * The Plan: the graph, and beside it an inspector for the selected node or
+ * Invocation (a table of every node when nothing is selected). Side by side on
+ * a wide viewport, stacked elsewhere; the selection lives in the URL.
+ */
 export function PlanPanel({ overview, entityId }: { overview: RunOverview; entityId: string | null }) {
   const plan = useRunPlan(overview.run.id);
   const navigate = useNavigate();
+  const wide = useIsWide();
   const selectedNode = entityId !== null && entityId.startsWith("pn_") ? entityId : null;
   const selectedInvocation = entityId !== null && entityId.startsWith("inv_") ? entityId : null;
-  return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
-      <Panel query={plan}>
-        {(p) => (
-          <>
-            <PlanGraph plan={p} selected={selectedNode} onSelect={(id) => void navigate(`/runs/${overview.run.id}/plan/${id}`)} />
-            <div className="text-3xs text-muted-foreground">
-              Revision {p.revisionNumber} of {p.revisionCount}. {p.nodes.length} node{p.nodes.length === 1 ? "" : "s"}; the Orchestrator revises the plan from its turns.
-            </div>
-          </>
-        )}
+  const current = useMemo(() => new Set(overview.projection?.nodes.filter((n) => n.current).map((n) => n.planNodeId) ?? []), [overview.projection]);
+  const inspector =
+    selectedInvocation !== null ? (
+      <InvocationView invocationId={selectedInvocation} runId={overview.run.id} />
+    ) : selectedNode !== null ? (
+      <NodeInspector planNodeId={selectedNode} runId={overview.run.id} />
+    ) : (
+      <Panel query={plan} skeleton={<Skeleton className="h-40" />}>
+        {(p) => <NodeTable plan={p} runId={overview.run.id} current={current} />}
       </Panel>
-      {selectedNode !== null && <NodeInspector planNodeId={selectedNode} runId={overview.run.id} />}
-      {selectedInvocation !== null && <InvocationView invocationId={selectedInvocation} runId={overview.run.id} />}
-    </div>
-  );
-}
-
-const NODE_W = 220;
-const NODE_H = 64;
-const GAP_X = 60;
-const GAP_Y = 20;
-
-function PlanGraph({ plan, selected, onSelect }: { plan: { graph: { nodes: PlanNode[]; edges: PlanEdge[] }; nodes: PlanNodeSummary[] }; selected: string | null; onSelect: (id: string) => void }) {
-  const positions = useMemo(() => layout(plan.graph.nodes, plan.graph.edges), [plan.graph.nodes, plan.graph.edges]);
-  const summaries = new Map(plan.nodes.map((n) => [n.node.id, n] as const));
-  const width = (Math.max(0, ...[...positions.values()].map((p) => p.layer)) + 1) * (NODE_W + GAP_X);
-  const height = (Math.max(0, ...[...positions.values()].map((p) => p.row)) + 1) * (NODE_H + GAP_Y);
-  const center = (id: string) => {
-    const p = positions.get(id)!;
-    return { x: p.layer * (NODE_W + GAP_X), y: p.row * (NODE_H + GAP_Y) };
-  };
-  return (
-    <div className="overflow-auto rounded-md border border-border" data-testid="plan-graph">
-      <svg width={width} height={height} className="block" role="img" aria-label="Execution Plan graph">
-        {plan.graph.edges.map((edge) => {
-          const a = center(edge.sourceNodeId);
-          const b = center(edge.targetNodeId);
-          return <line key={edge.id} x1={a.x + NODE_W} y1={a.y + NODE_H / 2} x2={b.x} y2={b.y + NODE_H / 2} stroke="currentColor" strokeOpacity={0.35} strokeWidth={1.5} strokeDasharray={edge.type === "retry" ? "4 3" : undefined} />;
-        })}
-        {plan.graph.nodes.map((node) => {
-          const p = center(node.id);
-          const summary = summaries.get(node.id);
-          const tone = statusTone(node.status);
-          return (
-            <foreignObject key={node.id} x={p.x} y={p.y} width={NODE_W} height={NODE_H}>
-              <button type="button" onClick={() => onSelect(node.id)} aria-pressed={selected === node.id} className={cn("flex h-full w-full flex-col justify-center gap-0.5 rounded-md border bg-card px-2 py-1 text-left text-xs hover:bg-muted/40", TONE_CLASS[tone], selected === node.id && "ring-2 ring-ring")} data-node={node.id}>
-                <span className="truncate font-medium text-foreground">{node.kind === "pattern" ? node.title : "join"}</span>
-                <span className="flex items-center gap-1 text-3xs">
-                  <StatusBadge status={node.status} />
-                  <span className="text-muted-foreground">{node.kind === "pattern" ? node.pattern : node.fanInPolicy}</span>
-                  {summary !== undefined && summary.invocations.length > 0 && <span className="text-muted-foreground">· {summary.invocations.length} inv</span>}
-                </span>
-              </button>
-            </foreignObject>
-          );
-        })}
-      </svg>
-    </div>
-  );
-}
-
-function NodeInspector({ planNodeId, runId }: { planNodeId: string; runId: string }) {
-  const node = usePlanNode(planNodeId);
-  return (
-    <Panel query={node}>
-      {(n) => (
-        <div className="grid gap-4 md:grid-cols-2" data-testid="node-inspector">
-          <Section title={`Plan Node ${n.node.kind === "pattern" ? n.node.title : "join"}`}>
-            <Facts
-              items={[
-                ["Status", <StatusBadge key="s" status={n.node.status} />],
-                ["Kind", n.node.kind === "pattern" ? `${n.node.pattern}` : `join (${n.node.fanInPolicy})`],
-                ["Source path", n.node.sourcePath],
-                ["Wait", n.node.waitReason ?? "—"],
-                ["Allocation", n.allocation === null ? "—" : `${allocation(n.allocation.effective)} (used ${allocation(n.allocation.account.consumed)})`],
-                ["Usage", usage(n.usage)],
-                ["Tasks", n.taskCount],
-                ["Gates", `${n.gates.map((g) => `${g.kind} ${g.status}`).join(", ") || "—"}${n.gateCount > n.gates.length ? ` (${n.gateCount - n.gates.length} older)` : ""}`],
-                ["Evaluations", n.evaluationCount],
-                ["Extensions", n.extensionCount],
-              ]}
-            />
-          </Section>
-          <Section title={`Invocations (${n.invocationCount})`}>
-            {n.invocationCount > n.invocations.length && (
-              <div className="text-3xs text-muted-foreground" data-testid="invocations-windowed">
-                The {n.invocations.length} most recent of {n.invocationCount}; the Run's invocation list pages the rest.
-              </div>
-            )}
-            <ul className="flex flex-col gap-1 text-xs">
-              {n.invocations.map((i) => (
-                <li key={i.id}>
-                  <Link to={`/runs/${runId}/plan/${i.id}`} className="flex items-center gap-2 rounded-md border border-border px-2 py-1 hover:bg-muted/40">
-                    <StatusBadge status={i.status} />
-                    <span>
-                      {i.role} · {i.purpose}
-                    </span>
-                    <span className="flex-1" />
-                    <span className="font-mono text-3xs text-muted-foreground">{i.id.slice(0, 12)}</span>
-                  </Link>
-                </li>
-              ))}
-              {n.invocations.length === 0 && <li className="text-muted-foreground">No Invocation yet.</li>}
-            </ul>
-          </Section>
-        </div>
-      )}
+    );
+  const graph = (
+    <Panel query={plan} className="p-4" skeleton={<Skeleton className="m-4 h-48" />}>
+      {(p) =>
+        p.graph.nodes.length === 0 ? (
+          <EmptyState icon={WorkflowIcon} title="No plan yet" description="The Orchestrator plans from its turns once the Requirements are agreed; accepted nodes appear here as a graph." />
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border-subtle px-4 py-2 text-xs text-muted-foreground">
+              <span>
+                Revision {p.revisionNumber} of {p.revisionCount} · {count(p.nodes.length, "node")} · the Orchestrator revises the plan from its turns
+              </span>
+              <PlanLegend />
+            </div>
+            <PlanGraph plan={p} selected={selectedNode} current={current} onSelect={(id) => void navigate(`/runs/${overview.run.id}/plan/${id}`)} />
+          </div>
+        )
+      }
     </Panel>
+  );
+  if (!wide) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <div className="flex min-h-64 flex-col border-b border-border">{graph}</div>
+        <div className="p-4">{inspector}</div>
+      </div>
+    );
+  }
+  return (
+    <ResizableGroup orientation="horizontal" className="min-h-0 flex-1">
+      <ResizablePanel defaultSize="58" minSize={320} className="min-h-0">
+        <div className="flex h-full min-h-0 flex-col">{graph}</div>
+      </ResizablePanel>
+      <ResizableHandle />
+      <ResizablePanel minSize={320} className="min-h-0">
+        <div className="h-full min-h-0 overflow-y-auto p-4" data-testid="plan-inspector">
+          {inspector}
+        </div>
+      </ResizablePanel>
+    </ResizableGroup>
+  );
+}
+
+/** Every node at a glance, for scanning before selecting one. */
+function NodeTable({ plan, runId, current }: { plan: PlanResponse; runId: string; current: ReadonlySet<string> }) {
+  if (plan.nodes.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <MousePointerClickIcon className="size-3.5" />
+        Select a node on the graph, or from this list, to inspect it.
+      </div>
+      <div className="rounded-lg border border-border bg-card">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Node</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-right">Invocations</TableHead>
+              <TableHead className="text-right">Tasks</TableHead>
+              <TableHead className="text-right">Cost</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {plan.nodes.map((summary) => {
+              const node = summary.node;
+              return (
+                <TableRow key={node.id} className={cn(current.has(node.id) && "bg-status-running/5")}>
+                  <TableCell>
+                    <Link to={`/runs/${runId}/plan/${node.id}`} className="flex flex-col hover:underline">
+                      <span className="font-medium">{node.kind === "pattern" ? node.title : "join"}</span>
+                      <span className="text-2xs text-muted-foreground">{node.kind === "pattern" ? words(node.pattern) : `join · ${words(node.fanInPolicy)}`}</span>
+                    </Link>
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={node.status} />
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">{summary.invocations.length}</TableCell>
+                  <TableCell className="text-right font-mono text-xs">{summary.tasks}</TableCell>
+                  <TableCell className="text-right font-mono text-xs">{usd(summary.usage.costUsd)}</TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
   );
 }
