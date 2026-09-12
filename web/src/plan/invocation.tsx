@@ -62,7 +62,7 @@ function InvocationDetails({ v, runId }: { v: InvocationResponse; runId: string 
           <IdChip id={invocation.id} />
           {position !== null && <span className="font-mono">{describePosition(position)}</span>}
           <span>
-            <span className="text-foreground">{v.definition.modelPolicy.model}</span> · {v.definition.modelPolicy.effort}
+            <span className="text-foreground">{v.manifest.content.modelPolicy.provider ?? "claude"} / {v.manifest.content.modelPolicy.model}</span> · {v.manifest.content.modelPolicy.effort}
           </span>
           <RelativeTime iso={invocation.createdAt} prefix="created" />
           {invocation.startedAt !== null && (

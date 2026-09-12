@@ -36,7 +36,8 @@ import { FileBlobStore, sha256Hex } from "../persistence/blob-store.ts";
 import { createPersistenceContext, type PersistenceContext, type PersistenceDiagnostic } from "../persistence/context.ts";
 import { openDatabase, type OpenedDatabase } from "../persistence/database.ts";
 import { createStores, type Stores } from "../persistence/stores/index.ts";
-import type { TransientOutputSink } from "../provider/adapter.ts";
+import type { TransientOutputSink, ProviderAdapter } from "../provider/adapter.ts";
+import type { ProviderRegistry } from "../provider/registry.ts";
 import { ClaudeAgentSdkAdapter, CLAUDE_PROVIDER, type ClaudeAdapterConfig } from "../provider/claude-adapter.ts";
 import { ContinuationService } from "../provider/continuation.ts";
 import { FileContinuationPayloadStore } from "../provider/continuation-store.ts";
@@ -54,6 +55,8 @@ export interface ConsoleRuntimeConfig {
   stateRoot: string;
   /** The production provider adapter's configuration; `sdk` is the real binding or an injected fixture. */
   provider: ClaudeAdapterConfig;
+  /** Multi-provider production dispatch. Omitted by existing single-adapter fixtures. */
+  providers?: ProviderRegistry;
   /** The defaults of the built-in and Workspace-file Agent Definitions. */
   agents: BuiltinDefinitionDefaults;
   /** The compiler defaults and limits of Execution Plan revisions. */
@@ -88,7 +91,8 @@ export interface ConsoleRuntime {
   database: OpenedDatabase;
   ctx: PersistenceContext;
   stores: Stores;
-  provider: ClaudeAgentSdkAdapter;
+  provider: ProviderAdapter;
+  providers?: ProviderRegistry;
   layout: WorkspaceStateLayout;
   workspace: WorkspacePorts;
   agents: { builtins: Record<BuiltinDefinitionName, AgentDefinitionRevision>; loader: WorkspaceAgentDefinitionLoader };
@@ -129,7 +133,7 @@ export function composeConsoleRuntime(config: ConsoleRuntimeConfig): ConsoleRunt
     const diagnostics: ExecutionDiagnostic[] = [];
     const sink: ExecutionDiagnosticSink = config.diagnostics ?? ((d) => diagnostics.push(d));
     const output: TransientOutputSink = config.output ?? (() => {});
-    const provider = new ClaudeAgentSdkAdapter(config.provider);
+    const provider = config.providers ?? new ClaudeAgentSdkAdapter(config.provider);
     const layout: WorkspaceStateLayout = { stateRoot: config.stateRoot };
     const workspace = createWorkspacePorts(layout, config.publicationHooks === undefined ? {} : { publicationHooks: config.publicationHooks });
     const builtins = ensureBuiltinDefinitions(stores, config.agents);
@@ -152,6 +156,7 @@ export function composeConsoleRuntime(config: ConsoleRuntimeConfig): ConsoleRunt
       ctx,
       stores,
       provider,
+      ...(config.providers === undefined ? {} : { providers: config.providers }),
       layout,
       workspace,
       agents: { builtins, loader },

@@ -10,6 +10,8 @@ import { count, idSchema, nonEmptyString, quantity, timestampSchema, type Timest
  * distinct fields and never merged.
  */
 export interface Usage {
+  /** False when the SDK supplied no price and no model tariff was configured. */
+  costKnown?: boolean;
   id: UsageId;
   runId: RunId;
   planNodeId: PlanNodeId;
@@ -28,6 +30,7 @@ export interface Usage {
 }
 
 export const usageSchema: z.ZodType<Usage> = z.strictObject({
+  costKnown: z.boolean().optional(),
   id: idSchema("usage"),
   runId: idSchema("run"),
   planNodeId: idSchema("planNode"),
@@ -46,6 +49,7 @@ export const usageSchema: z.ZodType<Usage> = z.strictObject({
 });
 
 export interface UsageInput {
+  costKnown?: boolean;
   attemptId: AttemptId;
   model: string;
   effort: ModelEffort | null;
@@ -59,6 +63,7 @@ export interface UsageInput {
 }
 
 export const usageInputSchema: z.ZodType<UsageInput> = z.strictObject({
+  costKnown: z.boolean().optional(),
   attemptId: idSchema("attempt"),
   model: nonEmptyString,
   effort: z.enum(MODEL_EFFORTS).nullable(),
@@ -73,6 +78,7 @@ export const usageInputSchema: z.ZodType<UsageInput> = z.strictObject({
 
 /** A roll-up of Usage rows; every field is a plain sum except `rows`. */
 export interface UsageTotals {
+  unpricedRows?: number;
   rows: number;
   inputTokensUncached: number;
   cacheCreationTokens: number;
@@ -94,9 +100,10 @@ export const ZERO_USAGE_TOTALS: Readonly<UsageTotals> = Object.freeze({
   providerMs: 0,
 });
 
-export function sumUsage(rows: Iterable<Pick<Usage, keyof Omit<UsageTotals, "rows" | "providerMs"> | "providerMs">>): UsageTotals {
+export function sumUsage(rows: Iterable<Pick<Usage, keyof Omit<UsageTotals, "rows" | "providerMs" | "unpricedRows"> | "providerMs" | "costKnown">>): UsageTotals {
   const totals: UsageTotals = { ...ZERO_USAGE_TOTALS };
   for (const row of rows) {
+    if (row.costKnown === false) totals.unpricedRows = (totals.unpricedRows ?? 0) + 1;
     totals.rows += 1;
     totals.inputTokensUncached += row.inputTokensUncached;
     totals.cacheCreationTokens += row.cacheCreationTokens;

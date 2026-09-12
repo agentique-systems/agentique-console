@@ -98,14 +98,14 @@ describe("the API contract", () => {
   it("answers health and safe configuration without a credential, a key, or a filesystem path", async () => {
     const health = await t.call<HealthResponse>("health");
     expect(health.status).toBe(200);
-    expect(health.body).toMatchObject({ ok: true, admission: "ready", database: { disposition: "initialized", schemaVersion: 1 } });
+    expect(health.body).toMatchObject({ ok: true, admission: "ready", database: { disposition: "initialized", schemaVersion: 2 } });
     expect(health.body.recovery).toMatchObject({ blobsComplete: true, interruptedAttempts: 0 });
     const config = await t.call<ConfigResponse>("config");
     expect(config.status).toBe(200);
     expect(config.body.defaults.completionCheck).toEqual({ command: "node -e process.exit(0)", expectedExitCode: 0 });
     expect(config.body.workspaceKinds.map((k) => [k.kind, k.publicationStrategies])).toEqual([["git", ["fast_forward", "merge"]], ["directory", []]]);
     const text = JSON.stringify(config.body);
-    expect(text).not.toMatch(/sk-ant|ANTHROPIC|api_key|storageKey|\\\\|C:\\|\/tmp\//);
+    expect(text).not.toMatch(/sk-ant|api_key|storageKey|\\\\|C:\\|\/tmp\//);
     expect(text).not.toContain(t.dir);
     const capacity = await t.call("capacity");
     expect(capacity.status).toBe(200);

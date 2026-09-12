@@ -12,7 +12,7 @@
 import { canonicalJson, isContinuationSafeTermination, type Attempt, type AttemptId, type ContextManifest, type Invocation, type Timestamp } from "@agentique-console/core";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { ContinuationService } from "../provider/continuation.ts";
-import type { ProviderAdapter } from "../provider/adapter.ts";
+import { resolveProvider, type ProviderAdapter } from "../provider/adapter.ts";
 
 export interface ContinuationPolicyConfig {
   /** The provider's context window in tokens; the last prompt size over `maxContextOccupancy × window` prefers a fresh start. */
@@ -51,13 +51,13 @@ export function manifestContinuationContext(manifest: ContextManifest): string {
 export function continuationCandidate(
   stores: Stores,
   continuations: ContinuationService,
-  provider: Pick<ProviderAdapter, "provider" | "supportsContinuation">,
+  provider: Pick<ProviderAdapter, "provider" | "resolve" | "describeModel" | "supportsContinuation">,
   config: ContinuationPolicyConfig,
   invocation: Invocation,
   manifest: ContextManifest,
   now: Timestamp,
 ): ContinuationCandidate | null {
-  if (!provider.supportsContinuation) return null;
+  if (!resolveProvider(provider, manifest.content.modelPolicy).supportsContinuation) return null;
   const attempts = stores.invocations.listAttempts(invocation.id);
   const latest = attempts.at(-1) ?? null;
   let prior: Attempt | null = null;
@@ -81,7 +81,8 @@ export function continuationCandidate(
   }
   if (prior === null || !isContinuationSafeTermination(prior)) return null;
   if (!continuations.indexed(prior.id, now)) return null;
-  if (!fitsContextPolicy(stores, config, invocation, manifest, prior)) return null;
+  const contextWindowTokens = provider.describeModel?.(manifest.content.modelPolicy)?.contextWindowTokens ?? config.contextWindowTokens;
+  if (!fitsContextPolicy(stores, { contextWindowTokens }, invocation, manifest, prior)) return null;
   return { attemptId: prior.id, boundary };
 }
 

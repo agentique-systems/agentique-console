@@ -14,6 +14,7 @@ import type { SseOptions } from "./events.ts";
 import { bootApp, shutdownApp } from "../boot.ts";
 import { loadConfig, type Config } from "../config.ts";
 import { FakeClaudeSdk } from "../provider/claude-sdk-test-support.ts";
+import type { ProviderAdapter } from "../provider/adapter.ts";
 import type { PublicationHooks } from "../workspace-state/index.ts";
 
 export interface TestAppOptions {
@@ -21,6 +22,7 @@ export interface TestAppOptions {
   dir?: string;
   env?: NodeJS.ProcessEnv;
   sdk?: FakeClaudeSdk;
+  adapterOverrides?: readonly ProviderAdapter[];
   /** Run `bootApp` (recovery, admission, reconstruction) before returning; true by default. */
   boot?: boolean;
   /** Test barriers of the publication port. */
@@ -70,7 +72,7 @@ export async function openTestApp(options: TestAppOptions = {}): Promise<TestApp
   const dir = options.dir ?? newAppDirectory();
   const config = loadConfig(testEnv(dir, options.env ?? {}), dir);
   const sdk = options.sdk ?? new FakeClaudeSdk();
-  const app = createApp({ config, sdk, ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }), ...(options.events === undefined ? {} : { events: options.events }), ...(options.responseMaxBytes === undefined ? {} : { responseMaxBytes: options.responseMaxBytes }) });
+  const app = createApp({ config, sdk, ...(options.adapterOverrides === undefined ? {} : { adapterOverrides: options.adapterOverrides }), ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }), ...(options.events === undefined ? {} : { events: options.events }), ...(options.responseMaxBytes === undefined ? {} : { responseMaxBytes: options.responseMaxBytes }) });
   if (options.boot !== false) await bootApp(app);
   await app.server.ready();
   const raw: TestApp["raw"] = async (method, url, body) => {

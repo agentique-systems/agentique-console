@@ -12,12 +12,19 @@
     "start": "npm run build --workspace web && npm run start --workspace server",
     "dev": "node scripts/dev.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint core/src server/src web/src web/tests scripts *.mjs",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "verify": "npm run typecheck && npm test",
+    "verify": "npm run typecheck && npm run lint && npm test",
     "test:browser": "npm run build --workspace web && npm run test:browser --workspace web"
   },
   "engines": {
     "node": ">=22.22.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "eslint": "9.39.5",
+    "globals": "17.12.0",
+    "typescript-eslint": "8.70.0"
   }
 }

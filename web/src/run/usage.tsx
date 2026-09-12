@@ -188,7 +188,7 @@ function UsageBreakdown({ overview }: { overview: RunOverview }) {
               dense
               columns={2}
               items={[
-                { label: "Cost", value: usd(u.run.costUsd), mono: true },
+                { label: "Cost", value: `${usd(u.run.costUsd)}${u.run.unpricedRows ? " (partial; some usage has no price)" : ""}`, mono: true },
                 { label: "Attempts with usage", value: String(u.run.rows), mono: true },
                 { label: "Input tokens", value: `${tokens(usageTokensIn(u.run))} (${tokens(u.run.cacheReadTokens)} cache reads)`, mono: true },
                 { label: "Output tokens", value: tokens(u.run.outputTokens), mono: true },
@@ -221,7 +221,7 @@ function UsageBreakdown({ overview }: { overview: RunOverview }) {
                           <TableCell className="text-right font-mono text-xs">{n.totals.rows}</TableCell>
                           <TableCell className="text-right font-mono text-xs">{tokens(usageTokensIn(n.totals))}</TableCell>
                           <TableCell className="text-right font-mono text-xs">{tokens(n.totals.outputTokens)}</TableCell>
-                          <TableCell className="text-right font-mono text-xs">{usd(n.totals.costUsd)}</TableCell>
+                          <TableCell className="text-right font-mono text-xs">{usd(n.totals.costUsd)}{n.totals.unpricedRows ? " (partial)" : ""}</TableCell>
                         </TableRow>
                       ))}
                   </TableBody>

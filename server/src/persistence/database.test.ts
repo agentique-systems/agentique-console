@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { MIGRATIONS_FOLDER } from "./client.ts";
 import Database from "better-sqlite3";
 import { EXPECTED_SCHEMA_INFO } from "@agentique-console/core";
 import { afterEach, describe, expect, it } from "vitest";
@@ -38,6 +40,35 @@ function writeLegacyDatabase(file: string): void {
 }
 
 describe("openDatabase", () => {
+  it("migrates version 1 forward without rewriting legacy runs, manifests or events, and pins execution", () => {
+    const file = path.join(tempDir(), "version-one.db");
+    const legacy = new Database(file);
+    legacy.pragma("foreign_keys = OFF");
+    const baseline = fs.readFileSync(path.join(MIGRATIONS_FOLDER, "0000_orchestration_core.sql"), "utf8");
+    legacy.exec(baseline);
+    legacy.exec("CREATE TABLE __drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)");
+    legacy.prepare("INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)").run(createHash("sha256").update(baseline).digest("hex"), 1788299335694);
+    legacy.exec(`
+      INSERT INTO runs (id, conversation_id, workspace_id, kind, status, target, max_cost_usd, max_tokens, max_attempts, final_reserve_cost_usd, final_reserve_tokens, final_reserve_attempts, verification_policy, created_at, updated_at)
+      VALUES ('run_old', 'conv_old', 'ws_old', 'other', 'created', '{}', 10, 10000, 5, 0, 0, 0, '{"maxNodeGateCycles":1,"maxRunCompletionCycles":1,"runCompletionAcceptanceCriterionIds":[],"evaluatorAgentDefinitionRevisionId":null}', '2026-01-01', '2026-01-01');
+      INSERT INTO context_manifests VALUES ('ctx_old', 'inv_old', 'run_old', '{"modelPolicy":{"model":"claude-old"}}', '${"a".repeat(64)}', 1, '2026-01-01');
+      INSERT INTO events (type, occurred_at, run_id, actor, subject_type, subject_id, payload) VALUES ('old.event', '2026-01-01', 'run_old', '{}', 'run', 'run_old', '{"original":true}');
+    `);
+    const runBefore = legacy.prepare("SELECT * FROM runs").get();
+    const manifestBefore = legacy.prepare("SELECT * FROM context_manifests").get();
+    const eventBefore = legacy.prepare("SELECT * FROM events").get();
+    legacy.close();
+    const current = openDatabase(file);
+    try {
+      expect(current.schemaInfo.version).toBe(2);
+      expect(current.sqlite.prepare("SELECT * FROM runs").get()).toEqual({ ...runBefore as object, execution: null });
+      expect(current.sqlite.prepare("SELECT * FROM context_manifests").get()).toEqual(manifestBefore);
+      expect(current.sqlite.prepare("SELECT * FROM events").get()).toEqual(eventBefore);
+      expect(() => current.sqlite.prepare("UPDATE runs SET execution = ? WHERE id = 'run_old'").run('{"provider":"codex","model":"gpt-5.6-terra"}')).toThrow(/immutable/);
+      expect(current.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toEqual({ n: 2 });
+    } finally { current.close(); }
+  });
+
   it("initializes a missing file, creating parent directories, and writes schema_info", () => {
     const file = path.join(tempDir(), "nested", "console.db");
     const db = openDatabase(file);
@@ -72,7 +103,7 @@ describe("openDatabase", () => {
       expect(second.disposition).toBe("opened");
       expect(second.schemaInfo).toEqual(EXPECTED_SCHEMA_INFO);
       expect(second.sqlite.prepare("SELECT count(*) AS n FROM workspaces").get()).toEqual({ n: 1 });
-      expect(second.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toEqual({ n: 1 });
+      expect(second.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toEqual({ n: 2 });
     } finally {
       second.close();
     }
@@ -147,7 +178,7 @@ describe("inspectDatabase", () => {
     empty.exec("CREATE TABLE schema_info (id integer primary key, application text, schema text, version integer)");
     expect(inspectDatabase(empty).kind).toBe("refuse");
     empty.exec("INSERT INTO schema_info VALUES (1, 'agentique-console', 'orchestration-core', 1)");
-    expect(inspectDatabase(empty)).toEqual({ kind: "open", schemaInfo: EXPECTED_SCHEMA_INFO });
+    expect(inspectDatabase(empty)).toEqual({ kind: "open", schemaInfo: { ...EXPECTED_SCHEMA_INFO, version: 1 } });
     empty.exec("INSERT INTO schema_info VALUES (2, 'agentique-console', 'orchestration-core', 1)");
     expect(inspectDatabase(empty).kind).toBe("refuse");
     empty.close();

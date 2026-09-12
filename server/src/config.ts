@@ -30,6 +30,8 @@
  */
 import os from "node:os";
 import path from "node:path";
+import { loadProviderConfiguration, ProviderConfigError, type ProviderConfiguration } from "./provider/configuration.ts";
+import { mcpCatalogSchema, type McpConnection } from "./provider/mcp-tools.ts";
 import { MODEL_EFFORTS, type Allocation, type BudgetLimits, type ModelEffort, type RunKind } from "@agentique-console/core";
 
 export interface McpServerCommand {
@@ -41,6 +43,7 @@ export interface McpServerCommand {
 export const APPROVED_MCP_SERVERS = ["browser"] as const;
 
 export interface Config {
+  execution: ProviderConfiguration;
   dataDir: string;
   databaseFile: string;
   blobRoot: string;
@@ -57,7 +60,7 @@ export interface Config {
     continuation: boolean;
     continuationTtlMs: number | null;
     /** The approved MCP server catalog an Attempt may receive by capability name. */
-    mcpServers: Record<string, McpServerCommand>;
+    mcpServers: Record<string, McpConnection>;
     /** The wall-clock bound on one MCP tool call of an Attempt (the SDK's per-call limit), or `null` for the SDK's default. */
     mcpToolTimeoutMs: number | null;
   };
@@ -141,8 +144,12 @@ function roots(env: NodeJS.ProcessEnv, home: string): { path: string; label: str
   ];
 }
 
-function mcpServers(env: NodeJS.ProcessEnv): Record<string, McpServerCommand> {
-  const catalog: Record<string, McpServerCommand> = {};
+function mcpServers(env: NodeJS.ProcessEnv): Record<string, McpConnection> {
+  let catalog: Record<string, McpConnection> = {};
+  if (env.CONSOLE_MCP_SERVERS) {
+    try { catalog = mcpCatalogSchema.parse(JSON.parse(env.CONSOLE_MCP_SERVERS)); }
+    catch { throw new ConfigError("CONSOLE_MCP_SERVERS", "expected a named MCP catalog of command/args/env or url/headers entries"); }
+  }
   const browser = env.CONSOLE_BROWSER_MCP;
   if (browser !== undefined && browser.trim() !== "") {
     const [command, ...args] = browser.split(/\s+/).filter((entry) => entry !== "");
@@ -154,7 +161,7 @@ function mcpServers(env: NodeJS.ProcessEnv): Record<string, McpServerCommand> {
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
   for (const name of disabled) {
-    if (!(APPROVED_MCP_SERVERS as readonly string[]).includes(name)) throw new ConfigError("CONSOLE_MCP_DISABLED", `expected approved MCP server names (${APPROVED_MCP_SERVERS.join(", ")}), got ${JSON.stringify(name)}`);
+    if (!(APPROVED_MCP_SERVERS as readonly string[]).includes(name) && !Object.hasOwn(catalog, name)) throw new ConfigError("CONSOLE_MCP_DISABLED", `expected approved MCP server names (${APPROVED_MCP_SERVERS.join(", ")}), got ${JSON.stringify(name)}`);
     delete catalog[name];
   }
   return catalog;
@@ -187,8 +194,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, home: string = 
     maxConcurrency: integer(env, "CONSOLE_DEFAULT_MAX_CONCURRENCY", 3, { min: 1 }),
   };
   const port = integer(env, "CONSOLE_PORT", 4400, { min: 0, max: 65_535 });
-  const model = env.CONSOLE_MODEL?.trim() || "claude-fable-5-1";
+  let execution: ProviderConfiguration;
+  try { execution = loadProviderConfiguration(env, dataDir); }
+  catch (error) { if (error instanceof ProviderConfigError) throw new ConfigError(error.variable, error.message.slice(error.variable.length + 2)); throw error; }
+  const model = execution.defaults.model;
   return {
+    execution,
     dataDir,
     databaseFile: path.join(dataDir, "console.db"),
     blobRoot: path.join(dataDir, "blobs"),

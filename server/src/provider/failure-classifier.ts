@@ -102,6 +102,7 @@ export function classifyFailureText(text: string | null): ProviderFailureKind {
 }
 
 const SECRET_MARKERS: readonly RegExp[] = [
+  /\bsk-[A-Za-z0-9_-]{8,}/g,
   /sk-ant-[A-Za-z0-9_-]{8,}/g,
   /\b(?:Bearer|token|apikey|api_key|x-api-key)\s*[:=]?\s*[A-Za-z0-9_\-.]{16,}/gi,
   /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,

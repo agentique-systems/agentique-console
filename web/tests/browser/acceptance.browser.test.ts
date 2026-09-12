@@ -140,6 +140,12 @@ describe("the operator's web application in a real browser", () => {
   };
   const cli = () => fs.readFileSync(path.join(server.repo, "src", "cli.js"), "utf8");
   const header = () => page.getByTestId("run-header");
+  const launch = async () => {
+    const response = page.waitForResponse((response) => response.request().method() === "POST" && /\/runs$/.test(new URL(response.url()).pathname), { timeout: 30_000 });
+    await page.getByTestId("start-run-button").click();
+    const created = await response;
+    expect(created.status(), await created.text()).toBe(201);
+  };
   const watch = (target: Page) => {
     target.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(`[console.error] ${message.text()}`);
@@ -183,7 +189,7 @@ describe("the operator's web application in a real browser", () => {
     await server.script("review", workspaceId);
     await page.getByTestId("goal").fill("Add a --version flag to the CLI.");
     await page.getByLabel("completion check").fill("node test.js");
-    await page.getByTestId("start-run-button").click();
+    await launch();
     await header().waitFor({ timeout: 30_000 });
     await expect.poll(() => header().textContent(), { timeout: 60_000 }).toContain("Waiting for a decision");
     // The proposal: reviewed and approved in the Requirements tab.
@@ -266,7 +272,7 @@ describe("the operator's web application in a real browser", () => {
     await page.goto(`/conversations/${forDecisions.body.conversation.id}`);
     await page.getByTestId("goal").fill("Decide many things.");
     await page.getByLabel("completion check").fill("node test.js");
-    await page.getByTestId("start-run-button").click();
+    await launch();
     await header().waitFor({ timeout: 30_000 });
     decisionRunId = new URL(page.url()).pathname.split("/")[2]!;
     await expect.poll(() => header().textContent(), { timeout: 60_000 }).toContain("Waiting for a decision");
@@ -288,7 +294,7 @@ describe("the operator's web application in a real browser", () => {
     await page.goto(`/conversations/${forControl.body.conversation.id}`);
     await page.getByTestId("goal").fill("Reorganize the notes.");
     await page.getByLabel("completion check").fill("node test.js");
-    await page.getByTestId("start-run-button").click();
+    await launch();
     await header().waitFor({ timeout: 30_000 });
     const runId = new URL(page.url()).pathname.split("/")[2]!;
     await expect.poll(() => header().textContent(), { timeout: 30_000 }).toContain("Running");
@@ -314,6 +320,39 @@ describe("the operator's web application in a real browser", () => {
     expect((await api("POST", `/api/runs/${runId}/cancel`, {})).status).toBe(200);
     await expect.poll(() => header().textContent(), { timeout: 60_000 }).toContain("Cancelled");
   }, 300_000);
+
+  it("switches provider and model in the launcher and persists both with the actual invocation", async () => {
+    for (const [provider, model] of [["codex", "gpt-5.6-sol"], ["ai-sdk", "openai/gpt-5.6-terra"]]) {
+      const conversation = await api<{ conversation: { id: string } }>("POST", "/api/conversations", { workspaceId, title: `selection ${provider}` });
+      await page.goto(`/conversations/${conversation.body.conversation.id}`);
+      await page.getByLabel("provider", { exact: true }).waitFor({ timeout: 30_000 });
+      expect(await page.getByLabel("provider", { exact: true }).inputValue()).toBe("claude");
+      await page.getByLabel("provider", { exact: true }).selectOption(provider!);
+      const options = await page.getByLabel("model", { exact: true }).locator("option").evaluateAll((elements) => elements.map((element) => (element as HTMLOptionElement).value));
+      expect(options).toContain(model);
+      expect(options).not.toContain("claude-fable-5-1");
+      await page.getByLabel("model", { exact: true }).selectOption(model!);
+      await page.getByTestId("goal").fill(`Inspect the workspace with ${provider}`);
+      await launch();
+      await header().waitFor({ timeout: 30_000 });
+      const runId = new URL(page.url()).pathname.split("/")[2]!;
+      const overview = await api<{ run: { execution: unknown } }>("GET", `/api/runs/${runId}`);
+      expect(overview.body.run.execution).toEqual({ provider, model });
+      let invocationId = "";
+      await expect.poll(async () => {
+        const list = await api<{ items: { id: string }[] }>("GET", `/api/runs/${runId}/invocations`);
+        invocationId = list.body.items[0]?.id ?? "";
+        if (!invocationId) return false;
+        const detail = await api<{ attempts: { status: string }[]; manifest: { content: { modelPolicy: unknown } } }>("GET", `/api/invocations/${invocationId}`);
+        expect(detail.body.manifest.content.modelPolicy).toMatchObject({ provider, model });
+        return detail.body.attempts.some((attempt) => attempt.status === "succeeded");
+      }, { timeout: 30_000 }).toBe(true);
+      await page.reload();
+      await header().waitFor({ timeout: 30_000 });
+      expect((await api<{ run: { execution: unknown } }>("GET", `/api/runs/${runId}`)).body.run.execution).toEqual({ provider, model });
+      expect((await api("POST", `/api/runs/${runId}/cancel`, {})).status).toBe(200);
+    }
+  }, 120_000);
 
   it("reloads deep links, reports no significant console error, and stays usable at a narrow viewport", async () => {
     await context.setOffline(false);

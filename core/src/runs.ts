@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { executionSelectionSchema } from "./providers.ts";
 import {
   allocationFits,
   allocationOfLimits,
@@ -121,6 +122,8 @@ export const runTargetSchema: z.ZodType<RunTarget> = z.discriminatedUnion("kind"
 ]);
 
 export interface Run {
+  /** Immutable execution override, pinned into each Invocation's manifest. Absent on older Runs. */
+  execution?: import("./providers.ts").ExecutionSelection;
   id: RunId;
   conversationId: ConversationId;
   workspaceId: WorkspaceId;
@@ -285,6 +288,7 @@ export const RUN_MACHINE = defineStateMachine<RunStatus>("Run", RUN_STATUSES, {
 
 export const runSchema: z.ZodType<Run> = z
   .strictObject({
+    execution: executionSelectionSchema.optional(),
     id: idSchema("run"),
     conversationId: idSchema("conversation"),
     workspaceId: idSchema("workspace"),
@@ -336,6 +340,7 @@ export const runSchema: z.ZodType<Run> = z
   });
 
 export interface RunInput {
+  execution?: import("./providers.ts").ExecutionSelection;
   conversationId: ConversationId;
   kind: RunKind;
   target: RunTarget;
@@ -348,6 +353,7 @@ export interface RunInput {
 
 export const runInputSchema: z.ZodType<RunInput> = z
   .strictObject({
+    execution: executionSelectionSchema.optional(),
     conversationId: idSchema("conversation"),
     kind: z.enum(RUN_KINDS),
     target: runTargetSchema,

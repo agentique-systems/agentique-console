@@ -4,7 +4,7 @@
  * Events arrive).
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { AcceptanceCriterionBody, BudgetIncreaseRequestBody, BudgetIncreaseResolveBody, ConversationCreateBody, DecisionResolveBody, MessageBody, ProposalApproveBody, ProposalRejectBody, PublicationRequestBody, PublicationResolveBody, RequirementRevisionBody, RunCreateBody, RunPauseBody, RunStartBody, SignoffAcceptBody, SignoffRequestChangesBody, WorkspaceCreateBody } from "@agentique-console/core";
+import type { AcceptanceCriterionBody, BudgetIncreaseRequestBody, BudgetIncreaseResolveBody, ConversationCreateBody, DecisionResolveBody, MessageBody, ProposalApproveBody, ProposalRejectBody, PublicationRequestBody, PublicationResolveBody, RequirementRevisionBody, RunCreateBody, RunOverview, RunPauseBody, RunStartBody, SignoffAcceptBody, SignoffRequestChangesBody, WorkspaceCreateBody } from "@agentique-console/core";
 import { api } from "./client";
 import { keys } from "./keys";
 
@@ -28,9 +28,14 @@ export function usePostMessage(conversationId: string) {
   return useMutation({ mutationFn: (body: MessageBody) => api("postConversationMessage", { params: { conversationId }, body }), onSuccess: () => invalidate(keys.conversationMessages(conversationId)) });
 }
 
-export function useCreateRun(conversationId: string) {
+export function useCreateRun(conversationId: string, onCreated?: (overview: RunOverview) => void) {
   const invalidate = useInvalidate();
-  return useMutation({ mutationFn: (body: RunCreateBody) => api("createRun", { params: { conversationId }, body }), onSuccess: () => invalidate(keys.conversation(conversationId), keys.conversationRuns(conversationId), keys.conversationMessages(conversationId), keys.conversationRequirements(conversationId)) });
+  return useMutation({ mutationFn: (body: RunCreateBody) => api("createRun", { params: { conversationId }, body }), onSuccess: (overview) => {
+    // A live event can replace the launcher with the active-Run link before the
+    // POST resolves. Hook-level callbacks survive that unmount; mutate callbacks do not.
+    onCreated?.(overview);
+    return invalidate(keys.conversation(conversationId), keys.conversationRuns(conversationId), keys.conversationMessages(conversationId), keys.conversationRequirements(conversationId));
+  } });
 }
 
 export function useStartRun(runId: string) {

@@ -34,6 +34,7 @@ function toDomain(row: Row): Run {
     runSchema,
     {
       id: row.id,
+      ...(row.execution === null ? {} : { execution: row.execution }),
       conversationId: row.conversationId,
       workspaceId: row.workspaceId,
       kind: row.kind,
@@ -105,6 +106,7 @@ export class RunStore {
       }
       const now = this.ctx.clock();
       const run: Run = {
+        ...(valid.execution === undefined ? {} : { execution: valid.execution }),
         id: this.ctx.ids("run"),
         conversationId: conversation.id,
         workspaceId: conversation.workspaceId,
@@ -464,6 +466,7 @@ export class RunStore {
 
   private toRow(run: Run): Row {
     return {
+      execution: run.execution ?? null,
       id: run.id,
       conversationId: run.conversationId,
       workspaceId: run.workspaceId,

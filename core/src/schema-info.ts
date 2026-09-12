@@ -7,7 +7,7 @@ import { z } from "zod";
  */
 export const SCHEMA_APPLICATION = "agentique-console";
 export const SCHEMA_NAME = "orchestration-core";
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export interface SchemaInfo {
   application: typeof SCHEMA_APPLICATION;

@@ -33,7 +33,9 @@ export const systemRoutes: Pick<RouteHandlers, "health" | "config" | "capacity" 
   config: (_request, ctx): ConfigResponse => {
     const { config, runtime } = ctx.app;
     return {
+      providers: runtime.providers?.catalog() ?? [],
       defaults: {
+        provider: config.execution.defaults.provider,
         model: config.provider.model,
         effort: config.provider.effort,
         runKind: config.defaults.runKind,

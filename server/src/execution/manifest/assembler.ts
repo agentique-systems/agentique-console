@@ -134,7 +134,7 @@ export class ContextManifestAssembler {
       agentDefinitionRevisionId: revision.id,
       agentDefinitionContentHash: revision.contentHash,
       instructions: revision.instructions,
-      modelPolicy: revision.modelPolicy,
+      modelPolicy: { ...revision.modelPolicy, ...run.execution },
       role: invocation.role,
       purpose: invocation.purpose,
       patternPosition: invocation.patternPosition,

@@ -11,14 +11,14 @@ import { openHarness, seedRun } from "./test-support.ts";
 const exportedTables = (Object.values(schema) as unknown[]).filter((value): value is SQLiteTable => is(value, SQLiteTable));
 
 describe("baseline migration", () => {
-  it("is the single migration 0000_orchestration_core and ends with the schema_info row and guard triggers", () => {
+  it("preserves the baseline and adds a forward migration for execution selection", () => {
     const journal = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_FOLDER, "meta", "_journal.json"), "utf8")) as { entries: { tag: string }[] };
-    expect(journal.entries.map((e) => e.tag)).toEqual(["0000_orchestration_core"]);
+    expect(journal.entries.map((e) => e.tag)).toEqual(["0000_orchestration_core", "0001_execution_selection"]);
     const sql = fs.readFileSync(path.join(MIGRATIONS_FOLDER, "0000_orchestration_core.sql"), "utf8");
     expect(sql).toContain("INSERT INTO `schema_info` (`id`, `application`, `schema`, `version`) VALUES (1, 'agentique-console', 'orchestration-core', 1)");
     expect(sql).toContain("CREATE TRIGGER `events_no_update`");
     for (const table of TABLE_NAMES) expect(sql, table).toContain(`CREATE TABLE \`${table}\``);
-    expect(fs.readdirSync(MIGRATIONS_FOLDER).filter((f) => f.endsWith(".sql"))).toEqual(["0000_orchestration_core.sql"]);
+    expect(fs.readdirSync(MIGRATIONS_FOLDER).filter((f) => f.endsWith(".sql"))).toEqual(["0000_orchestration_core.sql", "0001_execution_selection.sql"]);
   });
 
   it("creates exactly the required tables, matching schema.ts table by table and column by column", () => {
@@ -39,7 +39,7 @@ describe("baseline migration", () => {
   });
 
   it("matches the drizzle snapshot for every table and column", () => {
-    const snapshot = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_FOLDER, "meta", "0000_snapshot.json"), "utf8")) as { tables: Record<string, { name: string; columns: Record<string, unknown> }> };
+    const snapshot = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_FOLDER, "meta", "0001_snapshot.json"), "utf8")) as { tables: Record<string, { name: string; columns: Record<string, unknown> }> };
     const snapshotTables = Object.values(snapshot.tables);
     expect(snapshotTables.map((t) => t.name).sort()).toEqual([...TABLE_NAMES].sort());
     for (const table of exportedTables) {

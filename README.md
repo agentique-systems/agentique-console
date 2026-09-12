@@ -10,15 +10,18 @@ separate, atomic, receipted step that the operator requests explicitly.
 
 Everything the runtime knows is in one SQLite database plus a
 content-addressed blob store; the process can be killed at any point and
-resumes from the durable record. The Claude Agent SDK is the only provider.
+resumes from the durable record. Claude Agent SDK, OpenAI Codex SDK, and
+Vercel AI SDK 7 are peer execution providers behind the same adapter contract.
+Select the provider and its model in the Run launcher; see
+[provider configuration and capabilities](docs/providers.md).
 
 The architecture is defined under [`docs/architecture/`](docs/README.md);
 those four documents are authoritative over this README.
 
 ## Running
 
-Requirements: Node 22.22 or later, git on `PATH`, and the Claude Agent SDK
-credentials the provider needs in the environment.
+Requirements: Node 22.22 or later, git and ripgrep (`rg`) on `PATH`, and
+credentials for the selected provider. Claude remains the default.
 
 ```
 npm install
@@ -31,8 +34,9 @@ The server prints the address it listens on. State lives under
 blob store, provider continuation state, and per-Workspace worktrees.
 
 Startup validates the configuration, opens the database (a database the
-current schema did not create is refused with instructions to reset the
-data directory; there is no migration path from any earlier version),
+current schema lineage did not create is refused with instructions to reset
+the data directory; version-1 orchestration databases migrate forward without
+rewriting runs, manifests, or events),
 recovers durable state (interrupted Attempts, pending blob writes,
 outstanding publications), and only then admits work and serves requests.
 While the blob reconciliation is incomplete, mutating requests are refused
@@ -49,7 +53,8 @@ publication from the rows.
 
 ### Configuration
 
-All variables are optional and prefixed `CONSOLE_`. An invalid value fails
+Application variables are optional and prefixed `CONSOLE_`; SDK credential
+variables use their standard names. An invalid value fails
 startup with exit code 1 naming the variable. Unknown `CONSOLE_*` names are
 ignored.
 
@@ -58,10 +63,16 @@ ignored.
 | `DATA_DIR` | `~/.agentique-console` | State directory. |
 | `PORT`, `HOST` | `4400`, `127.0.0.1` | The listener. `0` picks a free port. |
 | `FS_ROOTS` | home and its filesystem root | Directories the Workspace browser may list, separated by the platform path delimiter. Every Workspace root must lie under one. |
-| `MODEL`, `EFFORT` | `claude-fable-5-1`, `medium` | The provider model and reasoning effort. |
+| `PROVIDER` | `claude` | Default backend: `claude`, `codex`, or `ai-sdk`. |
+| `MODEL`, `EFFORT` | selected provider default, `medium` | Default model override and reasoning effort. |
+| `CLAUDE_MODEL`, `CODEX_MODEL`, `AI_SDK_MODEL` | `claude-fable-5-1`, `gpt-5.6-terra`, `openai/gpt-5.6-sol` | Each provider's default model. |
+| `CLAUDE_MODELS`, `CODEX_MODELS`, `AI_SDK_MODELS` | bundled catalog | Comma-separated model allowlists. The corresponding default must be present. |
+| `MODEL_CATALOG` | unset | JSON model metadata, reasoning efforts, context windows, and optional USD/million-token prices; [schema and examples](docs/providers.md). |
+| `AI_SDK_HARNESS` | unset | `pi` enables experimental `HarnessAgent` models in addition to normal `ToolLoopAgent` models. |
 | `CONTINUATION`, `CONTINUATION_TTL_MS` | `1`, unset | Provider session continuation across Attempts and its retention. |
 | `MCP_DISABLED` | unset | Comma-separated names of approved MCP servers (`browser`) to drop from the catalog an Attempt may receive. Not a flag: an entry that names no approved server fails startup. |
 | `BROWSER_MCP` | unset | The `browser` MCP server command, whitespace separated. |
+| `MCP_SERVERS` | unset | JSON named catalog of stdio (`command`, `args`, optional `env`) or Streamable HTTP (`url`, optional `headers`) MCP servers. All providers enforce the effective capability policy. |
 | `MCP_TOOL_TIMEOUT_MS` | unset | The bound on one MCP tool call of an Attempt, in milliseconds (at least 1000), applied through the SDK's own per-call limit; unset uses the SDK's default. |
 | `PROVIDER_MAX_CONCURRENCY`, `PROCESS_MAX_ATTEMPTS`, `MAX_WORKTREES` | `4`, `6`, unset | Resource governor limits. |
 | `MAX_CONCURRENT_RUNS`, `DIAGNOSTICS_RETAINED` | `4`, `500` | Host driver limits: Runs advanced concurrently; diagnostics kept in memory. |
@@ -75,7 +86,8 @@ ignored.
 ### Verification
 
 ```
-npm run verify     # typecheck and the test suites of every workspace
+npm run verify     # typecheck, lint, and the test suites of every workspace
+npm run lint       # ESLint, with the existing legacy findings baselined
 npm test           # the test suites alone
 npm run build      # core, server, and the web bundle
 ```
@@ -83,13 +95,16 @@ npm run build      # core, server, and the web bundle
 `npm run test:browser` builds the web application and drives it in a real
 Chromium (Playwright) against a real server process over a disposable
 repository: the normal operator path through publication, pagination,
-pause and resume, a reconnect, deep links, and a narrow viewport. It needs
+pause and resume, provider/model switching and persisted invocation identity,
+a reconnect, deep links, and a narrow viewport. It needs
 Playwright's browser once: `npx playwright install chromium`.
 
 `npm run verify:coding-run --workspace server` runs one real coding Run
-against the live provider over a disposable repository; it is the only
-step that needs credentials. The live smoke test in the server suite is
-skipped unless `AGENTIQUE_LIVE_SMOKE=1`.
+against Claude over a disposable repository. Live smoke tests are opt-in:
+`AGENTIQUE_LIVE_SMOKE=1` for Claude, `AGENTIQUE_LIVE_CODEX=1`,
+`AGENTIQUE_LIVE_AI_SDK=1`, or `AGENTIQUE_LIVE_PI=1` for the new adapters.
+The latter also require their credential environment variables. Default
+tests make no billable model calls. See [live verification](docs/providers.md#verification).
 
 ## What an operator does
 
@@ -186,7 +201,7 @@ server/src/
   persistence/    SQLite schema and baseline migration, stores, transactions, journal, blob store
   execution/      scheduler, Invocation and Attempt execution, runtime tools, Gates, completion,
                   signoff, publication, Budget growth, run control, recovery
-  provider/       Claude Agent SDK adapter and fixture
+  provider/       provider registry, Claude/Codex/AI SDK adapters, tools and fixtures
   workspace-state/ git and directory providers behind the six Workspace ports
   agents/         Agent Definitions (built-in and Workspace files)
   composition/    the one runtime composition; the live verification entrypoint

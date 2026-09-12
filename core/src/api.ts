@@ -405,6 +405,8 @@ export type CompletionCheck = z.infer<typeof completionCheckSchema>;
  * check. The goal becomes the operator's first message and, with the completion check, a Requirement of the Conversation.
  */
 export const runCreateBodySchema = z.strictObject({
+  provider: z.string().min(1).max(80).optional(),
+  model: z.string().min(1).max(200).optional(),
   goal: z.string().min(1).max(OPERATOR_MESSAGE_MAX_BYTES),
   kind: z.enum(RUN_KINDS).optional(),
   target: runTargetSchema.optional(),
@@ -534,7 +536,9 @@ export interface WorkspaceCapabilities {
 
 /** Safe configuration: defaults and limits only; never a credential, a key, or a filesystem path outside the browse roots. */
 export interface ConfigResponse {
+  providers?: import("./providers.ts").ProviderDescriptor[];
   defaults: {
+    provider?: string;
     model: string;
     effort: string;
     runKind: RunKind;

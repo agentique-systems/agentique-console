@@ -16,6 +16,7 @@ import {
   allocationSchema,
   budgetLimitsSchema,
   EMPTY_MANIFEST_TEMPLATE,
+  executionSelectionSchema,
   idSchema,
   MAX_NODE_GATE_CYCLES,
   MAX_RUN_COMPLETION_CYCLES,
@@ -90,6 +91,7 @@ export interface RunVerificationRequest {
 }
 
 export interface RunCreationRequest {
+  execution?: import("@agentique-console/core").ExecutionSelection;
   conversationId: ConversationId;
   kind: RunKind;
   target: RunTarget;
@@ -105,6 +107,7 @@ export interface RunCreationRequest {
 }
 
 const runCreationRequestSchema: z.ZodType<RunCreationRequest> = z.strictObject({
+  execution: executionSelectionSchema.optional(),
   conversationId: idSchema("conversation"),
   kind: z.enum(RUN_KINDS),
   target: runTargetSchema,
@@ -225,7 +228,7 @@ export class RunCreationService {
     const meta = { correlationId: valid.correlationId ?? null };
     return this.ctx.tx.write(() => {
       const created = this.stores.runs.create(
-        { conversationId: conversation.id, kind: valid.kind, target: valid.target, budget: valid.budget, finalReserve, verificationPolicy },
+        { conversationId: conversation.id, kind: valid.kind, target: valid.target, budget: valid.budget, finalReserve, verificationPolicy, ...(valid.execution === undefined ? {} : { execution: valid.execution }) },
         meta,
       );
       const preparation: RunWorkspacePreparationRequest = { runId: created.id, workspace, target: valid.target };

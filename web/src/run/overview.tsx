@@ -250,6 +250,7 @@ function DetailsCard({ overview }: { overview: RunOverview }) {
           { label: "Created", value: <RelativeTime iso={run.createdAt} /> },
           { label: "Ended", value: run.endedAt === null ? null : <RelativeTime iso={run.endedAt} /> },
           { label: "Plan revision", value: overview.projection === null ? null : String(overview.projection.revisionNumber) },
+          { label: "Provider / model", value: run.execution ? `${run.execution.provider} / ${run.execution.model}` : "Claude (Agent Definition model)" },
           { label: "Evaluator", value: run.verificationPolicy.evaluatorAgentDefinitionRevisionId === null ? "none (deterministic Gates only)" : <IdChip id={run.verificationPolicy.evaluatorAgentDefinitionRevisionId} /> },
           { label: "Base Snapshot", value: run.baseSnapshotId === null ? null : <IdChip id={run.baseSnapshotId} /> },
           { label: "Integration Snapshot", value: run.integrationSnapshotId === null ? null : <IdChip id={run.integrationSnapshotId} /> },

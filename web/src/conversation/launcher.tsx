@@ -22,27 +22,35 @@ import { cn } from "@/lib/utils";
  */
 export function RunLauncher({ conversation, workspace, className }: { conversation: ConversationResponse; workspace: WorkspaceResponse; className?: string }) {
   const config = useConfig();
-  const create = useCreateRun(conversation.conversation.id);
   const navigate = useNavigate();
+  const create = useCreateRun(conversation.conversation.id, (overview) => void navigate(`/runs/${overview.run.id}`));
   const [goal, setGoal] = useState("");
   const [check, setCheck] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
+  const [provider, setProvider] = useState<string | null>(null);
+  const [model, setModel] = useState<string | null>(null);
   const [maxCostUsd, setMaxCostUsd] = useState("");
   const [evaluator, setEvaluator] = useState<"reviewer" | "none" | "">("");
   const defaults = config.data?.defaults;
+  const selectedProvider = provider ?? defaults?.provider ?? config.data?.provider.name ?? "claude";
+  const catalog = config.data?.providers ?? [];
+  const backend = catalog.find((p) => p.id === selectedProvider);
+  const selectedModel = model ?? (selectedProvider === defaults?.provider ? defaults.model : backend?.defaultModel) ?? defaults?.model ?? "";
+  const modelInfo = backend?.models.find((m) => m.id === selectedModel);
+  const unavailable = backend?.availability.configured === false || modelInfo?.availability?.configured === false;
   const command = check ?? defaults?.completionCheck?.command ?? "";
   const target = workspace.defaultTarget?.kind === "branch" ? workspace.defaultTarget.branch : "the directory";
   const submit = () => {
-    if (goal.trim() === "" || create.isPending) return;
+    if (goal.trim() === "" || create.isPending || unavailable || !defaults) return;
     const budget = defaults && maxCostUsd.trim() !== "" && Number.isFinite(Number(maxCostUsd)) ? { ...defaults.budget, maxCostUsd: Number(maxCostUsd) } : undefined;
     create.mutate(
       {
         goal,
+        ...(backend === undefined ? {} : { provider: selectedProvider, model: selectedModel }),
         completionCheck: command.trim() === "" ? null : { command: command.trim(), expectedExitCode: 0 },
         ...(budget === undefined ? {} : { budget }),
         ...(evaluator === "" ? {} : { evaluator }),
       },
-      { onSuccess: (overview) => void navigate(`/runs/${overview.run.id}`) },
     );
   };
   return (
@@ -73,6 +81,32 @@ export function RunLauncher({ conversation, workspace, className }: { conversati
         rows={3}
         data-testid="goal"
       />
+      {catalog.length > 0 && (
+        <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-muted-foreground">Provider</span>
+            <NativeSelect aria-label="provider" value={selectedProvider} onChange={(event) => { setProvider(event.target.value); setModel(null); }}>
+              {catalog.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </NativeSelect>
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-muted-foreground">Model</span>
+            <NativeSelect aria-label="model" value={selectedModel} onChange={(event) => setModel(event.target.value)}>
+              {backend?.models.map((m) => <option key={m.id} value={m.id}>{m.label}{m.availability?.configured === false ? " (credentials required)" : ""}</option>)}
+            </NativeSelect>
+          </label>
+          {unavailable && <p role="status" className="text-xs text-muted-foreground sm:col-span-2">{modelInfo?.availability?.configured === false ? modelInfo.availability.detail : backend?.availability.detail}</p>}
+          {backend?.capabilities.usage?.status === "limited" && !modelInfo?.pricing && <p className="text-xs text-muted-foreground sm:col-span-2">USD cost is unknown without configured model pricing. Token, time, and attempt limits still apply.</p>}
+          {backend && (
+            <details className="text-xs text-muted-foreground sm:col-span-2">
+              <summary className="cursor-pointer">Provider capabilities</summary>
+              <dl className="mt-2 grid gap-1">
+                {Object.entries(backend.capabilities).map(([name, capability]) => <div key={name}><dt className="inline font-medium">{name}: </dt><dd className="inline">{capability.detail}</dd></div>)}
+              </dl>
+            </details>
+          )}
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
         <label className="flex flex-col gap-1 text-xs">
           <span className="text-muted-foreground">Completion check</span>
@@ -115,7 +149,7 @@ export function RunLauncher({ conversation, workspace, className }: { conversati
             </div>
             <div className="flex justify-between gap-2">
               <dt>Model</dt>
-              <dd className="font-mono">{defaults.model}</dd>
+              <dd className="font-mono">{selectedModel}</dd>
             </div>
           </dl>
         </div>
@@ -131,7 +165,7 @@ export function RunLauncher({ conversation, workspace, className }: { conversati
           <Kbd>↵</Kbd>
           to start
         </span>
-        <Button type="submit" disabled={create.isPending || goal.trim() === ""} data-testid="start-run-button">
+        <Button type="submit" disabled={create.isPending || goal.trim() === "" || unavailable || !defaults} data-testid="start-run-button">
           <PlayIcon />
           {create.isPending ? "Starting…" : "Start Run"}
         </Button>

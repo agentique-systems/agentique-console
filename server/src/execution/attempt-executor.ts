@@ -82,6 +82,7 @@ import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { AttemptExecutionOutcome, AttemptExecutionRequest, ProviderAdapter, ProviderCompletion, TransientOutputSink } from "../provider/adapter.ts";
+import { resolveProvider } from "../provider/adapter.ts";
 import type { ContinuationService } from "../provider/continuation.ts";
 import { continuationCandidate, type ContinuationPolicyConfig } from "./continuation-policy.ts";
 import { blockingRequestOf } from "./decision-requests.ts";
@@ -263,7 +264,8 @@ export class AttemptExecutor {
     if (!inspection.next.permitted) return this.refuse(inspection, options);
     // The payload is resolved outside any transaction; a missing or corrupt payload yields a fresh start with no error.
     const candidate = inspection.resumeCandidateAttemptId;
-    const continuation = candidate === null ? null : await this.continuations.resolve(candidate, this.provider.provider);
+    const selectedProvider = resolveProvider(this.provider, this.stores.invocations.getManifest(invocationId).content.modelPolicy);
+    const continuation = candidate === null ? null : await this.continuations.resolve(candidate, selectedProvider.provider);
     // The transaction returns the facts a flight is built from; the flight is published only once `write` has
     // returned, i.e. after COMMIT succeeded. A callback failure, a rollback-only root, or a failed COMMIT throws
     // out of `write` before any in-memory entry exists, so the provider can never be called for an Attempt that
@@ -274,12 +276,12 @@ export class AttemptExecutor {
       const invocation = again.invocation;
       const manifest = this.stores.invocations.getManifest(invocation.id);
       const worktrees = grantsWriteCapability(manifest.content) ? 1 : 0;
-      const refusal = this.governor.check({ runId: invocation.runId, provider: this.provider.provider, worktrees });
+      const refusal = this.governor.check({ runId: invocation.runId, provider: selectedProvider.provider, worktrees });
       if (refusal) return { kind: "capacity_refused", refusal, invocation };
       const resumedFrom = continuation !== null && again.resumeCandidateAttemptId === candidate ? candidate : null;
       const attempt = this.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: resumedFrom ? "resumed" : "fresh", resumedFromAttemptId: resumedFrom }, options);
       const caused: WriteOptions = { ...options, causationSeq: this.ctx.journal.lastSeq() };
-      const grant = this.governor.tryAcquire({ runId: invocation.runId, attemptId: attempt.id, provider: this.provider.provider, worktrees }, caused);
+      const grant = this.governor.tryAcquire({ runId: invocation.runId, attemptId: attempt.id, provider: selectedProvider.provider, worktrees }, caused);
       if (!grant.granted) throw new ConflictError(`the governor refused a lease it had just offered (${grant.refusal.reason})`);
       const started = this.stores.invocations.transitionAttempt(attempt.id, { to: "running", capacityLeaseId: grant.lease.id }, caused);
       const running = invocation.status === "pending" ? this.stores.invocations.transition(invocation.id, { to: "running" }, caused) : invocation;
@@ -380,8 +382,9 @@ export class AttemptExecutor {
     if (!interrupted && workspace.request.writes && flight.outcome.completion.kind === "completed" && flight.changeset === null) {
       flight.changeset = await this.workspace.collectChangeset(workspace.request, workspace.prepared);
     }
-    if (flight.outcome.continuation !== null && this.provider.supportsContinuation && !flight.continuationStored) {
-      await this.continuations.store(flight.attemptId, this.provider.provider, flight.outcome.continuation);
+    const selectedProvider = resolveProvider(this.provider, this.stores.invocations.getManifest(invocation.id).content.modelPolicy);
+    if (flight.outcome.continuation !== null && selectedProvider.supportsContinuation && !flight.continuationStored) {
+      await this.continuations.store(flight.attemptId, selectedProvider.provider, flight.outcome.continuation);
       flight.continuationStored = true;
     }
     return this.finalize(flight, options);
@@ -448,7 +451,7 @@ export class AttemptExecutor {
     };
     const startedAt = this.ctx.clock();
     try {
-      return await this.provider.execute(request);
+      return await resolveProvider(this.provider, manifest.content.modelPolicy).execute(request);
     } catch (error) {
       // An adapter that throws is an infrastructure fault: a transient provider error with a bounded, sanitized message.
       const message = boundedFailureMessage(error instanceof Error ? error.message : String(error));

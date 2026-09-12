@@ -11,6 +11,7 @@
  */
 import { completionTurns, initFixtureRepo, planTurn, returned, tool, workerTurn } from "./e2e-fixture.ts";
 import { openTestApp } from "./test-support.ts";
+import { contractAdapter } from "../provider/adapter-test-support.ts";
 
 export type WebTestScript = "coding" | "hang" | "review" | "decisions";
 export type WebTestRequest = { kind: "script"; name: WebTestScript; workspaceId: string } | { kind: "remaining" } | { kind: "disconnect" } | { kind: "close" };
@@ -22,7 +23,7 @@ const send = (reply: WebTestReply): void => {
   process.send!(reply);
 };
 
-const t = await openTestApp({ dir });
+const t = await openTestApp({ dir, adapterOverrides: [contractAdapter("codex", dir).adapter, contractAdapter("ai-sdk", dir).adapter] });
 const repo = initFixtureRepo(dir);
 const url = await t.app.server.listen({ port: 0, host: "127.0.0.1" });
 

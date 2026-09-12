@@ -69,6 +69,8 @@ export class RunLaunchService {
 
   /** Creates the Run (and, unless `start` is false, starts it) from the operator's goal and defaults, atomically; every refusal names its cause. */
   launch(conversationId: ConversationId, body: RunCreateBody): LaunchedRun {
+    const execution = this.runtime.providers?.select({ ...(body.provider === undefined ? {} : { provider: body.provider }), ...(body.model === undefined ? {} : { model: body.model }) });
+    if (execution === undefined && (body.provider !== undefined || body.model !== undefined)) throw new ValidationError("Provider/model selection requires a provider registry");
     const { stores, ctx } = this.runtime;
     const conversation = stores.conversations.get(conversationId);
     const workspace = stores.workspaces.get(conversation.workspaceId);
@@ -95,6 +97,7 @@ export class RunLaunchService {
     return ctx.tx.write(() => {
       const authored = check === null ? null : this.authorRequirement(conversationId, body.goal, check);
       const created = this.runtime.runCreation.create({
+        ...(execution === undefined ? {} : { execution }),
         conversationId,
         kind,
         target,

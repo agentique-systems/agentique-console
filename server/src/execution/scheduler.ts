@@ -41,6 +41,7 @@
  * A per-Run in-process guard makes concurrent `advanceRun` calls join one
  * pass; canonical database constraints remain the source of correctness.
  */
+import { resolveProvider } from "../provider/adapter.ts";
 import {
   boundedFailureMessage,
   grantsWriteCapability,
@@ -527,7 +528,8 @@ export class RunScheduler {
   }
 
   private capacityRefusal(runId: RunId, invocationId: InvocationId) {
-    return this.governor.check({ runId, provider: this.provider.provider, worktrees: this.worktreesOf(invocationId) });
+    const selected = resolveProvider(this.provider, this.stores.invocations.getManifest(invocationId).content.modelPolicy);
+    return this.governor.check({ runId, provider: selected.provider, worktrees: this.worktreesOf(invocationId) });
   }
 
   /** The Invocations of the Run whose Attempt is executing in this process, from the executor's record. */

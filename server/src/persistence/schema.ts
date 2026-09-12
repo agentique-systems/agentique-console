@@ -212,6 +212,7 @@ export const conversationMessages = sqliteTable(
 export const runs = sqliteTable(
   "runs",
   {
+    execution: text("execution", { mode: "json" }).$type<import("@agentique-console/core").ExecutionSelection>(),
     id: text("id").primaryKey(),
     conversationId: text("conversation_id")
       .notNull()
@@ -1739,6 +1740,7 @@ export const allocationExtensions = sqliteTable(
 export const usage = sqliteTable(
   "usage",
   {
+    costKnown: integer("cost_known", { mode: "boolean" }).notNull().default(true),
     id: text("id").primaryKey(),
     runId: text("run_id")
       .notNull()

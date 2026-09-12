@@ -1,5 +1,10 @@
 # Documentation index
 
+## Operating the console
+
+- [Execution providers](providers.md) — Claude, Codex, AI SDK 7, model selection,
+  credentials, MCP, capability differences, continuation and live verification.
+
 ## Architecture (authoritative)
 
 The orchestration architecture is defined by four documents under
@@ -37,15 +42,15 @@ this repository, including the top-level `README.md`.
   bounds, and error codes the server serves and the web application
   consumes).
 - `server/src/persistence/` — the persistence boundary: SQLite schema, the
-  single baseline migration, the database-open guard that refuses any
-  database not created by it, stores, transactions with commit listeners,
+  baseline and forward migrations, the database-open guard that refuses
+  unrelated/unsupported schemas, stores, transactions with commit listeners,
   the journal, and the Artifact blob store with its crash-recovery
   protocol.
 - `server/src/execution/` — the durable execution engine: the scheduler,
   Invocation and Attempt execution, runtime tools, Gates, completion,
   signoff, publication, Budget growth, run control, and recovery.
 - `server/src/provider/`, `server/src/workspace-state/`,
-  `server/src/agents/` — the Claude Agent SDK adapter and its fixture, the
+  `server/src/agents/` — the provider registry and Claude/Codex/AI SDK adapters, the
   git and directory Workspace providers behind the six ports, and Agent
   Definitions.
 - `server/src/composition/` — one composition of the runtime for

@@ -21,6 +21,7 @@
  * prepared, a Changeset already integrated, a Handoff already created, or a
  * node already transitioned is found, never duplicated.
  */
+import { resolveProvider } from "../../provider/adapter.ts";
 import {
   ConflictError,
   InvariantViolationError,
@@ -458,7 +459,9 @@ export class PatternNodeSupport {
       case "provider_capacity": {
         const invocation = context.capacity;
         const worktrees = invocation !== null && invocation.workspaceCleanup === "pending" && stores.invocations.getManifest(invocation.id).content.worktreePath !== null ? 1 : 0;
-        const refusal = governor.check({ runId: node.runId, provider: this.deps.provider.provider, worktrees });
+        const policy = invocation === null ? stores.runs.get(node.runId).execution : stores.invocations.getManifest(invocation.id).content.modelPolicy;
+        const selected = policy === undefined ? this.deps.provider : resolveProvider(this.deps.provider, policy);
+        const refusal = governor.check({ runId: node.runId, provider: selected.provider, worktrees });
         return { kind: "waiting", reason, cleared: refusal === null, wakeAt: refusal?.retryAfter ?? null };
       }
       case "budget": {

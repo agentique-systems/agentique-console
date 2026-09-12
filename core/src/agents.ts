@@ -42,6 +42,8 @@ export const MODEL_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ModelEffort = (typeof MODEL_EFFORTS)[number];
 
 export interface ModelPolicy {
+  /** Missing only in existing definitions/manifests; resolved by the provider registry. */
+  provider?: string;
   model: string;
   effort: ModelEffort;
   /** Maximum context occupancy (0..1) before a `fresh` Attempt is preferred over `resumed`. */
@@ -49,6 +51,7 @@ export interface ModelPolicy {
 }
 
 export const modelPolicySchema: z.ZodType<ModelPolicy> = z.strictObject({
+  provider: nonEmptyString.optional(),
   model: nonEmptyString,
   effort: z.enum(MODEL_EFFORTS),
   maxContextOccupancy: z.number().min(0).max(1),

@@ -27,7 +27,7 @@
  * afterwards (a result, a failure, a throw, further calls) cannot override
  * it — but a conforming adapter never spends provider work past it.
  */
-import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, ExecutableRuntimeTool, InvocationId, ModelEffort, ProposedToolCall, RunId, RuntimeToolCallOutcome, RuntimeToolCallRequest, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
+import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, ExecutableRuntimeTool, InvocationId, ModelEffort, ProposedToolCall, RunId, RuntimeToolCallOutcome, RuntimeToolCallRequest, Timestamp, ToolPolicy, UsageInput, ProviderModel } from "@agentique-console/core";
 
 /** The deterministic bytes rendered from the persisted Context Manifest (plus a bounded retry appendix). */
 export interface RenderedInput {
@@ -177,5 +177,18 @@ export interface ProviderAdapter {
   /** The provider name recorded on Usage attribution and continuation index rows. */
   readonly provider: string;
   readonly supportsContinuation: boolean;
+  /** Optional routing/capability surface. A concrete adapter needs no registry. */
+  resolve?(selection: { provider?: string; model: string }): ProviderAdapter;
+  describeModel?(selection: { provider?: string; model: string }): ProviderModel | undefined;
   execute(request: AttemptExecutionRequest): Promise<AttemptExecutionOutcome>;
+}
+
+/** Used by admission, recovery and execution alike; contains no SDK or backend policy. */
+export type ProviderIdentity = Pick<ProviderAdapter, "provider" | "resolve">;
+export type ProviderContinuationSupport = Pick<ProviderAdapter, "provider" | "resolve" | "supportsContinuation">;
+export function resolveProvider(adapter: ProviderAdapter, selection: { provider?: string; model: string }): ProviderAdapter;
+export function resolveProvider(adapter: ProviderContinuationSupport, selection: { provider?: string; model: string }): ProviderContinuationSupport;
+export function resolveProvider(adapter: ProviderIdentity, selection: { provider?: string; model: string }): ProviderIdentity;
+export function resolveProvider(adapter: ProviderIdentity, selection: { provider?: string; model: string }): ProviderIdentity {
+  return adapter.resolve?.(selection) ?? adapter;
 }

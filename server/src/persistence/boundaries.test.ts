@@ -131,10 +131,12 @@ describe("import boundaries", () => {
       const isTest = file.endsWith(".test.ts");
       for (const specifier of importsOf(file)) {
         // Tests may drive the persistence and execution fixtures, and the shape regression lists tools through the MCP client the SDK itself depends on.
-        if (isTest && (specifier === "vitest" || specifier.startsWith("@modelcontextprotocol/sdk/") || resolvesInto(file, specifier, "server/src/persistence") || resolvesInto(file, specifier, "server/src/execution"))) continue;
+        if (isTest && (specifier === "vitest" || specifier === "ws" || specifier.startsWith("@modelcontextprotocol/sdk/") || resolvesInto(file, specifier, "server/src/persistence") || resolvesInto(file, specifier, "server/src/execution"))) continue;
         const allowed =
           specifier === "@agentique-console/core" ||
           specifier === "zod" ||
+          // Provider SDKs, harnesses and MCP transports remain confined to this boundary.
+          (["ai", "ai/test", "@openai/codex-sdk", "@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/gateway", "@ai-sdk/harness", "@ai-sdk/harness/agent", "@ai-sdk/harness-pi", "@ai-sdk/sandbox-just-bash"].includes(specifier) || specifier.startsWith("@modelcontextprotocol/sdk/")) ||
           specifier.startsWith("node:") ||
           // The pinned production SDK: types everywhere, the module itself only in the binding.
           (specifier === "@anthropic-ai/claude-agent-sdk" && (isTest || rel(file) === "server/src/provider/claude-sdk-binding.ts" || fs.readFileSync(file, "utf8").split(/\r?\n/).filter((line) => /^\s*(import|export)\b/.test(line) && line.includes(specifier)).every((line) => /^(export type|import type) /.test(line)))) ||

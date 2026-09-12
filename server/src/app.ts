@@ -24,12 +24,16 @@ import { RunLaunchService } from "./operator/run-launch.ts";
 import { WorkspaceService } from "./operator/workspaces.ts";
 import type { PersistenceDiagnostic } from "./persistence/context.ts";
 import type { ClaudeSdk } from "./provider/claude-sdk.ts";
+import type { ProviderAdapter } from "./provider/adapter.ts";
+import { createProviderRegistry } from "./provider/production.ts";
 import type { PublicationHooks } from "./workspace-state/index.ts";
 
 export interface CreateAppOptions {
   config: Config;
   /** The provider SDK: the real binding in production, a fixture in tests. */
   sdk: ClaudeSdk;
+  /** Adapter injection for contract/E2E tests and application embeddings. */
+  adapterOverrides?: readonly ProviderAdapter[];
   clock?: () => Timestamp;
   log?: Logger;
   /** Test barriers of the publication port; production passes none. */
@@ -99,7 +103,7 @@ function mcpCatalog(config: Config): Record<string, McpServerConfig> {
   const catalog: Record<string, McpServerConfig> = {};
   const timeout = config.provider.mcpToolTimeoutMs;
   // The per-server bound states the same limit the subprocess environment carries; the SDK honours whichever it reads first.
-  for (const [name, server] of Object.entries(config.provider.mcpServers)) catalog[name] = { type: "stdio", command: server.command, args: server.args, ...(timeout === null ? {} : { timeout }) };
+  for (const [name, server] of Object.entries(config.provider.mcpServers)) catalog[name] = "url" in server ? { type: "http", ...server } : { type: "stdio", ...server, ...(timeout === null ? {} : { timeout }) };
   return catalog;
 }
 
@@ -110,7 +114,9 @@ export function createApp(options: CreateAppOptions): App {
   const clock = options.clock ?? (() => new Date().toISOString() as Timestamp);
   const diagnostics = new BoundedDiagnostics(config.driver.diagnosticsRetained);
   const workerAllocation: Allocation = config.defaults.nodeAllocation;
+  const providers = createProviderRegistry(config, options.sdk, options.adapterOverrides);
   const runtime = composeConsoleRuntime({
+    providers,
     databaseFile: config.databaseFile,
     blobRoot: config.blobRoot,
     continuations: { root: config.continuationRoot, ttlMs: config.provider.continuationTtlMs },
@@ -126,7 +132,7 @@ export function createApp(options: CreateAppOptions): App {
       maxNodeGateCycles: 3,
       maxRunCompletionCycles: 3,
     },
-    governor: { providers: { claude: { maxConcurrency: config.governor.providerMaxConcurrency } }, maxProcessConcurrency: config.governor.processMaxAttempts, maxWorktrees: config.governor.maxWorktrees },
+    governor: { providers: Object.fromEntries(providers.catalog().map((p) => [p.id, { maxConcurrency: config.governor.providerMaxConcurrency }])), maxProcessConcurrency: config.governor.processMaxAttempts, maxWorktrees: config.governor.maxWorktrees },
     checks: { maxOutputBytes: config.checks.maxOutputBytes, commandTimeoutMs: config.checks.commandTimeoutMs },
     clock,
     persistenceDiagnostics: (diagnostic) => {

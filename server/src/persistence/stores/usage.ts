@@ -22,7 +22,8 @@ import { attempts, invocations, usage } from "../schema.ts";
 import { loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
 function toDomain(row: typeof usage.$inferSelect): Usage {
-  return parseOrThrow(usageSchema, row, "Usage row");
+  const { costKnown, ...fields } = row;
+  return parseOrThrow(usageSchema, { ...fields, ...(costKnown ? {} : { costKnown: false }) }, "Usage row");
 }
 
 /**
