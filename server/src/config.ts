@@ -43,6 +43,8 @@ export interface McpServerCommand {
 export const APPROVED_MCP_SERVERS = ["browser"] as const;
 
 export interface Config {
+  /** Deployment-only administration and secret-storage policy. Never sent wholesale to clients. */
+  administration: { key?: string; token?: string; origin?: string; trustedOrigins: string[] };
   execution: ProviderConfiguration;
   dataDir: string;
   databaseFile: string;
@@ -198,7 +200,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, home: string = 
   try { execution = loadProviderConfiguration(env, dataDir); }
   catch (error) { if (error instanceof ProviderConfigError) throw new ConfigError(error.variable, error.message.slice(error.variable.length + 2)); throw error; }
   const model = execution.defaults.model;
-  return {
+  const config: Config = {
+    administration: {
+      ...(env.CONSOLE_SETTINGS_KEY ? { key: env.CONSOLE_SETTINGS_KEY } : {}),
+      ...(env.CONSOLE_ADMIN_TOKEN ? { token: env.CONSOLE_ADMIN_TOKEN } : {}),
+      ...(env.CONSOLE_PUBLIC_ORIGIN ? { origin: env.CONSOLE_PUBLIC_ORIGIN } : {}),
+      trustedOrigins: (env.CONSOLE_TRUSTED_ENDPOINT_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    },
     execution,
     dataDir,
     databaseFile: path.join(dataDir, "console.db"),
@@ -237,4 +245,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, home: string = 
     },
     checks: { commandTimeoutMs: integer(env, "CONSOLE_CHECK_TIMEOUT_MS", 600_000, { min: 1_000 }), maxOutputBytes: 65_536 },
   };
+  for (const value of [...config.administration.trustedOrigins, ...(config.administration.origin ? [config.administration.origin] : [])]) {
+    let valid = false;
+    try { const url = new URL(value); valid = ["http:", "https:"].includes(url.protocol) && url.origin === value && !url.username && !url.password; } catch { /* validation below */ }
+    if (!valid) throw new ConfigError("CONSOLE_PUBLIC_ORIGIN / CONSOLE_TRUSTED_ENDPOINT_ORIGINS", "expected exact HTTP(S) origins, without paths or credentials");
+  }
+  if (config.administration.token && config.administration.token.length < 32) throw new ConfigError("CONSOLE_ADMIN_TOKEN", "use at least 32 characters");
+  deploymentEnvironments.set(config, { ...env });
+  return config;
 }
+
+const deploymentEnvironments = new WeakMap<Config, NodeJS.ProcessEnv>();
+/** The startup environment, retained server-side to resolve provenance and SDK authentication. */
+export function deploymentEnvironment(config: Config): NodeJS.ProcessEnv { return { ...(deploymentEnvironments.get(config) ?? {}) }; }

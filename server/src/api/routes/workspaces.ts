@@ -6,7 +6,7 @@ import { admit, CREATED_ID, created, id, page, pageResponse, parse, type RouteHa
 export function conversationResponse(runtime: ConsoleRuntime, conversationId: ConversationResponse["conversation"]["id"]): ConversationResponse {
   const conversation = runtime.stores.conversations.get(conversationId);
   const runs = runtime.stores.runs.listByConversation(conversationId);
-  return { conversation, activeRun: conversation.activeRunId === null ? null : runtime.stores.runs.get(conversation.activeRunId), runs: runs.length };
+  return { conversation, activeRun: conversation.activeRunId === null ? null : runtime.stores.runs.get(conversation.activeRunId), dialogueRun: [...runs].reverse().find((r) => r.mode === "conversation") ?? null, runs: runs.filter((r) => r.mode !== "conversation").length };
 }
 
 function summaries(runtime: ConsoleRuntime, filter: (revision: AgentDefinitionRevision) => boolean): AgentDefinitionSummary[] {

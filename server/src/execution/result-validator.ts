@@ -52,6 +52,10 @@ export class InvocationResultValidator {
     const { run, invocation } = context;
     const add = (code: ResultViolation["code"], message: string, path: string | null = null) => violations.push({ code, message, path });
 
+    if (result.conversation !== undefined && (invocation.role !== "orchestrator" || result.status !== "completed")) add("status_incompatible", "only a completed Orchestrator turn returns a conversation reply", "conversation");
+    if (result.conversation?.work != null && run.mode !== "conversation") add("status_incompatible", "only the conversation context dispatches work", "conversation.work");
+    if (run.mode === "conversation" && result.conversation === undefined) add("malformed", "a conversation turn must return a genuine reply", "conversation");
+
     result.artifactIds.forEach((id, index) => {
       const artifact = this.artifact(id);
       if (!artifact) add("unknown_artifact", `Artifact ${id} does not exist`, `artifactIds.${index}`);

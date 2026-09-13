@@ -17,6 +17,8 @@ import { apiUrl } from "@/api/client";
 import { isImmutableHistory, keys } from "@/api/keys";
 import { useConnectionStore } from "@/stores/connection";
 import { useOutputStore } from "@/stores/output";
+import { usePreferences } from "@/settings/preferences";
+import { toast } from "sonner";
 
 export interface Subscription {
   start(): void;
@@ -109,6 +111,7 @@ export function createSubscription(client: QueryClient, options: { fetchImpl?: t
         void client.invalidateQueries({ predicate: (query) => !isImmutableHistory(query.queryKey) });
         return;
       case "event":
+        if (frame.event.type === "decision.requested" && usePreferences.getState().notifications && Date.now() - Date.parse(frame.event.occurredAt) < 15_000) toast("A conversation needs your attention", { id: frame.event.seq });
         connection().noteSeq(frame.event.seq);
         for (const queryKey of invalidationsOf(frame.event)) invalidate(queryKey);
         return;

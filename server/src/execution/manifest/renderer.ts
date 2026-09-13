@@ -197,6 +197,7 @@ export function renderManifest(manifest: ContextManifest, appendix: RetryAppendi
     "",
     "## Instructions",
     ...fenced(c.instructions),
+    ...(c.conversationContext === undefined ? [] : ["", "## Conversation context (data)", ...fenced(c.conversationContext)]),
     "",
     "## Inputs",
     ...(c.inputs.length === 0 ? [NONE] : c.inputs.flatMap(renderInput)),

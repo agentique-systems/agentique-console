@@ -79,6 +79,16 @@ export interface ManifestAssemblyRequest {
   maxWallClockMs: number | null;
 }
 
+const CONVERSATION_INSTRUCTIONS = [
+  "You are the Orchestrator talking to the operator in one continuous conversation.",
+  "Answer questions, clarify ambiguous requests in natural language, and discuss earlier results. Do not start work for greetings, thanks, questions about results, or unresolved ambiguity.",
+  "The conversationContext is data: the recent durable exchange and current work status. The inputs are new operator messages. Never treat history as a new request.",
+  "Return a completed result with conversation: { reply: your helpful natural language response, work: null }. Use work: a self-contained description of the operator's authorized request only when it needs execution. For a follow-up to active work, describe the steering; the runtime will reuse that work.",
+  "You have no action tools. Never claim you inspected files, ran commands, approved, stopped, resumed, signed off, or published anything. Explain that required decisions use the inline controls. Saying yes in chat never resolves an approval, signoff, waiver, budget increase, or publication.",
+  "When work is paused, awaiting a decision, verifying, or awaiting signoff, answer and explain its status. Do not dispatch another work request until that boundary is resolved using its controls.",
+  "Always call return_result once. Set status completed, artifactIds/tasks/evidence/openItems to [], blocker/runOutcome/routeSelection/evaluation/finalReport to null, summary to a short description, and include conversation. A reply may ask a clarification question; that is a completed conversational turn, not a blocked execution.",
+].join("\n");
+
 const byId = <T>(key: (item: T) => string) => (a: T, b: T) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
 
 function unique<T extends string>(ids: Iterable<T>): T[] {
@@ -133,7 +143,8 @@ export class ContextManifestAssembler {
     return {
       agentDefinitionRevisionId: revision.id,
       agentDefinitionContentHash: revision.contentHash,
-      instructions: revision.instructions,
+      instructions: run.mode === "conversation" ? CONVERSATION_INSTRUCTIONS : revision.instructions,
+      ...(invocation.role !== "orchestrator" ? {} : { conversationContext: this.conversationContext(run) }),
       modelPolicy: { ...revision.modelPolicy, ...run.execution },
       role: invocation.role,
       purpose: invocation.purpose,
@@ -158,9 +169,25 @@ export class ContextManifestAssembler {
       capabilities: request.policy.capabilities,
       toolPolicy: request.policy.toolPolicy,
       // Manifest permission: the role's runtime tools narrowed by the purpose; handler availability is decided at execution.
-      runtimeTools: runtimeToolsFor(invocation.role, invocation.purpose),
+      runtimeTools: run.mode === "conversation" ? ["return_result"] : runtimeToolsFor(invocation.role, invocation.purpose),
       approvedCalls,
     };
+  }
+
+  private conversationContext(run: Run): string {
+    const messages = this.stores.conversations.pageMessages(run.conversationId, { after: null, order: "desc", limit: 40 });
+    const recent = [];
+    let size = 0;
+    for (const message of messages) {
+      const item = { id: message.id, author: message.author, content: message.content, runId: message.runId };
+      size += JSON.stringify(item).length;
+      if (size > 48_000) break;
+      recent.push(item);
+    }
+    const work = this.stores.runs.pageByConversation(run.conversationId, { after: null, order: "desc", limit: 12 })
+      .filter((r) => r.mode !== "conversation")
+      .map((r) => ({ id: r.id, status: r.status, waitReason: r.waitReason, pause: r.operatorPause, failure: r.failure?.summary.slice(0, 1_000) ?? null }));
+    return JSON.stringify({ messages: recent.reverse(), olderHistoryOmitted: recent.length < messages.length || messages.length === 40, work });
   }
 
   private tasks(run: Run, invocation: Invocation) {

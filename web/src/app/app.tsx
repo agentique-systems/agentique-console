@@ -1,5 +1,8 @@
 import { TriangleAlertIcon } from "lucide-react";
-import { BrowserRouter } from "react-router";
+import { useState } from "react";
+import { createBrowserRouter, Navigate, RouterProvider, useLocation } from "react-router";
+import { SettingsView } from "@/settings/view";
+import { PreferencesSync } from "@/settings/preferences";
 
 import { ApiError } from "@/api/client";
 import { useWorkspace } from "@/api/queries";
@@ -16,9 +19,18 @@ import { WorkspaceGate } from "@/workspaces/workspace-gate";
  * then the shell scoped to it.
  */
 export function App({ router = true }: { router?: boolean }) {
+  const [browserRouter] = useState(() => router ? createBrowserRouter([{ path: "*", element: <AppContent /> }]) : null);
+  return <><PreferencesSync />{browserRouter ? <RouterProvider router={browserRouter} /> : <AppContent />}</>;
+}
+
+function AppContent() {
+  const { pathname } = useLocation();
   const selectedWorkspaceId = useScopeStore((s) => s.selectedWorkspaceId);
   const clear = useScopeStore((s) => s.clear);
   const selected = useWorkspace(selectedWorkspaceId);
+
+  if (pathname === "/system") return <Navigate to="/settings/system" replace />;
+  if (pathname === "/settings" || pathname.startsWith("/settings/")) return <SettingsRoute />;
 
   if (selectedWorkspaceId === null) return <WorkspaceGate />;
 
@@ -33,14 +45,11 @@ export function App({ router = true }: { router?: boolean }) {
     return <Unreachable />;
   }
 
-  return router ? (
-    <BrowserRouter>
-      <Shell workspace={selected.data} />
-    </BrowserRouter>
-  ) : (
-    <Shell workspace={selected.data} />
-  );
+  return <Shell workspace={selected.data} />;
 }
+
+import { Route, Routes } from "react-router";
+function SettingsRoute() { return <Routes><Route path="/settings" element={<Navigate to="/settings/general" replace />} /><Route path="/settings/:section" element={<SettingsView />} /></Routes>; }
 
 export function FullScreenLoading() {
   return (

@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
+import { guardedFetch } from "./connection-check.ts";
 import type { AdapterAttempt } from "./attempt-session.ts";
 
 export type McpConnection = { command: string; args: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> };
@@ -11,7 +12,7 @@ export const mcpCatalogSchema = z.record(z.string().regex(/^[A-Za-z][A-Za-z0-9_-
 ]));
 
 /** Explicit catalog only. All externally hosted MCP calls still pass runtime authorization. */
-export async function addMcpTools(attempt: AdapterAttempt, catalog: Record<string, McpConnection>): Promise<() => Promise<void>> {
+export async function addMcpTools(attempt: AdapterAttempt, catalog: Record<string, McpConnection>, trustedOrigins?: string[]): Promise<() => Promise<void>> {
   const clients: Client[] = [];
   const close = async () => { await Promise.allSettled(clients.map((client) => client.close())); };
   try {
@@ -22,7 +23,7 @@ export async function addMcpTools(attempt: AdapterAttempt, catalog: Record<strin
       const client = new Client({ name: "agentique-console", version: "1.0.0" });
       clients.push(client);
       const transport = "url" in config
-        ? new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers } })
+        ? new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers }, ...(trustedOrigins ? { fetch: guardedFetch(new URL(config.url).origin, trustedOrigins) } : {}) })
         : new StdioClientTransport({ command: config.command, args: config.args, ...(config.env === undefined ? {} : { env: config.env }), stderr: "ignore", cwd: attempt.request.workingDirectory ?? undefined });
       await client.connect(transport, { signal: attempt.signal, timeout: attempt.limits.toolTimeoutMs });
       let cursor: string | undefined;

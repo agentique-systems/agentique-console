@@ -17,18 +17,19 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { allocation, duration, tokens, usageTokensIn, usd, words } from "@/lib/format";
 
-export function UsagePanel({ overview }: { overview: RunOverview }) {
+export function UsagePanel({ overview, inline = false }: { overview: RunOverview; inline?: boolean }) {
   const budget = useRunBudget(overview.run.id);
   return (
     <div className="flex flex-col gap-6">
       {overview.phase === "waiting_budget" && (
-        <Callout tone="warning" testId="budget-wait" title="The Run is waiting on budget">
-          The next work cannot be funded from the ordinary capacity. Approve an increase below, or cancel the Run.
+        <Callout tone="warning" testId="budget-wait" title={inline ? "Budget approval needed" : "The Run is waiting on budget"}>
+          {inline ? "The spending limit has been reached. You can approve more budget below or stop the work." : "The next work cannot be funded from the ordinary capacity. Approve an increase below, or cancel the Run."}
         </Callout>
       )}
       <Panel query={budget} skeleton={<Skeleton className="h-48" />}>
         {(b) => (
           <>
+            <details open={!inline}><summary hidden={!inline} className="cursor-pointer text-xs text-muted-foreground">Budget details</summary><div className="flex flex-col gap-4">
             <div className="grid gap-4 lg:grid-cols-2">
               <Section card title="Ordinary capacity" description="What Plan Node allocations may draw on: the base Budget plus approved ordinary increases.">
                 <PartitionMeters used={b.capacity.ordinary.consumed} limit={b.capacity.ordinary.limit} />
@@ -53,6 +54,7 @@ export function UsagePanel({ overview }: { overview: RunOverview }) {
                 ]}
               />
             </Section>
+            </div></details>
             {b.openDecision !== null && (
               <Callout
                 tone="warning"
@@ -60,10 +62,11 @@ export function UsagePanel({ overview }: { overview: RunOverview }) {
                 testId="budget-decision"
                 action={<BudgetDecisionActions runId={overview.run.id} decisionId={b.openDecision.decisionId} />}
               >
-                Add {allocation(b.openDecision.added)} to the {b.openDecision.partition === "ordinary" ? "ordinary capacity" : "final reserve"}?
+                Add {allocation(b.openDecision.added)} {inline ? b.openDecision.partition === "ordinary" ? "to continue the work" : "to finish and verify the result" : b.openDecision.partition === "ordinary" ? "to ordinary capacity" : "to the final reserve"}?
               </Callout>
             )}
-            {b.allowedActions.some((a) => a.startsWith("request")) && <RequestIncrease runId={overview.run.id} budget={b} />}
+            {b.allowedActions.some((a) => a.startsWith("request")) && <RequestIncrease runId={overview.run.id} budget={b} inline={inline} />}
+            <details open={!inline}><summary hidden={!inline} className="cursor-pointer text-xs text-muted-foreground">Usage and budget history</summary><div className="flex flex-col gap-4">
             <UsageBreakdown overview={overview} />
             <Section title="History" description="Approved and denied increases, and the Allocation Extensions the runtime granted nodes.">
               {b.decisions.length === 0 && b.extensions.length === 0 ? (
@@ -94,6 +97,7 @@ export function UsagePanel({ overview }: { overview: RunOverview }) {
                 </ul>
               )}
             </Section>
+            </div></details>
           </>
         )}
       </Panel>
@@ -126,7 +130,7 @@ function BudgetDecisionActions({ runId, decisionId }: { runId: string; decisionI
   );
 }
 
-function RequestIncrease({ runId, budget }: { runId: string; budget: BudgetResponse }) {
+function RequestIncrease({ runId, budget, inline = false }: { runId: string; budget: BudgetResponse; inline?: boolean }) {
   const actions = useBudgetActions(runId);
   const partitions = (["ordinary", "final_reserve"] as const).filter((p) => budget.allowedActions.includes(p === "ordinary" ? "request_ordinary" : "request_final_reserve"));
   const [partition, setPartition] = useState<BudgetIncreasePartition>(partitions[0] ?? "ordinary");
@@ -134,7 +138,7 @@ function RequestIncrease({ runId, budget }: { runId: string; budget: BudgetRespo
   const [tokenCount, setTokenCount] = useState("500000");
   const [attempts, setAttempts] = useState("5");
   return (
-    <Section card title="Request a Budget Increase" description="Opens a budget_increase Decision you then approve; the increase applies only once approved.">
+    <Section card title="Request a Budget Increase" description={inline ? "Choose the extra allowance, then confirm it before spending continues." : "Opens a budget_increase Decision you then approve; the increase applies only once approved."}>
       <form
         className="flex flex-wrap items-end gap-3"
         onSubmit={(event) => {
@@ -144,11 +148,11 @@ function RequestIncrease({ runId, budget }: { runId: string; budget: BudgetRespo
         data-testid="budget-request"
       >
         <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Partition</span>
+          <span className="text-muted-foreground">{inline ? "Purpose" : "Partition"}</span>
           <NativeSelect value={partition} onChange={(event) => setPartition(event.target.value as BudgetIncreasePartition)} aria-label="partition" className="w-40 text-xs">
             {partitions.map((p) => (
               <option key={p} value={p}>
-                {p === "ordinary" ? "ordinary capacity" : "final reserve"}
+                {inline ? p === "ordinary" ? "Continue work" : "Finish and verify" : p === "ordinary" ? "ordinary capacity" : "final reserve"}
               </option>
             ))}
           </NativeSelect>

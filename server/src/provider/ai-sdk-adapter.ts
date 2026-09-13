@@ -1,4 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { guardedFetch } from "./connection-check.ts";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -14,12 +15,13 @@ import { AGENT_INSTRUCTIONS } from "./tool-definitions.ts";
 import type { HarnessContinuation, HarnessRun } from "./ai-sdk-harness.ts";
 
 export interface AiSdkAdapterConfig {
+  trustedEndpointOrigins?: string[];
   fallbackWorkingDirectory: string;
   continuation?: boolean;
   limits?: Partial<AdapterLimits>;
   models?: ProviderModel[];
   mcpServers?: Record<string, McpConnection>;
-  openai?: { apiKey?: string; baseURL?: string };
+  openai?: { apiKey?: string; baseURL?: string; noAuth?: boolean };
   anthropic?: { apiKey?: string; baseURL?: string };
   gateway?: { apiKey?: string; baseURL?: string };
   harness?: "pi";
@@ -42,9 +44,19 @@ export class AiSdkAdapter implements ProviderAdapter {
     const provider = id.slice(0, separator);
     const name = id.slice(separator + 1);
     if (separator < 1 || !name) throw new Error("invalid request: AI SDK models use provider/model identifiers");
-    if (provider === "openai") return createOpenAI(this.config.openai)(name);
-    if (provider === "anthropic") return createAnthropic(this.config.anthropic)(name);
-    if (provider === "gateway") return createGateway(this.config.gateway)(name);
+    const secure = (endpoint: string, noAuth = false) => {
+      if (!this.config.trustedEndpointOrigins && !noAuth) return {};
+      const http = this.config.trustedEndpointOrigins ? guardedFetch(new URL(endpoint).origin, this.config.trustedEndpointOrigins) : globalThis.fetch;
+      const fetch: typeof globalThis.fetch = (input, init) => {
+        if (!noAuth) return http(input, init);
+        const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+        headers.delete("authorization"); return http(input, { ...init, headers });
+      };
+      return { fetch };
+    };
+    if (provider === "openai") return createOpenAI({ ...this.config.openai, ...secure(this.config.openai?.baseURL ?? "https://api.openai.com/v1", this.config.openai?.noAuth) })(name);
+    if (provider === "anthropic") return createAnthropic({ ...this.config.anthropic, ...secure(this.config.anthropic?.baseURL ?? "https://api.anthropic.com/v1") })(name);
+    if (provider === "gateway") return createGateway({ ...this.config.gateway, ...secure(this.config.gateway?.baseURL ?? "https://ai-gateway.vercel.sh/v4/ai") })(name);
     throw new Error(`invalid request: unconfigured AI SDK model provider ${provider}`);
   }
 
@@ -59,7 +71,7 @@ export class AiSdkAdapter implements ProviderAdapter {
       const configuredModel = this.config.models?.find((m) => m.id === request.model);
       if (configuredModel?.efforts.length && !configuredModel.efforts.includes(request.effort)) throw new Error("invalid request: reasoning effort is unsupported for this model");
       addLocalTools(attempt, cwd);
-      closeMcp = await addMcpTools(attempt, this.config.mcpServers ?? {});
+      closeMcp = await addMcpTools(attempt, this.config.mcpServers ?? {}, this.config.trustedEndpointOrigins);
       const tools: ToolSet = Object.fromEntries(Object.entries(attempt.tools).map(([name, definition]) => [name, {
         description: definition.description,
         inputSchema: definition.jsonSchema ? jsonSchema(definition.jsonSchema) : definition.schema,

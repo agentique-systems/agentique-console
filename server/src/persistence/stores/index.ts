@@ -1,3 +1,4 @@
+import { ConversationOperationStore } from "./conversation-operations.ts";
 import type { PlanLimits } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { AgentDefinitionStore } from "./agents.ts";
@@ -30,6 +31,7 @@ import { WorkspaceStore } from "./workspaces.ts";
 export interface Stores {
   workspaces: WorkspaceStore;
   conversations: ConversationStore;
+  conversationOperations: ConversationOperationStore;
   runs: RunStore;
   plans: ExecutionPlanStore;
   requirements: RequirementStore;
@@ -76,6 +78,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
   return {
     workspaces: new WorkspaceStore(ctx),
     conversations,
+    conversationOperations: new ConversationOperationStore(ctx),
     runs: new RunStore(ctx, conversations),
     plans,
     requirements: new RequirementStore(ctx),

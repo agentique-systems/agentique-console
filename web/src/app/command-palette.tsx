@@ -91,7 +91,7 @@ export function CommandPalette({ open, onOpenChange, workspace }: { open: boolea
         {runRows.length > 0 && (
           <>
             <CommandSeparator />
-            <CommandGroup heading="Recent Runs">
+            <CommandGroup heading="Inspect execution">
               {runRows.map((run) => {
                 const phase = rowPhaseOf(run);
                 return (

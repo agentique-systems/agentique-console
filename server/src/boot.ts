@@ -34,6 +34,7 @@ export async function bootApp(app: App): Promise<BootReport> {
     return report;
   }
   app.admission.set("ready");
+  app.conversations.recover();
   const reconstructed = await app.host.reconstruct();
   const report: BootReport = { recovery, reconstructed };
   app.boot = report;

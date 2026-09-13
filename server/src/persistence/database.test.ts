@@ -60,12 +60,12 @@ describe("openDatabase", () => {
     legacy.close();
     const current = openDatabase(file);
     try {
-      expect(current.schemaInfo.version).toBe(2);
-      expect(current.sqlite.prepare("SELECT * FROM runs").get()).toEqual({ ...runBefore as object, execution: null });
+      expect(current.schemaInfo.version).toBe(4);
+      expect(current.sqlite.prepare("SELECT * FROM runs").get()).toEqual({ ...runBefore as object, execution: null, mode: null });
       expect(current.sqlite.prepare("SELECT * FROM context_manifests").get()).toEqual(manifestBefore);
       expect(current.sqlite.prepare("SELECT * FROM events").get()).toEqual(eventBefore);
       expect(() => current.sqlite.prepare("UPDATE runs SET execution = ? WHERE id = 'run_old'").run('{"provider":"codex","model":"gpt-5.6-terra"}')).toThrow(/immutable/);
-      expect(current.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toEqual({ n: 2 });
+      expect(current.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toEqual({ n: 4 });
     } finally { current.close(); }
   });
 
@@ -103,7 +103,7 @@ describe("openDatabase", () => {
       expect(second.disposition).toBe("opened");
       expect(second.schemaInfo).toEqual(EXPECTED_SCHEMA_INFO);
       expect(second.sqlite.prepare("SELECT count(*) AS n FROM workspaces").get()).toEqual({ n: 1 });
-      expect(second.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toEqual({ n: 2 });
+      expect(second.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toEqual({ n: 4 });
     } finally {
       second.close();
     }

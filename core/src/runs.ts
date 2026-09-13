@@ -122,6 +122,8 @@ export const runTargetSchema: z.ZodType<RunTarget> = z.discriminatedUnion("kind"
 ]);
 
 export interface Run {
+  /** Internal conversation context; omitted on ordinary work Runs. */
+  mode?: "conversation";
   /** Immutable execution override, pinned into each Invocation's manifest. Absent on older Runs. */
   execution?: import("./providers.ts").ExecutionSelection;
   id: RunId;
@@ -288,6 +290,7 @@ export const RUN_MACHINE = defineStateMachine<RunStatus>("Run", RUN_STATUSES, {
 
 export const runSchema: z.ZodType<Run> = z
   .strictObject({
+    mode: z.literal("conversation").optional(),
     execution: executionSelectionSchema.optional(),
     id: idSchema("run"),
     conversationId: idSchema("conversation"),
@@ -340,6 +343,7 @@ export const runSchema: z.ZodType<Run> = z
   });
 
 export interface RunInput {
+  mode?: "conversation";
   execution?: import("./providers.ts").ExecutionSelection;
   conversationId: ConversationId;
   kind: RunKind;
@@ -353,6 +357,7 @@ export interface RunInput {
 
 export const runInputSchema: z.ZodType<RunInput> = z
   .strictObject({
+    mode: z.literal("conversation").optional(),
     execution: executionSelectionSchema.optional(),
     conversationId: idSchema("conversation"),
     kind: z.enum(RUN_KINDS),

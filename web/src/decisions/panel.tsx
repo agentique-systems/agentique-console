@@ -97,7 +97,7 @@ function DecisionMeta({ view }: { view: DecisionView }) {
 }
 
 /** An open (or supersedable) Decision with its resolution form. */
-function DecisionCard({ view, overview }: { view: DecisionView; overview: RunOverview }) {
+export function DecisionCard({ view, overview, inline = false }: { view: DecisionView; overview: RunOverview; inline?: boolean }) {
   const { decision, action } = view;
   const actions = useDecisionActions(overview.run.id);
   const [rationale, setRationale] = useState("");
@@ -110,7 +110,7 @@ function DecisionCard({ view, overview }: { view: DecisionView; overview: RunOve
       <header className="flex flex-col gap-1.5">
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={decision.status} variant="pill" />
-          <DecisionMeta view={view} />
+          {inline ? <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Decision details</summary><DecisionMeta view={view} /></details> : <DecisionMeta view={view} />}
         </div>
         <h3 className="text-sm font-medium leading-5">{decision.question}</h3>
         {decision.rationale !== null && <p className="text-xs text-muted-foreground">{decision.rationale}</p>}

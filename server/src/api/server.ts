@@ -13,6 +13,7 @@ import type { AppContext } from "../context.ts";
 import { ApiError, toApiError } from "./errors.ts";
 import { handleEvents } from "./events.ts";
 import { routeHandlers } from "./routes/index.ts";
+import { authorizeSettings } from "./settings-security.ts";
 
 /** Every route the server registered, as `METHOD path`: what the contract test compares against the route table. */
 export interface RegisteredRoutes {
@@ -23,6 +24,12 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: API_BODY_MAX_BYTES });
   const registered: string[] = [];
   app.decorate("registeredRoutes", registered);
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.routeOptions.url?.startsWith("/api/settings") || request.url.split("?")[0]?.startsWith("/api/settings")) {
+      reply.header("cache-control", "no-store");
+      authorizeSettings(request, ctx.app.config);
+    }
+  });
   app.addHook("onRoute", (route) => {
     for (const method of Array.isArray(route.method) ? route.method : [route.method]) if (method !== "HEAD") registered.push(`${method} ${route.url}`);
   });
@@ -54,7 +61,8 @@ export function buildServer(ctx: AppContext): FastifyInstance {
       void reply.status(400).send(new ApiError("bad_request", fastifyError.message ?? "bad request").body());
       return;
     }
-    ctx.log.error(error);
+    if (_request.routeOptions.url?.startsWith("/api/settings") || _request.url.startsWith("/api/settings")) ctx.log.error("Settings operation failed (details withheld).");
+    else ctx.log.error(error);
     void reply.status(500).send(new ApiError("internal", "internal error").body());
   });
 

@@ -18,6 +18,7 @@
  * refused.
  */
 import { z } from "zod";
+import type { SettingsResponse, SettingsExport, SettingsValues, ConnectionTestResult } from "./settings.ts";
 import type { AgentDefinition, AgentDefinitionRevision } from "./agents.ts";
 import type { Artifact } from "./artifacts.ts";
 import { allocationSchema, budgetLimitsSchema, BUDGET_INCREASE_PARTITIONS, type Allocation, type AllocationExtension, type BudgetIncrease, type BudgetIncreasePartition, type BudgetLimits, type PlanNodeAllocationProjection, type RunCapacity } from "./budgets.ts";
@@ -63,7 +64,7 @@ import type { RuntimeToolCall } from "./runtime-tools.ts";
 import type { SignoffResolution } from "./signoff.ts";
 import type { Task, TaskBlockReason } from "./tasks.ts";
 import type { Usage, UsageTotals } from "./usage.ts";
-import { idSchema } from "./validation.ts";
+import { idSchema, utf8ByteLength } from "./validation.ts";
 import type { Evaluation, Gate } from "./verification.ts";
 import { publicationStrategyRequestSchema, type Changeset, type PublicationStrategy, type PublicationStrategyRequest, type Snapshot } from "./workspace-state.ts";
 import { WORKSPACE_KINDS, type Workspace, type WorkspaceKind } from "./workspaces.ts";
@@ -231,6 +232,14 @@ export interface ApiRoute {
 }
 
 export const API_ROUTES = {
+  settings: { method: "GET", path: "/api/settings" },
+  saveSettings: { method: "PATCH", path: "/api/settings" },
+  testConnection: { method: "POST", path: "/api/settings/test-connection" },
+  testMcp: { method: "POST", path: "/api/settings/test-mcp" },
+  exportSettings: { method: "GET", path: "/api/settings/export" },
+  importSettings: { method: "POST", path: "/api/settings/import" },
+  resetSettings: { method: "POST", path: "/api/settings/reset" },
+  interfaceSettings: { method: "GET", path: "/api/interface-settings" },
   // system
   health: { method: "GET", path: "/api/health" },
   config: { method: "GET", path: "/api/config" },
@@ -373,8 +382,13 @@ export type ConversationCreateBody = z.infer<typeof conversationCreateBodySchema
 export const conversationUpdateBodySchema = z.strictObject({ title: boundedText(200).nullable() });
 export type ConversationUpdateBody = z.infer<typeof conversationUpdateBodySchema>;
 
-/** An operator message: recorded on the Conversation and, while a Run is active, queued as a typed input of the Orchestrator's next turn. */
-export const messageBodySchema = z.strictObject({ content: z.string().min(1).max(OPERATOR_MESSAGE_MAX_BYTES) });
+/** An operator message: durably admitted to the Orchestrator, with an optional retry receipt and initial model selection. */
+export const messageBodySchema = z.strictObject({
+  content: z.string().trim().min(1).refine((value) => utf8ByteLength(value) <= OPERATOR_MESSAGE_MAX_BYTES, `at most ${OPERATOR_MESSAGE_MAX_BYTES} UTF-8 bytes`),
+  requestId: z.string().min(1).max(128).optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+});
 export type MessageBody = z.infer<typeof messageBodySchema>;
 
 /**
@@ -606,6 +620,7 @@ export interface AgentDefinitionResponse {
 export interface ConversationResponse {
   conversation: Conversation;
   activeRun: Run | null;
+  dialogueRun?: Run | null;
   runs: number;
 }
 
@@ -913,6 +928,14 @@ export type EventStreamFrame =
 
 /** The response types of every route; a content route streams bytes and has none here. */
 export interface ApiResponses {
+  settings: SettingsResponse;
+  saveSettings: SettingsResponse;
+  testConnection: ConnectionTestResult;
+  testMcp: ConnectionTestResult;
+  exportSettings: SettingsExport;
+  importSettings: SettingsResponse;
+  resetSettings: SettingsResponse;
+  interfaceSettings: SettingsValues["general"];
   health: HealthResponse;
   config: ConfigResponse;
   capacity: CapacityResponse;

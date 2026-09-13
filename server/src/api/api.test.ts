@@ -98,7 +98,7 @@ describe("the API contract", () => {
   it("answers health and safe configuration without a credential, a key, or a filesystem path", async () => {
     const health = await t.call<HealthResponse>("health");
     expect(health.status).toBe(200);
-    expect(health.body).toMatchObject({ ok: true, admission: "ready", database: { disposition: "initialized", schemaVersion: 2 } });
+    expect(health.body).toMatchObject({ ok: true, admission: "ready", database: { disposition: "initialized", schemaVersion: 4 } });
     expect(health.body.recovery).toMatchObject({ blobsComplete: true, interruptedAttempts: 0 });
     const config = await t.call<ConfigResponse>("config");
     expect(config.status).toBe(200);

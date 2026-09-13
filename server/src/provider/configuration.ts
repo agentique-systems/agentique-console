@@ -5,11 +5,12 @@ import { executionSelectionSchema, MODEL_EFFORTS, type ExecutionSelection, type 
 export const PROVIDER_IDS = ["claude", "codex", "ai-sdk"] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 export interface ProviderConfiguration {
+  claudeEnvironment?: NodeJS.ProcessEnv;
   defaults: ExecutionSelection;
   models: Record<ProviderId, ProviderModel[]>;
   defaultModels: Record<ProviderId, string>;
   codex: { home: string; apiKey?: string; baseUrl?: string; codexPathOverride?: string };
-  aiSdk: { openai: { apiKey?: string; baseURL?: string }; anthropic: { apiKey?: string; baseURL?: string }; gateway: { apiKey?: string; baseURL?: string }; harness?: "pi" };
+  aiSdk: { openai: { apiKey?: string; baseURL?: string; noAuth?: boolean }; anthropic: { apiKey?: string; baseURL?: string }; gateway: { apiKey?: string; baseURL?: string }; harness?: "pi" };
 }
 
 export class ProviderConfigError extends Error {

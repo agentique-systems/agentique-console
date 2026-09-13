@@ -33,6 +33,7 @@ const evidenceList = z.array(EVIDENCE_SHAPE);
 
 /** The typed result of an Attempt (`return_result`), field for field the runtime's InvocationResult contract. */
 export const RETURN_RESULT_SHAPE: RuntimeToolShape = {
+  conversation: z.object({ reply: z.string().min(1).max(16_384), work: z.string().min(1).max(16_384).nullable() }).optional().describe("Orchestrator reply to the operator. Only a conversation context may request execution with work; all other turns set work null."),
   status: z.enum(RESULT_STATUSES).describe("completed when the work is done; blocked when a Decision or approval must resolve first; failed when the work cannot be done"),
   artifactIds: ids("Artifact").describe("the Artifacts this Invocation produced and reports as its outputs (created through write_artifact or named in the manifest)"),
   tasks: z.array(z.object({ taskId: id("Task"), status: z.enum(TASK_RESULT_STATUSES), evidence: evidenceList, blocker: z.string().nullable() })).describe("a report per owned Task; a completed Task carries Evidence"),

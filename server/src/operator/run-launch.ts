@@ -62,13 +62,16 @@ export interface LaunchedRun {
 }
 
 export class RunLaunchService {
+  workspaceDefaults: (id: string) => import("@agentique-console/core").WorkspaceSettings = () => ({});
   constructor(
     private readonly runtime: ConsoleRuntime,
     private readonly defaults: LaunchDefaults,
   ) {}
 
   /** Creates the Run (and, unless `start` is false, starts it) from the operator's goal and defaults, atomically; every refusal names its cause. */
-  launch(conversationId: ConversationId, body: RunCreateBody): LaunchedRun {
+  launch(conversationId: ConversationId, body: RunCreateBody, message?: ConversationMessage): LaunchedRun {
+    const workspaceSettings = this.workspaceDefaults(this.runtime.stores.conversations.get(conversationId).workspaceId);
+    body = { ...workspaceSettings, ...body };
     const execution = this.runtime.providers?.select({ ...(body.provider === undefined ? {} : { provider: body.provider }), ...(body.model === undefined ? {} : { model: body.model }) });
     if (execution === undefined && (body.provider !== undefined || body.model !== undefined)) throw new ValidationError("Provider/model selection requires a provider registry");
     const { stores, ctx } = this.runtime;
@@ -111,7 +114,7 @@ export class RunLaunchService {
         },
       });
       // The complete goal is the Run's first operator message, recorded now so a deferred start delivers exactly it.
-      const goal = stores.conversations.postMessage({ conversationId, author: "operator", content: body.goal, runId: created.run.id, invocationId: null });
+      const goal = message ?? stores.conversations.postMessage({ conversationId, author: "operator", content: body.goal, runId: created.run.id, invocationId: null });
       const run = body.start === false ? created.run : this.runtime.runStart.start({ runId: created.run.id, conversationMessageId: goal.id }).run;
       return { run, requirementRevision: authored?.revision ?? null, criterionIds: authored?.criterionIds ?? [] };
     });

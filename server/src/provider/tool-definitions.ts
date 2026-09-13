@@ -22,4 +22,4 @@ export const RUNTIME_TOOL_DESCRIPTIONS: Readonly<Record<ExecutableRuntimeTool, s
 
 export const RETURN_RESULT_TOOL = "return_result";
 export const RETURN_RESULT_DESCRIPTION = "Return the typed result of this Attempt exactly once, then stop.";
-export const AGENT_INSTRUCTIONS = "Execute exactly one Agentique Attempt using the supplied manifest. Use only the supplied tools. Finish by calling return_result exactly once with the manifest's typed result. Stop immediately when a tool ends the Attempt. Operator questions go through request_decision.";
+export const AGENT_INSTRUCTIONS = "Execute exactly one Agentique Attempt using the supplied manifest. Use only the supplied tools. Finish by calling return_result exactly once with the manifest's typed result. Stop immediately when a tool ends the Attempt. Follow the manifest's conversation instructions; execution decisions use request_decision when available.";

@@ -91,6 +91,7 @@ export interface RunVerificationRequest {
 }
 
 export interface RunCreationRequest {
+  mode?: "conversation";
   execution?: import("@agentique-console/core").ExecutionSelection;
   conversationId: ConversationId;
   kind: RunKind;
@@ -107,6 +108,7 @@ export interface RunCreationRequest {
 }
 
 const runCreationRequestSchema: z.ZodType<RunCreationRequest> = z.strictObject({
+  mode: z.literal("conversation").optional(),
   execution: executionSelectionSchema.optional(),
   conversationId: idSchema("conversation"),
   kind: z.enum(RUN_KINDS),
@@ -152,9 +154,14 @@ export class RunCreationService {
    * failure creates nothing; a persistence failure after preparation runs
    * the port's compensation after the database rolls back.
    */
-  create(request: RunCreationRequest): CreatedRun {
+  create(request: RunCreationRequest & { mode: "conversation" }): Omit<CreatedRun, "baseSnapshot"> & { baseSnapshot: Snapshot | null };
+  create(request: RunCreationRequest): CreatedRun;
+  create(request: RunCreationRequest): Omit<CreatedRun, "baseSnapshot"> & { baseSnapshot: Snapshot | null } {
     const valid = parseOrThrow(runCreationRequestSchema, request, "Run creation request");
     const finalReserve = valid.finalReserve ?? this.policy.finalReserve[valid.kind];
+    if (valid.mode === "conversation" && (valid.kind !== "other" || finalReserve.costUsd !== 0 || finalReserve.tokens !== 0 || finalReserve.attempts !== 0 || valid.verificationPolicy !== undefined)) {
+      throw new ValidationError("a conversation context has kind other, no final reserve, and no work verification policy");
+    }
     const allocation = valid.orchestratorAllocation ?? this.policy.initialOrchestratorAllocation;
     const budget = allocationOfLimits(valid.budget);
     if (!allocationFits(finalReserve, budget)) {
@@ -228,17 +235,17 @@ export class RunCreationService {
     const meta = { correlationId: valid.correlationId ?? null };
     return this.ctx.tx.write(() => {
       const created = this.stores.runs.create(
-        { conversationId: conversation.id, kind: valid.kind, target: valid.target, budget: valid.budget, finalReserve, verificationPolicy, ...(valid.execution === undefined ? {} : { execution: valid.execution }) },
+        { ...(valid.mode === undefined ? {} : { mode: valid.mode }), conversationId: conversation.id, kind: valid.kind, target: valid.target, budget: valid.budget, finalReserve, verificationPolicy, ...(valid.execution === undefined ? {} : { execution: valid.execution }) },
         meta,
       );
-      const preparation: RunWorkspacePreparationRequest = { runId: created.id, workspace, target: valid.target };
-      const prepared = this.workspacePreparation.prepare(preparation);
-      this.ctx.tx.afterRollback(() => this.workspacePreparation.discard(preparation, prepared));
-      const baseSnapshot = this.stores.snapshots.record(
-        { workspaceId: workspace.id, runId: created.id, identity: prepared.baseSnapshot, reason: "run_start" },
-        meta,
-      );
-      this.stores.runs.recordWorkspaceState(created.id, { baseSnapshotId: baseSnapshot.id, integrationWorkspacePath: prepared.integrationWorkspacePath });
+      let baseSnapshot: Snapshot | null = null;
+      if (valid.mode !== "conversation") {
+        const preparation: RunWorkspacePreparationRequest = { runId: created.id, workspace, target: valid.target };
+        const prepared = this.workspacePreparation.prepare(preparation);
+        this.ctx.tx.afterRollback(() => this.workspacePreparation.discard(preparation, prepared));
+        baseSnapshot = this.stores.snapshots.record({ workspaceId: workspace.id, runId: created.id, identity: prepared.baseSnapshot, reason: "run_start" }, meta);
+        this.stores.runs.recordWorkspaceState(created.id, { baseSnapshotId: baseSnapshot.id, integrationWorkspacePath: prepared.integrationWorkspacePath });
+      }
       const planRevision = this.stores.plans.appendRevision(created.id, { version: 1, expressions: [] }, null, meta);
       const rootId = this.ctx.ids("planNode");
       const root: PatternPlanNodeDefinition = {

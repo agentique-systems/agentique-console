@@ -155,7 +155,7 @@ function EntryList({ entries }: { entries: ProposedRequirement[] }) {
   );
 }
 
-function ProposalReview({ proposal, overview }: { proposal: RequirementProposal; overview: RunOverview }) {
+export function ProposalReview({ proposal, overview, inline = false }: { proposal: RequirementProposal; overview: RunOverview; inline?: boolean }) {
   const review = useProposalReview(overview.run.id, overview.conversation.id);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(() => JSON.stringify(proposal.entries, null, 2));
@@ -202,7 +202,7 @@ function ProposalReview({ proposal, overview }: { proposal: RequirementProposal;
         <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-status-failed" onClick={() => review.reject.mutate({ proposalId: proposal.id, body: { rationale: rationale.trim() === "" ? null : rationale } })} disabled={review.reject.isPending} data-testid="proposal-reject">
           Reject
         </Button>
-        <span className="text-2xs text-muted-foreground">Approval creates a new revision (kept Requirements keep their ids); the Orchestrator learns the outcome in its next turn.</span>
+        <span className="text-2xs text-muted-foreground">{inline ? "The Orchestrator will continue with your decision." : "Approval creates a new revision (kept Requirements keep their ids); the Orchestrator learns the outcome in its next turn."}</span>
         {(review.approve.isError || review.reject.isError) && <span className="text-xs text-status-failed">{errorMessage(review.approve.error ?? review.reject.error)}</span>}
       </div>
     </section>

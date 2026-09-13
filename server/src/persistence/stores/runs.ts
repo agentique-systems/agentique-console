@@ -34,6 +34,7 @@ function toDomain(row: Row): Run {
     runSchema,
     {
       id: row.id,
+      ...(row.mode === null ? {} : { mode: row.mode }),
       ...(row.execution === null ? {} : { execution: row.execution }),
       conversationId: row.conversationId,
       workspaceId: row.workspaceId,
@@ -106,6 +107,7 @@ export class RunStore {
       }
       const now = this.ctx.clock();
       const run: Run = {
+        ...(valid.mode === undefined ? {} : { mode: valid.mode }),
         ...(valid.execution === undefined ? {} : { execution: valid.execution }),
         id: this.ctx.ids("run"),
         conversationId: conversation.id,
@@ -140,7 +142,7 @@ export class RunStore {
       this.ctx.db.insert(runs).values(this.toRow(run)).run();
       // Claims the Conversation's single active-Run slot in the same transaction;
       // a second active Run rolls the whole creation back.
-      this.conversations.setActiveRun(conversation.id, run.id, options);
+      if (run.mode !== "conversation") this.conversations.setActiveRun(conversation.id, run.id, options);
       return run;
     });
   }
@@ -466,6 +468,7 @@ export class RunStore {
 
   private toRow(run: Run): Row {
     return {
+      mode: run.mode ?? null,
       execution: run.execution ?? null,
       id: run.id,
       conversationId: run.conversationId,

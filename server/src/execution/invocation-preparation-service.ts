@@ -192,6 +192,10 @@ export class InvocationPreparationService {
       const revision = this.revision(run, valid, resolved.agentDefinitionRevisionId);
       // The purpose narrows the role policy: a final_synthesis turn is read-only whatever the Orchestrator definition declares (§10).
       const policy = effectiveCapabilityPolicy(revision, valid.role, this.config.workspacePolicy, valid.purpose);
+      if (run.mode === "conversation") {
+        policy.capabilities = { tools: [], mcpServers: [] };
+        policy.toolPolicy = {};
+      }
       const tasks = this.tasks(run, node, valid, resolved.taskIds);
       this.assertContinuation(run, node, valid);
       const funding = valid.funding ?? { source: "plan_node" };
@@ -220,8 +224,8 @@ export class InvocationPreparationService {
       // Workspace preparation is an external side effect inside the transaction; its compensation runs only on rollback.
       const writes = grantsWriteCapability(policy);
       const workspaceRequest: ExecutionWorkspaceRequest = { runId: run.id, invocationId: invocation.id, role: valid.role, writes, integrationWorkspacePath: run.integrationWorkspacePath, integrationSnapshot: this.integrationSnapshot(run) };
-      const prepared = this.workspace.prepare(workspaceRequest);
-      this.ctx.tx.afterRollback(() => this.workspace.discard(workspaceRequest, prepared));
+      const prepared = run.mode === "conversation" ? { worktreePath: null, startingSnapshot: null } : this.workspace.prepare(workspaceRequest);
+      if (run.mode !== "conversation") this.ctx.tx.afterRollback(() => this.workspace.discard(workspaceRequest, prepared));
       if (writes && prepared.startingSnapshot === null) throw new ValidationError("a writing Invocation needs a starting Snapshot from the execution-workspace port");
       // A writing Invocation's worktree is a durable cleanup obligation from this moment; a read-only one owns nothing to clean up.
       let obliged = invocation;

@@ -201,10 +201,10 @@ describe("the application path over HTTP", () => {
     expect(ledger.items[0]!.task.status).toBe("pending");
     await idle(w, runId);
     const revisionId = await implementerRevision(w);
-    t.sdk.script(planTurn(revisionId, [taskId]), workerTurn(taskId), ...completionTurns());
+    t.sdk.script({ steps: [returned("I will continue the work.", { conversation: { reply: "I will continue the work.", work: "Go ahead with the plan." } })] }, planTurn(revisionId, [taskId]), workerTurn(taskId), ...completionTurns());
     const posted = await t.call<{ message: { id: string }; queued: unknown }>("postConversationMessage", { params: { conversationId }, body: { content: "Go ahead with the plan." } });
     expect(posted.status).toBe(201);
-    expect(posted.body.queued).not.toBeNull();
+    expect(posted.body.message.id).toBeTruthy();
 
     // 5. The Worker's change is integrated, the real check runs, the completion Gate passes, the final report is written.
     const awaiting = await phaseIs(w, runId, ["awaiting_signoff"], 120_000);
@@ -325,7 +325,7 @@ describe("the application path over HTTP", () => {
     const taskId = ledger.items[0]!.task.id;
     await idle(w, runId);
     // The Worker hangs until it is interrupted: the shutdown is what ends it.
-    w.t.sdk.script({ steps: [{ kind: "tool_use", name: tool("revise_execution_plan"), input: { source: planSource(revisionId, [taskId]) } }, returned("Planned.")] }, { steps: [{ kind: "hang" }] });
+    w.t.sdk.script({ steps: [returned("I will continue the work.", { conversation: { reply: "I will continue the work.", work: "Proceed." } })] }, { steps: [{ kind: "tool_use", name: tool("revise_execution_plan"), input: { source: planSource(revisionId, [taskId]) } }, returned("Planned.")] }, { steps: [{ kind: "hang" }] });
     await w.t.call("postConversationMessage", { params: { conversationId: w.conversationId }, body: { content: "Proceed." } });
     const running = await until(() => overview(w, runId), (o) => o.phase === "running" && (o.projection?.inFlight.length ?? 0) > 0 && w.t.sdk.remainingTurns === 0, "the Worker in flight");
     const workerInvocationId = running.projection!.inFlight[0]!;
@@ -405,7 +405,7 @@ async function completeThroughSignoff(w: World): Promise<string> {
   const ledger = await until(() => w.t.call<TaskLedgerResponse>("listRunTasks", { params: { runId } }).then((r) => r.body), (l) => l.items.length === 1, "one Task", 60_000, () => attemptsOf(w, runId));
   const taskId = ledger.items[0]!.task.id;
   await idle(w, runId);
-  w.t.sdk.script(planTurn(revisionId, [taskId]), workerTurn(taskId), ...completionTurns());
+  w.t.sdk.script({ steps: [returned("I will continue the work.", { conversation: { reply: "I will continue the work.", work: "Go ahead with the plan." } })] }, planTurn(revisionId, [taskId]), workerTurn(taskId), ...completionTurns());
   await w.t.call("postConversationMessage", { params: { conversationId: w.conversationId }, body: { content: "Proceed." } });
   await phaseIs(w, runId, ["awaiting_signoff"], 120_000);
   const signoff = await w.t.call<SignoffResponse>("getRunSignoff", { params: { runId } });

@@ -8,13 +8,14 @@ Orchestration resolves that contract; it does not branch on backend names.
 
 ## Selection and persistence
 
-The Run launcher always exposes Provider and provider-aware Model controls.
-Changing provider resets the model to that provider's configured default.
-Unavailable credentials and limitations are shown before launch. The API
-accepts optional `provider` and `model` on
-`POST /api/conversations/:conversationId/runs`; omitting them uses deployment
-defaults. Unknown providers, unconfigured models, and missing credentials
-are rejected before any Run or Requirement is written.
+[Settings ? Providers & models](settings.md) is the browser configuration
+editor. Saved defaults and supported workspace overrides select the model for
+new conversations; deployment values enforce their mapped defaults. Existing
+conversations preserve their selected provider and model. The composer links
+to Settings and displays its selection without another configuration editor.
+The existing API accepts optional provider/model selection when admitting a new
+conversation context. Unknown providers, unsupported model IDs and missing
+credential configuration are refused before recording a partial message.
 
 The chosen pair is an immutable `run.execution` value and overrides model
 identity on **every invocation in that Run**, including workers, reviewers,
@@ -33,7 +34,10 @@ models still in use if authoritative dollar accounting is required.
 
 ## Configuration
 
-Set environment variables before starting the server; `.env` files are not
+Use Settings for supported instance configuration. See the [Settings guide](settings.md)
+for encrypted storage, exact endpoint trust, non-billable verification and
+restart requirements. Deployment variables enforce their corresponding
+settings. Set environment variables before starting the server; `.env` files are not
 automatically loaded. No secret or local credential path is returned by
 `GET /api/config`. Readiness means a configured credential source exists,
 not that a remote account has been authenticated or has model entitlement.

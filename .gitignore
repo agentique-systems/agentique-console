@@ -3,3 +3,4 @@ dist/
 data/
 *.tsbuildinfo
 .env
+web/test-artifacts/

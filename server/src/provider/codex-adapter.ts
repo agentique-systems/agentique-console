@@ -16,6 +16,7 @@ export interface CodexClient {
   resumeThread(id: string, options?: ThreadOptions): Pick<Thread, "runStreamed" | "id">;
 }
 export interface CodexAdapterConfig {
+  trustedEndpointOrigins?: string[];
   home: string;
   fallbackWorkingDirectory: string;
   apiKey?: string;
@@ -49,7 +50,7 @@ export class CodexSdkAdapter implements ProviderAdapter {
       const modelInfo = this.config.models?.find((m) => m.id === request.model);
       if (modelInfo?.efforts.length && !modelInfo.efforts.includes(request.effort)) throw new Error("invalid request: reasoning effort is unsupported for this model");
       addLocalTools(attempt, cwd);
-      closeMcp = await addMcpTools(attempt, this.config.mcpServers ?? {});
+      closeMcp = await addMcpTools(attempt, this.config.mcpServers ?? {}, this.config.trustedEndpointOrigins);
       bridge = await startMcpBridge(attempt);
       await fs.mkdir(this.config.home, { recursive: true });
       const source = this.config.environment ?? process.env;
@@ -74,7 +75,7 @@ export class CodexSdkAdapter implements ProviderAdapter {
           ...(catalog ? { model_catalog_json: catalog.filename } : {}),
           agents: { enabled: false },
           tools: { experimental_request_user_input: { enabled: false }, update_plan: { enabled: false } },
-          features: { shell_tool: false, unified_exec: false, multi_agent: false, multi_agent_v2: false, apps: false, plugins: false, hooks: false, memories: false, goals: false, browser_use: false, computer_use: false, image_generation: false, view_image: false, code_mode: false, code_mode_host: false, skill_search: false, skill_mcp_dependency_install: false, skip_host_skill_discovery: true, shell_snapshot: false, sleep_tool: false, worktrees: false },
+          features: { responses_websockets: false, responses_websockets_v2: false, shell_tool: false, unified_exec: false, multi_agent: false, multi_agent_v2: false, apps: false, plugins: false, hooks: false, memories: false, goals: false, browser_use: false, computer_use: false, image_generation: false, view_image: false, code_mode: false, code_mode_host: false, skill_search: false, skill_mcp_dependency_install: false, skip_host_skill_discovery: true, shell_snapshot: false, sleep_tool: false, worktrees: false },
           web_search: "disabled",
           mcp_servers: { agentique: { url: bridge.url, bearer_token_env_var: "AGENTIQUE_MCP_TOKEN", required: true, tool_timeout_sec: Math.ceil(attempt.limits.toolTimeoutMs / 1000) } },
         },

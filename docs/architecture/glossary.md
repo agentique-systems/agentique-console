@@ -71,7 +71,9 @@ The operator's ordered exchange with the Orchestrator inside one Workspace.
 A Conversation persists across Runs: it carries the operator messages, the
 Orchestrator's replies, and the Decisions, Requirements, and Artifacts that
 earlier Runs produced, so a later Run can reference them by id. A
-Conversation has zero or more Runs and at most one active Run at a time.
+Conversation has zero or more work Runs and at most one active work Run at a time.
+It also has at most one restricted internal conversation context using the same
+execution engine; see [conversation admission](conversation-operator.md).
 
 - Id prefix: `cv_`; `cvm_` for a Conversation message
 - Owned by: the operator (messages) and the runtime (structure)

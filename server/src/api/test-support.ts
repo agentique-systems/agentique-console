@@ -18,6 +18,7 @@ import type { ProviderAdapter } from "../provider/adapter.ts";
 import type { PublicationHooks } from "../workspace-state/index.ts";
 
 export interface TestAppOptions {
+  connectionCheckHttp?: import("../provider/connection-check.ts").CheckHttp;
   /** The directory the app's state and the browse roots live under; a fresh temporary one by default. */
   dir?: string;
   env?: NodeJS.ProcessEnv;
@@ -72,7 +73,7 @@ export async function openTestApp(options: TestAppOptions = {}): Promise<TestApp
   const dir = options.dir ?? newAppDirectory();
   const config = loadConfig(testEnv(dir, options.env ?? {}), dir);
   const sdk = options.sdk ?? new FakeClaudeSdk();
-  const app = createApp({ config, sdk, ...(options.adapterOverrides === undefined ? {} : { adapterOverrides: options.adapterOverrides }), ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }), ...(options.events === undefined ? {} : { events: options.events }), ...(options.responseMaxBytes === undefined ? {} : { responseMaxBytes: options.responseMaxBytes }) });
+  const app = createApp({ config, sdk, ...(options.connectionCheckHttp ? { connectionCheckHttp: options.connectionCheckHttp } : {}), ...(options.adapterOverrides === undefined ? {} : { adapterOverrides: options.adapterOverrides }), ...(options.publicationHooks === undefined ? {} : { publicationHooks: options.publicationHooks }), ...(options.events === undefined ? {} : { events: options.events }), ...(options.responseMaxBytes === undefined ? {} : { responseMaxBytes: options.responseMaxBytes }) });
   if (options.boot !== false) await bootApp(app);
   await app.server.ready();
   const raw: TestApp["raw"] = async (method, url, body) => {

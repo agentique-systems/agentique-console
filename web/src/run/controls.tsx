@@ -15,7 +15,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
  * through its canonical service. Pause is one click (soft); the hard variant
  * sits one menu away; cancelling asks first.
  */
-export function RunControls({ overview }: { overview: RunOverview }) {
+export function RunControls({ overview, inline = false }: { overview: RunOverview; inline?: boolean }) {
   const control = useRunControl(overview.run.id);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const status = overview.run.status;
@@ -34,7 +34,7 @@ export function RunControls({ overview }: { overview: RunOverview }) {
                 Pause
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Stop admitting new work; running Attempts finish.</TooltipContent>
+            <TooltipContent>{inline ? "Pause after the current step finishes." : "Stop admitting new work; running Attempts finish."}</TooltipContent>
           </Tooltip>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -45,11 +45,11 @@ export function RunControls({ overview }: { overview: RunOverview }) {
             <DropdownMenuContent align="end" className="w-72">
               <DropdownMenuItem onSelect={() => control.pause.mutate({ mode: "soft" }, { onError: fail })} className="flex-col items-start gap-0.5">
                 <span className="font-medium">Pause</span>
-                <span className="text-xs text-muted-foreground">Stop admitting new work; running Attempts finish and their results are kept.</span>
+                <span className="text-xs text-muted-foreground">{inline ? "Finish the current step, then wait for you to resume." : "Stop admitting new work; running Attempts finish and their results are kept."}</span>
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => control.pause.mutate({ mode: "hard" }, { onError: fail })} className="flex-col items-start gap-0.5" data-testid="pause-hard">
-                <span className="font-medium">Hard pause</span>
-                <span className="text-xs text-muted-foreground">Also interrupt running Attempts now; they are retried after you resume.</span>
+                <span className="font-medium">{inline ? "Stop now" : "Hard pause"}</span>
+                <span className="text-xs text-muted-foreground">{inline ? "Interrupt the current step. You can resume it later." : "Also interrupt running Attempts now; they are retried after you resume."}</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -63,7 +63,7 @@ export function RunControls({ overview }: { overview: RunOverview }) {
               Resume
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{overview.run.operatorPause === "hard" ? "Hard-paused: interrupted Attempts retry once resumed." : "Soft-paused: new work resumes admission."}</TooltipContent>
+          <TooltipContent>{inline ? "Continue from the saved state." : overview.run.operatorPause === "hard" ? "Hard-paused: interrupted Attempts retry once resumed." : "Soft-paused: new work resumes admission."}</TooltipContent>
         </Tooltip>
       )}
       {!terminal && (
@@ -75,17 +75,17 @@ export function RunControls({ overview }: { overview: RunOverview }) {
                 Cancel
               </Button>
             </TooltipTrigger>
-            <TooltipContent>End the Run; nothing is published.</TooltipContent>
+            <TooltipContent>{inline ? "Stop this work permanently." : "End the Run; nothing is published."}</TooltipContent>
           </Tooltip>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Cancel this Run?</AlertDialogTitle>
-              <AlertDialogDescription>Running Attempts are interrupted and the Run ends as cancelled. Its worktrees are released; the Target is not touched. This cannot be undone, but a new Run can start from the same Conversation.</AlertDialogDescription>
+              <AlertDialogTitle>{inline ? "Stop this work?" : "Cancel this Run?"}</AlertDialogTitle>
+              <AlertDialogDescription>{inline ? "This ends the current work without publishing it. You can ask for new work in this conversation. Use Pause if you want to resume instead." : "Running Attempts are interrupted and the Run ends as cancelled. Its worktrees are released; the Target is not touched. This cannot be undone, but a new Run can start from the same Conversation."}</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Keep running</AlertDialogCancel>
               <AlertDialogAction variant="destructive" onClick={() => control.cancel.mutate(undefined, { onError: fail })} disabled={control.cancel.isPending} data-testid="cancel-confirm">
-                Cancel the Run
+                {inline ? "Stop work" : "Cancel the Run"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

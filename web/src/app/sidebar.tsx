@@ -1,3 +1,4 @@
+import { ConversationList } from "@/conversation/history";
 import { PanelLeftCloseIcon, PanelLeftOpenIcon, SearchIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router";
 import type { WorkspaceResponse } from "@agentique-console/core";
@@ -26,6 +27,7 @@ export function Sidebar({ workspace, onOpenPalette, inSheet = false, onNavigate 
   const toggle = useUiStore((s) => s.toggleSidebar);
   const collapsed = inSheet ? false : collapsedPreference;
   const { pathname } = useLocation();
+  const conversationId = /^\/conversations\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const needsOperator = useNeedsOperatorCount(workspace.workspace.id);
   return (
     <aside data-testid="sidebar" data-collapsed={collapsed || undefined} className={cn("flex h-full shrink-0 flex-col bg-sidebar text-sidebar-foreground", inSheet ? "w-full" : "border-r border-sidebar-border", collapsed ? "w-14" : "w-60")}>
@@ -69,10 +71,11 @@ export function Sidebar({ workspace, onOpenPalette, inSheet = false, onNavigate 
         </Tooltip>
       </div>
 
-      <nav aria-label="Primary navigation" className={cn("flex flex-1 flex-col gap-0.5 px-2", collapsed && "items-center")}>
+      {!collapsed && <div className="min-h-0 flex-1"><ConversationList workspace={workspace} conversationId={conversationId} onNavigate={onNavigate} /></div>}
+      <nav aria-label="Primary navigation" className={cn("flex shrink-0 flex-col gap-0.5 px-2", collapsed && "items-center")}>
         {NAV_ITEMS.map((item) => {
           const active = item.matches(pathname);
-          const badge = item.to === "/runs" ? needsOperator : 0;
+          const badge = item.to === "/conversations" ? needsOperator : 0;
           const link = (
             <NavLink
               key={item.to}

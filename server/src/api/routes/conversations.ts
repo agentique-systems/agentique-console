@@ -54,16 +54,10 @@ export const conversationRoutes: Pick<
     admit(ctx);
     const conversationId = id("conversation", request.params.conversationId);
     const body = parse(messageBodySchema, request.body, "body");
-    const { runtime } = ctx.app;
-    const conversation = runtime.stores.conversations.get(conversationId);
-    if (conversation.activeRunId !== null) {
-      // While a Run is active the message is operator steering: queued as a typed input of the Orchestrator's next turn.
-      const posted = runtime.orchestratorInputs.postOperatorMessage({ runId: conversation.activeRunId, content: body.content });
-      notify(ctx, conversation.activeRunId);
-      return created(request.reply, { message: posted.message, queued: posted.queued });
-    }
-    const message = runtime.stores.conversations.postMessage({ conversationId, author: "operator", content: body.content, runId: null, invocationId: null });
-    return created(request.reply, { message, queued: null });
+    const posted = ctx.app.conversations.post(conversationId, body);
+    const context = ctx.app.conversations.context(conversationId);
+    if (context !== null) notify(ctx, context.id);
+    return created(request.reply, posted);
   },
   listConversationRequirements: (request, ctx) => {
     const conversationId = id("conversation", request.params.conversationId);

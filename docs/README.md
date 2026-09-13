@@ -2,15 +2,21 @@
 
 ## Operating the console
 
+The default experience is the Conversation. The authoritative
+[conversation operator extension](architecture/conversation-operator.md) defines
+admission, reply/dispatch durability, retry identity and inline safeguards.
+
+- [Settings](settings.md) ? configuration inventory, precedence, protected credentials, administration, connection checks, and restart behavior.
 - [Execution providers](providers.md) — Claude, Codex, AI SDK 7, model selection,
   credentials, MCP, capability differences, continuation and live verification.
 
 ## Architecture (authoritative)
 
-The orchestration architecture is defined by four documents under
+The orchestration architecture is defined by the documents under
 `docs/architecture/`. They are authoritative over every other document in
 this repository, including the top-level `README.md`.
 
+- [Conversation operator extension](architecture/conversation-operator.md) ? conversation admission, restricted execution context, reply/dispatch durability, retry identity, and inline safeguards.
 - [Glossary](architecture/glossary.md) — the canonical vocabulary, object
   ownership, identifier conventions, and the list of retired terms.
 - [Execution model](architecture/execution-model.md) — actors, state

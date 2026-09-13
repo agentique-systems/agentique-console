@@ -11,10 +11,12 @@
  */
 import { completionTurns, initFixtureRepo, planTurn, returned, tool, workerTurn } from "./e2e-fixture.ts";
 import { openTestApp } from "./test-support.ts";
-import { contractAdapter } from "../provider/adapter-test-support.ts";
+import { CONTRACT_RESULT, contractAdapter } from "../provider/adapter-test-support.ts";
+import fs from "node:fs";
+import path from "node:path";
 
-export type WebTestScript = "coding" | "hang" | "review" | "decisions";
-export type WebTestRequest = { kind: "script"; name: WebTestScript; workspaceId: string } | { kind: "remaining" } | { kind: "disconnect" } | { kind: "close" };
+export type WebTestScript = "coding" | "hang" | "review" | "decisions" | "clarify" | "reply";
+export type WebTestRequest = { kind: "seed_history"; conversationId: string; count: number } | { kind: "script"; name: WebTestScript; workspaceId: string } | { kind: "remaining" } | { kind: "disconnect" } | { kind: "close" };
 export type WebTestReply = { kind: "ready"; url: string; repo: string; webDir: string; servesWeb: boolean } | { kind: "scripted"; name: string } | { kind: "remaining"; value: number } | { kind: "disconnected"; count: number } | { kind: "error"; message: string };
 
 const dir = process.env.WEB_TEST_DIR;
@@ -23,8 +25,11 @@ const send = (reply: WebTestReply): void => {
   process.send!(reply);
 };
 
-const t = await openTestApp({ dir, adapterOverrides: [contractAdapter("codex", dir).adapter, contractAdapter("ai-sdk", dir).adapter] });
-const repo = initFixtureRepo(dir);
+const t = await openTestApp({ dir, env: { CONSOLE_DEFAULT_COMPLETION_CHECK: "node test.js", CONSOLE_SETTINGS_KEY: Buffer.alloc(32, 9).toString("base64") }, connectionCheckHttp: async (_url, init) => {
+  const headers = init.headers as Record<string, string>;
+  return headers["x-api-key"] === "invalid-fixture-key" ? Response.json({}, { status: 401 }) : Response.json({ data: [{ id: "claude-fable-5-1" }, { id: "claude-haiku-4-5-20251001" }] });
+}, adapterOverrides: [contractAdapter("codex", dir, [[{ name: "return_result", input: { ...CONTRACT_RESULT, conversation: { reply: "Hello from Codex", work: null } } }]]).adapter, contractAdapter("ai-sdk", dir, [[{ name: "return_result", input: { ...CONTRACT_RESULT, conversation: { reply: "Hello from AI SDK", work: null } } }]]).adapter] });
+const repo = fs.existsSync(path.join(dir, "repo", ".git")) ? path.join(dir, "repo") : initFixtureRepo(dir);
 const url = await t.app.server.listen({ port: 0, host: "127.0.0.1" });
 
 /** A blocking operator Decision with two options; the turn ends on it. */
@@ -37,7 +42,18 @@ process.on("message", (message: WebTestRequest) => {
   void (async () => {
     try {
       switch (message.kind) {
+        case "seed_history": {
+          for (let i = 0; i < message.count; i++) t.app.runtime.stores.conversations.postMessage({ conversationId: message.conversationId as never, author: "operator", content: `seeded message ${String(i).padStart(3, "0")}`, runId: null, invocationId: null });
+          send({ kind: "scripted", name: "history" });
+          return;
+        }
         case "script": {
+          if (message.name === "clarify" || message.name === "reply") {
+            t.sdk.script({ steps: [returned("Reply", { conversation: { reply: message.name === "clarify" ? "Which flag would you like to add?" : "The result is available above. What would you like to do next?", work: null } })] });
+            send({ kind: "scripted", name: message.name });
+            return;
+          }
+          t.sdk.script({ steps: [returned("Request received", { conversation: { reply: "I will work on your request. I will ask for any required decisions here.", work: "Add a --version flag to the CLI." } })] });
           if (message.name === "coding") {
             const loaded = t.app.runtime.agents.loader.loadCurrent(message.workspaceId as never, { kind: "branch", branch: "main" });
             const implementer = loaded.files.find((f) => f.kind === "loaded" && f.name === "implementer");

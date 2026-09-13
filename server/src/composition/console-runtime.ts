@@ -45,6 +45,7 @@ import { createWorkspacePorts, type PublicationHooks, type WorkspacePorts } from
 import type { WorkspaceStateLayout } from "../workspace-state/paths.ts";
 
 export interface ConsoleRuntimeConfig {
+  database?: OpenedDatabase;
   /** The SQLite file of the canonical database (created and migrated under the migration contract). */
   databaseFile: string;
   /** The directory of the Artifact blob store. */
@@ -125,7 +126,7 @@ export interface ConsoleRuntime {
 
 /** Composes the runtime over the configured directories and database; the built-in Agent Definitions are ensured on open. */
 export function composeConsoleRuntime(config: ConsoleRuntimeConfig): ConsoleRuntime {
-  const database = openDatabase(config.databaseFile);
+  const database = config.database ?? openDatabase(config.databaseFile);
   try {
     const blobs = new FileBlobStore(config.blobRoot);
     const ctx = createPersistenceContext(database, blobs, { ...(config.clock === undefined ? {} : { clock: config.clock }), ...(config.persistenceDiagnostics === undefined ? {} : { diagnostics: config.persistenceDiagnostics }) });

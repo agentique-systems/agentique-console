@@ -185,6 +185,11 @@ export class ConversationStore {
     });
   }
 
+  messageOfInvocation(invocationId: InvocationId): ConversationMessage | null {
+    const row = this.ctx.db.select().from(conversationMessages).where(eq(conversationMessages.invocationId, invocationId)).get();
+    return row === undefined ? null : messageToDomain(row);
+  }
+
   getMessage(id: ConversationMessageId): ConversationMessage {
     return messageToDomain(requireRow(this.ctx.db.select().from(conversationMessages).where(eq(conversationMessages.id, id)).get(), "ConversationMessage", id));
   }

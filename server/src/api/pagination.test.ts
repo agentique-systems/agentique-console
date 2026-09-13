@@ -196,6 +196,7 @@ describe("pagination through the API", () => {
     expect(conversations.items.map((c) => c.conversation.id)).toEqual(expect.arrayContaining(conversationIds));
     const all = await walk((cursor) => t.call<Page<{ conversation: { id: string } }>>("listConversations", { query: { limit: 4, ...(cursor === null ? {} : { cursor }) } }), (c) => c.conversation.id);
     expect(all.items.length).toBe(conversations.items.length);
+    const contextIds = t.app.runtime.stores.runs.listByWorkspace(workspaceId as never).map((r) => r.id);
     const runIds: string[] = [];
     for (const id of conversationIds.slice(0, 5)) {
       const run = await t.call<RunOverview>("createRun", { params: { conversationId: id }, body: { goal: `goal ${id}`, completionCheck: CHECK, start: false } });
@@ -203,8 +204,8 @@ describe("pagination through the API", () => {
       runIds.push(run.body.run.id);
     }
     const runs = await walk((cursor) => t.call<Page<{ id: string }>>("listWorkspaceRuns", { params: { workspaceId }, query: { limit: 2, ...(cursor === null ? {} : { cursor }) } }), (r) => r.id);
-    expect(runs.pages).toBe(3);
-    expect(runs.items.map((r) => r.id)).toEqual(runIds);
+    expect(runs.pages).toBe(Math.ceil((contextIds.length + runIds.length) / 2));
+    expect(runs.items.map((r) => r.id)).toEqual([...contextIds, ...runIds]);
     const workspaces = await t.call<Page<{ workspace: { id: string } }>>("listWorkspaces", { query: { limit: 1 } });
     expect(workspaces.body.items).toHaveLength(1);
     // The Run's collections: the root Invocation, the empty ledger, the plan node window, the usage page.

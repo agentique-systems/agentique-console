@@ -12,11 +12,11 @@ Everything the runtime knows is in one SQLite database plus a
 content-addressed blob store; the process can be killed at any point and
 resumes from the durable record. Claude Agent SDK, OpenAI Codex SDK, and
 Vercel AI SDK 7 are peer execution providers behind the same adapter contract.
-Select the provider and its model in the Run launcher; see
+Select the provider and its model in [Settings](docs/settings.md); see
 [provider configuration and capabilities](docs/providers.md).
 
 The architecture is defined under [`docs/architecture/`](docs/README.md);
-those four documents are authoritative over this README.
+those architecture documents are authoritative over this README.
 
 ## Running
 
@@ -51,6 +51,14 @@ never cancelled and an operator pause is never erased by a shutdown; the
 next start reconstructs every runnable Run and every outstanding
 publication from the rows.
 
+### Settings
+
+Open **Settings** from the navigation or workspace gate. Configure providers,
+models, MCP tools, conversation preferences, workspace defaults and execution
+limits there. Saved credentials require separately provisioned encrypted
+storage. See the [Settings guide](docs/settings.md) for precedence, setup,
+backup/recovery, administration and restart behavior.
+
 ### Configuration
 
 Application variables are optional and prefixed `CONSOLE_`; SDK credential
@@ -60,6 +68,9 @@ ignored.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `SETTINGS_KEY` | unset | Separately protected 32-byte base64 AES-GCM key; required for saving credentials. |
+| `ADMIN_TOKEN`, `PUBLIC_ORIGIN` | unset | Remote Settings requires a bearer token (at least 32 characters) and exact HTTPS origin. |
+| `TRUSTED_ENDPOINT_ORIGINS` | unset | Comma-separated exact origins allowed for custom providers and HTTP MCP, including explicit local endpoints. |
 | `DATA_DIR` | `~/.agentique-console` | State directory. |
 | `PORT`, `HOST` | `4400`, `127.0.0.1` | The listener. `0` picks a free port. |
 | `FS_ROOTS` | home and its filesystem root | Directories the Workspace browser may list, separated by the platform path delimiter. Every Workspace root must lie under one. |
@@ -108,49 +119,33 @@ tests make no billable model calls. See [live verification](docs/providers.md#ve
 
 ## What an operator does
 
-1. Add a **Workspace**: a directory under a browse root, usually a git
-   repository. A git Workspace publishes to a branch; a plain directory
-   can run everything but cannot be published atomically, and the console
-   says so before anything is attempted.
-2. Open a **Conversation** and start a **Run** from a goal. The goal and
-   the completion check become the operator's Requirement; the Budget, the
-   Orchestrator allocation, and the final reserve have validated defaults.
-3. Answer what the Orchestrator asks: approve or edit its **Requirement
-   proposal**, resolve **Decisions**, approve **Budget Increases**, steer
-   it with messages. Every operator input is a durable record the next
-   Orchestrator turn receives; nothing is a chat transcript.
-4. Watch the **Execution Plan** (a compiled graph of pattern and join
-   nodes), the **Task ledger**, the Invocations and Attempts, usage and
-   Budget, Gates and Evaluations, and the live output of running Attempts.
-5. When the completion check and the Gate Evaluator pass, review the
-   **final report** and accept the **signoff** or request changes.
-   Accepting records the final Changeset and completes the Run; it does
-   not touch the Target.
-6. Request **publication** and confirm it. The runtime prepares a
-   candidate, verifies the accepted result on it, and updates the Target
-   branch and a receipt ref in one atomic git transaction; a Target that
-   moved meanwhile refuses the update and nothing is applied. A checkout
-   of the Target branch is brought forward only when that is safe; local
-   changes are never discarded.
+1. Choose or add a Workspace, then type in the conversation composer. Send is
+   the entry point for questions, clarification and requests for work.
+2. Talk to the Orchestrator. It answers before work starts, asks clarifying
+   questions, and creates or steers execution internally when needed. Greetings
+   and discussion do not start work Runs.
+3. Review proposed Requirements and resolve required Decisions inline. Budget
+   increases and side-effect approvals keep their explicit controls.
+4. Follow progress and read the final report and Artifacts in the same thread.
+   Stop, resume and cancel controls are beside the work. Execution plans,
+   Invocations, audit records and detailed usage remain available through
+   optional inspection.
+5. Accept the verified result using the signoff confirmation. Request and
+   confirm publication separately; acceptance alone never changes the Target.
+6. Continue after completion. History spans multiple work Runs and survives
+   reloads. Pending messages retry with the same durable request id.
 
-Pause (soft: no new Attempts; hard: interrupt running ones), resume, and
-cancel are available at every point. A cancelled Run stays inspectable.
+Conversation history and **New conversation** live in the sidebar. Workspace
+selection, model settings, Agents and System remain accessible. The model is
+pinned on the first Send; a new conversation can select another model.
+Enter sends, Shift+Enter adds a line, and Ctrl/Command K opens the palette.
 
-### The console
-
-The web application is scoped to one Workspace (switch from the sidebar or
-the palette). Its pages: **Runs** (home: every Run of the Workspace, the
-ones that need you marked and counted on the navigation), **Conversations**
-(the thread beside the list; a Run starts from the launcher under the
-thread), **Agents**, and **System**. A Run opens on its **Overview** (what
-to do next, what needs you, progress, budget, live output) with its other
-sections beside it: Requirements, Plan (the graph with a node and Invocation
-inspector), Tasks, Decisions, Verification, Signoff & publish, Budget &
-usage, Agents. Consequential actions (cancel, accept the signoff, publish)
-confirm before they act. Keyboard: `Ctrl`/`⌘` `K` opens the palette (pages,
-sections, recent Runs and Conversations, Workspaces, theme); `[` and `]`
-step through a Run's sections; `Ctrl`/`⌘` `Enter` sends a message or starts
-a Run from its form.
+Conversation-only turns use the existing engine with no filesystem or execution
+tools, so chatting needs no worktree or completion configuration. Their usage
+counts against a durable Budget. New work uses configured Budget, completion
+check and evaluator defaults. The model sees a bounded recent history window;
+older messages remain available in the thread. Default tests use deterministic
+provider fixtures and make no billable model calls.
 
 ## HTTP API
 
@@ -184,7 +179,8 @@ around); a page is also bounded to 1 MiB of serialized records and ends
 before the record that would cross it, and any JSON response above 4 MiB
 is refused as `413 payload_too_large` rather than truncated.
 
-Every mutation is an idempotent operator operation: an identical replay
+Domain control mutations are idempotent operator operations; message posts use
+a client `requestId` for transport retry identity: an identical replay
 returns the recorded outcome; a request the domain refuses (a different
 resolution of a resolved Decision, an action on a terminal Run) is
 `409 refused` with the typed reason; a stale state transition is

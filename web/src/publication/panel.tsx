@@ -20,12 +20,12 @@ import { count, usage, words } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /** Signoff and publication: two separate operator actions, each through its own service, never one click for both. */
-export function PublicationPanel({ overview }: { overview: RunOverview }) {
+export function PublicationPanel({ overview, inline = false }: { overview: RunOverview; inline?: boolean }) {
   return (
     <div className="flex flex-col gap-6">
-      <Steps overview={overview} />
-      <SignoffSection overview={overview} />
-      <PublicationSection overview={overview} />
+      {!inline && <Steps overview={overview} />}
+      <SignoffSection overview={overview} inline={inline} />
+      <PublicationSection overview={overview} inline={inline} />
     </div>
   );
 }
@@ -67,13 +67,13 @@ function Steps({ overview }: { overview: RunOverview }) {
   );
 }
 
-function SignoffSection({ overview }: { overview: RunOverview }) {
+function SignoffSection({ overview, inline = false }: { overview: RunOverview; inline?: boolean }) {
   const signoff = useRunSignoff(overview.run.id);
   const actions = useSignoffActions(overview.run.id);
   const [message, setMessage] = useState("");
   const [confirmAccept, setConfirmAccept] = useState(false);
   return (
-    <Section card title="Signoff" description="Accepting records the final Changeset and completes the Run. It does not publish anything.">
+    <Section card title="Signoff" description={inline ? "Review the result and accept it, or request changes. Publication has a separate confirmation." : "Accepting records the final Changeset and completes the Run. It does not publish anything."}>
       <Panel query={signoff} skeleton={<Skeleton className="h-24" />}>
         {(s) => {
           if (s.signoff === null) {
@@ -87,6 +87,11 @@ function SignoffSection({ overview }: { overview: RunOverview }) {
           const open = view.allowedActions.length > 0;
           return (
             <div className="flex flex-col gap-4" data-testid="signoff">
+              {inline && <div className="flex flex-wrap gap-2 text-sm">
+                {view.candidate.filter((artifact) => artifact.mediaType === "text/x-diff").map((artifact, index) => <ArtifactLink key={artifact.artifactId} artifactId={artifact.artifactId} label={`Review code changes${index === 0 ? "" : ` (${index + 1})`}`} />)}
+              </div>}
+              <details open={!inline} className="text-xs text-muted-foreground">
+                <summary hidden={!inline} className="cursor-pointer">Verification and signoff details</summary>
               <KeyValue
                 columns={2}
                 dense
@@ -111,6 +116,7 @@ function SignoffSection({ overview }: { overview: RunOverview }) {
                   ))}
                 </ul>
               </div>
+              </details>
               {view.blockers.length > 0 && (
                 <Callout tone="warning" testId="signoff-blockers" title="Signoff cannot be accepted now">
                   {view.blockers.map((b) => (typeof b === "object" && b !== null && "kind" in b ? words(String((b as { kind: string }).kind)) : String(b))).join(", ")}
@@ -127,7 +133,7 @@ function SignoffSection({ overview }: { overview: RunOverview }) {
                       <AlertDialogContent>
                         <AlertDialogHeader>
                           <AlertDialogTitle>Accept the verified result?</AlertDialogTitle>
-                          <AlertDialogDescription>This records the final Changeset and completes the Run. Nothing is published: the Target moves only when you request a publication and confirm it.</AlertDialogDescription>
+                          <AlertDialogDescription>{inline ? "Accepting finalizes this result. Publishing it to your workspace requires a separate confirmation." : "This records the final Changeset and completes the Run. Nothing is published: the Target moves only when you request a publication and confirm it."}</AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
                           <AlertDialogCancel>Not yet</AlertDialogCancel>
@@ -137,7 +143,7 @@ function SignoffSection({ overview }: { overview: RunOverview }) {
                         </AlertDialogFooter>
                       </AlertDialogContent>
                     </AlertDialog>
-                    <span className="text-xs text-muted-foreground">Review the final report first; acceptance is final for this Run.</span>
+                    <span className="text-xs text-muted-foreground">{inline ? "Review the result above. Acceptance is final for this work." : "Review the final report first; acceptance is final for this Run."}</span>
                   </div>
                   <div className="flex flex-col gap-2">
                     <Textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={2} placeholder="What should change? Your message becomes the Orchestrator's next input." aria-label="change request" />
@@ -160,7 +166,7 @@ function SignoffSection({ overview }: { overview: RunOverview }) {
   );
 }
 
-function PublicationSection({ overview }: { overview: RunOverview }) {
+function PublicationSection({ overview, inline = false }: { overview: RunOverview; inline?: boolean }) {
   const publications = useRunPublications(overview.run.id);
   const actions = usePublicationActions(overview.run.id);
   return (
@@ -173,14 +179,14 @@ function PublicationSection({ overview }: { overview: RunOverview }) {
                 {p.capability.reason}. The accepted result stays available as the final Changeset below and in the Run's Integration Workspace.
               </Callout>
             )}
-            {p.runStatus !== "completed" && <Callout tone="info" testId="publication-not-yet">Publication becomes available once the Run is signed off and completed.</Callout>}
+            {p.runStatus !== "completed" && <Callout tone="info" testId="publication-not-yet">{inline ? "Accept the result to make publication available." : "Publication becomes available once the Run is signed off and completed."}</Callout>}
             {p.capability.supported && p.runStatus === "completed" && p.allowedActions.includes("request_publish") && (
               <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-muted/30 p-3">
                 <Button size="sm" onClick={() => actions.request.mutate({ requestedStrategy: { kind: "automatic" } })} disabled={actions.request.isPending} data-testid="publish-request">
                   <RocketIcon />
                   Publish to {p.target.kind === "branch" ? p.target.branch : "the directory"}
                 </Button>
-                <span className="text-xs text-muted-foreground">Opens a publish Decision; the Target moves only after you confirm it. Strategy: {p.capability.strategies.join(" or ") || "automatic"}.</span>
+                <span className="text-xs text-muted-foreground">{inline ? "You will confirm before the branch is updated." : <>Opens a publish Decision; the Target moves only after you confirm it. Strategy: {p.capability.strategies.join(" or ") || "automatic"}.</>}</span>
               </div>
             )}
             {p.openDecision !== null && (
@@ -200,16 +206,15 @@ function PublicationSection({ overview }: { overview: RunOverview }) {
                   </span>
                 }
               >
-                Strategy {p.openDecision.requestedStrategy.kind}. The candidate is prepared and verified first; a Target that moved meanwhile refuses the update and leaves everything unchanged.
+                {inline ? "Apply the accepted result to your branch? The update is checked before it is applied; conflicting changes prevent publication." : <>Strategy {p.openDecision.requestedStrategy.kind}. The candidate is prepared and verified first; a Target that moved meanwhile refuses the update and leaves everything unchanged.</>}
               </Callout>
             )}
             {(actions.request.isError || actions.resolve.isError || actions.advance.isError) && <Callout tone="error">{errorMessage(actions.request.error ?? actions.resolve.error ?? actions.advance.error)}</Callout>}
             {p.finalChangesetId !== null && (
               <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="text-muted-foreground">Final Changeset</span>
-                <IdChip id={p.finalChangesetId} />
+                {!inline && <><span className="text-muted-foreground">Final Changeset</span><IdChip id={p.finalChangesetId} /></>}
                 <ArtifactLink changesetId={p.finalChangesetId} label="View the diff" runId={overview.run.id} />
-                {p.finalSnapshotId !== null && (
+                {!inline && p.finalSnapshotId !== null && (
                   <span className="text-2xs text-muted-foreground">
                     · Snapshot <IdChip id={p.finalSnapshotId} />
                   </span>
@@ -219,7 +224,7 @@ function PublicationSection({ overview }: { overview: RunOverview }) {
             {p.publications.length > 0 && (
               <ul className="flex flex-col gap-2">
                 {p.publications.map((view) => (
-                  <PublicationCard key={view.publication.id} view={view} onRetry={() => actions.advance.mutate(view.publication.id)} retrying={actions.advance.isPending} />
+                  <PublicationCard key={view.publication.id} view={view} inline={inline} onRetry={() => actions.advance.mutate(view.publication.id)} retrying={actions.advance.isPending} />
                 ))}
               </ul>
             )}
@@ -228,14 +233,14 @@ function PublicationSection({ overview }: { overview: RunOverview }) {
                 No publication yet. Nothing has touched <span className="font-mono">{p.target.kind === "branch" ? p.target.branch : "the directory"}</span>.
               </p>
             )}
-            {!p.capability.supported && overview.run.integrationWorkspacePath !== null && (
+            {!inline && !p.capability.supported && overview.run.integrationWorkspacePath !== null && (
               <p className="text-2xs text-muted-foreground">
                 Integration Workspace: <span className="font-mono">{overview.run.integrationWorkspacePath}</span>
               </p>
             )}
-            <p className="text-2xs text-muted-foreground">
+            {!inline && <p className="text-2xs text-muted-foreground">
               Every Publication is also a Decision; see <Link to={`/runs/${overview.run.id}/decisions`} className="underline decoration-dotted hover:text-foreground">Decisions</Link> for the record.
-            </p>
+            </p>}
           </div>
         )}
       </Panel>
@@ -243,7 +248,7 @@ function PublicationSection({ overview }: { overview: RunOverview }) {
   );
 }
 
-function PublicationCard({ view, onRetry, retrying }: { view: PublicationView; onRetry: () => void; retrying: boolean }) {
+function PublicationCard({ view, onRetry, retrying, inline = false }: { view: PublicationView; onRetry: () => void; retrying: boolean; inline?: boolean }) {
   const { publication, report } = view;
   const terminal = publication.status === "succeeded" || publication.status === "failed";
   return (
@@ -262,7 +267,7 @@ function PublicationCard({ view, onRetry, retrying }: { view: PublicationView; o
       </div>
       {publication.failure !== null && <div className="text-xs text-status-failed">{describeFailure(publication.failure)}</div>}
       {report !== null && report.checkout !== null && <div className="text-xs text-muted-foreground">{describeCheckout(report.checkout)}</div>}
-      <div className="flex flex-wrap items-center gap-3 text-2xs text-muted-foreground">
+      <details open={!inline}><summary hidden={!inline} className="cursor-pointer text-xs text-muted-foreground">Publication details</summary><div className="flex flex-wrap items-center gap-3 text-2xs text-muted-foreground">
         {publication.targetBeforeSnapshotId !== null && (
           <span>
             before <IdChip id={publication.targetBeforeSnapshotId} copy={false} />
@@ -274,7 +279,7 @@ function PublicationCard({ view, onRetry, retrying }: { view: PublicationView; o
           </span>
         )}
         {publication.reportArtifactId !== null && <ArtifactLink artifactId={publication.reportArtifactId} label="Publication report" />}
-      </div>
+      </div></details>
     </li>
   );
 }

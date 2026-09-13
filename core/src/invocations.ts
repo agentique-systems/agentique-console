@@ -245,7 +245,14 @@ export const evaluatorResultSchema: z.ZodType<EvaluatorResult> = z.strictObject(
  * `finalReport` only for an Orchestrator of purpose `final_synthesis`; the
  * purpose-specific members are mutually exclusive.
  */
+export const conversationReplySchema = z.strictObject({
+  reply: z.string().trim().min(1).max(16_384),
+  work: z.string().trim().min(1).max(16_384).nullable(),
+});
+
 export interface InvocationResult {
+  /** Operator-facing reply; work is an explicit request to dispatch intent, never an approval. */
+  conversation?: z.infer<typeof conversationReplySchema>;
   status: ResultStatus;
   artifactIds: ArtifactId[];
   tasks: TaskResult[];
@@ -336,6 +343,7 @@ export function boundResultViolations(violations: readonly ResultViolation[]): R
 
 export const invocationResultSchema: z.ZodType<InvocationResult> = z
   .strictObject({
+    conversation: conversationReplySchema.optional(),
     status: z.enum(RESULT_STATUSES),
     artifactIds: uniqueIds(idSchema("artifact")),
     tasks: z.array(
@@ -1274,6 +1282,8 @@ export function decisionResolutionInputOf(decision: Decision): Extract<ManifestI
  * provider messages, narrative status, or Artifact content.
  */
 export interface ContextManifestContent {
+  /** Bounded, immutable Conversation context for Orchestrator turns only. */
+  conversationContext?: string;
   agentDefinitionRevisionId: AgentDefinitionRevisionId;
   agentDefinitionContentHash: string;
   instructions: string;
@@ -1323,6 +1333,7 @@ export const contextManifestContentSchema: z.ZodType<ContextManifestContent> = z
   .strictObject({
     agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
     agentDefinitionContentHash: sha256Hex,
+    conversationContext: z.string().max(65_536).optional(),
     instructions: z.string(),
     modelPolicy: modelPolicySchema,
     role: z.enum(INVOCATION_ROLES),

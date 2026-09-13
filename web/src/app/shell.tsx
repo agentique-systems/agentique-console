@@ -46,7 +46,7 @@ export function Shell({ workspace }: { workspace: WorkspaceResponse }) {
               <Route path="/runs/:runId/:tab/:entityId" element={<RunView />} />
               <Route path="/agents" element={<AgentsView workspace={workspace} />} />
               <Route path="/system" element={<SystemView />} />
-              <Route path="*" element={<Navigate to="/runs" replace />} />
+              <Route path="*" element={<Navigate to="/conversations" replace />} />
             </Routes>
           </Suspense>
         </main>

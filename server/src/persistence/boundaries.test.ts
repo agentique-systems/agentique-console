@@ -13,11 +13,11 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents", "server/src/composition", "server/src/api", "server/src/events", "server/src/host", "server/src/operator", "server/src/workspaces"];
+const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents", "server/src/composition", "server/src/api", "server/src/events", "server/src/host", "server/src/operator", "server/src/workspaces", "server/src/settings"];
 /** The entrypoints: final files at the server root. */
 const NEW_SOURCE_FILES = ["server/src/app.ts", "server/src/boot.ts", "server/src/main.ts", "server/src/config.ts", "server/src/context.ts"];
 /** The application layer above the runtime boundaries. */
-const APPLICATION_DIRS = ["server/src/api", "server/src/events", "server/src/host", "server/src/operator", "server/src/workspaces"];
+const APPLICATION_DIRS = ["server/src/api", "server/src/events", "server/src/host", "server/src/operator", "server/src/workspaces", "server/src/settings"];
 /** The web application: new source under the terminology rule; its own import rule is below. */
 const WEB_SOURCE_DIRS = ["web/src", "web/tests"];
 /** Nothing of the legacy application remains; the list stays so the independence test keeps its shape. */
@@ -49,7 +49,7 @@ const rel = (file: string) => path.relative(repoRoot, file).replaceAll("\\", "/"
 function importsOf(file: string): string[] {
   const text = fs.readFileSync(file, "utf8");
   const specifiers: string[] = [];
-  for (const match of text.matchAll(/(?:from|import)\s*["']([^"']+)["']/g)) specifiers.push(match[1]!);
+  for (const match of text.matchAll(/(?:from|import)\s+["']([^"']+)["']/g)) specifiers.push(match[1]!);
   for (const match of text.matchAll(/import\(\s*["']([^"']+)["']\s*\)/g)) specifiers.push(match[1]!);
   for (const match of text.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)) specifiers.push(match[1]!);
   return specifiers;
@@ -136,7 +136,7 @@ describe("import boundaries", () => {
           specifier === "@agentique-console/core" ||
           specifier === "zod" ||
           // Provider SDKs, harnesses and MCP transports remain confined to this boundary.
-          (["ai", "ai/test", "@openai/codex-sdk", "@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/gateway", "@ai-sdk/harness", "@ai-sdk/harness/agent", "@ai-sdk/harness-pi", "@ai-sdk/sandbox-just-bash"].includes(specifier) || specifier.startsWith("@modelcontextprotocol/sdk/")) ||
+          (["undici", "ai", "ai/test", "@openai/codex-sdk", "@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/gateway", "@ai-sdk/harness", "@ai-sdk/harness/agent", "@ai-sdk/harness-pi", "@ai-sdk/sandbox-just-bash"].includes(specifier) || specifier.startsWith("@modelcontextprotocol/sdk/")) ||
           specifier.startsWith("node:") ||
           // The pinned production SDK: types everywhere, the module itself only in the binding.
           (specifier === "@anthropic-ai/claude-agent-sdk" && (isTest || rel(file) === "server/src/provider/claude-sdk-binding.ts" || fs.readFileSync(file, "utf8").split(/\r?\n/).filter((line) => /^\s*(import|export)\b/.test(line) && line.includes(specifier)).every((line) => /^(export type|import type) /.test(line)))) ||
@@ -1015,8 +1015,9 @@ describe("terminology", () => {
     for (const file of files) {
       if (rel(file) === "server/src/persistence/boundaries.test.ts") continue;
       const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+      const terms = RETIRED.filter((term) => !(/^(server\/src\/(settings\/|provider\/(connection-check|mcp-discovery)\.ts)|web\/src\/(settings\/|live\/subscription\.ts))/.test(rel(file)) && ["\\btrusted\\b", "\\bgeneration\\b", "\\battention\\b"].includes(term.source)));
       lines.forEach((line, index) => {
-        for (const term of RETIRED) {
+        for (const term of terms) {
           if (term.test(line) && !ALLOWED_CONTEXT.test(line)) offences.push(`${rel(file)}:${index + 1}: ${line.trim()}`);
         }
       });

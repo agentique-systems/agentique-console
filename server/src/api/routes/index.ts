@@ -9,12 +9,14 @@ import { recordRoutes } from "./records.ts";
 import { runRoutes } from "./runs.ts";
 import type { RouteHandlers } from "./support.ts";
 import { systemRoutes } from "./system.ts";
+import { settingsRoutes } from "./settings.ts";
 import { workspaceRoutes } from "./workspaces.ts";
 
 /** The event stream is registered separately: it hijacks the reply and streams. */
 export type RestRouteHandlers = Omit<RouteHandlers, "events">;
 
 export const routeHandlers: RestRouteHandlers = {
+  ...settingsRoutes,
   ...systemRoutes,
   ...workspaceRoutes,
   ...conversationRoutes,

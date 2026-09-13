@@ -545,6 +545,10 @@ export class AttemptExecutor {
       // 8–10. Retry eligibility is the decision above; the Invocation ends only when no retry remains (releasing its reservation), and its Tasks follow.
       const blockedOn = requestedDecisionId !== null ? { decisionId: requestedDecisionId } : approvalDecision ? { decisionId: approvalDecision.id } : null;
       const settlement = settleInvocation(this.stores, { invocation, attempt: terminal, decision, result: classified.result, blocked: blockedOn, meta });
+      const settledReply = settlement.invocation.result?.conversation;
+      if (run.mode !== "conversation" && settlement.invocation.status === "succeeded" && settledReply !== undefined && this.stores.conversations.messageOfInvocation(invocation.id) === null) {
+        this.stores.conversations.postMessage({ conversationId: run.conversationId, runId: run.id, invocationId: invocation.id, author: "orchestrator", content: settledReply.reply }, meta);
+      }
       // The last executing Attempt of a cancelled Run has ended: the nodes, Tasks, and Handoffs it held back converge in the same transaction.
       if (run.status === "cancelled") settleCancelledRunWork(this.stores, run.id, meta);
       if (requestedDecisionId !== null) return { kind: "decision_requested", attempt: terminal, settlement, decision: this.stores.decisions.get(requestedDecisionId) };

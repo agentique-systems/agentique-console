@@ -56,6 +56,7 @@ import type { RunStore } from "../persistence/stores/runs.ts";
 import type { PublicationStore } from "../persistence/stores/publications.ts";
 
 export interface RunHostDependencies {
+  afterPass?: (runId: RunId) => RunId[];
   scheduler: Pick<RunScheduler, "advanceRun">;
   publication: Pick<RunPublicationService, "advance" | "reconcileOutstanding">;
   /** The governor's committed capacity signal: the host subscribes on construction and unsubscribes on `stop`. */
@@ -269,6 +270,7 @@ export class RunHost {
     try {
       // A stopping host ends the pass before the next action: nothing new is admitted once the shutdown began.
       outcome = await this.deps.scheduler.advanceRun(runId, { stopRequested: () => this.#stopped, ...(this.maxActionsPerPass === undefined ? {} : { maxActions: this.maxActionsPerPass }) });
+      if (!this.#stopped) for (const id of this.deps.afterPass?.(runId) ?? []) this.notifyRun(id);
     } catch (error) {
       this.failed(runId, state, error instanceof Error ? error.message : String(error));
       return;

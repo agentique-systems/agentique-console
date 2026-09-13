@@ -7,6 +7,9 @@
 import { API_ROUTES, apiPath, type ApiErrorBody, type ApiErrorCode, type ApiResponses, type ApiRouteName } from "@agentique-console/core";
 
 let apiBase = "";
+let administrationToken = "";
+/** Ephemeral only: never localStorage, URLs, or persisted query data. */
+export function setAdministrationToken(value: string): void { administrationToken = value; }
 
 /** The origin the client calls; empty for the page's own origin. */
 export function setApiBase(base: string): void {
@@ -42,7 +45,7 @@ export async function api<N extends JsonRoute>(name: N, options: CallOptions = {
   const route = API_ROUTES[name];
   const response = await fetch(apiUrl(apiPath(name, options.params ?? {}, options.query ?? {})), {
     method: route.method,
-    headers: { accept: "application/json", ...(options.body === undefined ? {} : { "content-type": "application/json" }) },
+    headers: { accept: "application/json", ...(route.path.startsWith("/api/settings") ? { "x-console-settings": "1", ...(administrationToken ? { authorization: `Bearer ${administrationToken}` } : {}) } : {}), ...(options.body === undefined ? {} : { "content-type": "application/json" }) },
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   }).catch((error: unknown) => {

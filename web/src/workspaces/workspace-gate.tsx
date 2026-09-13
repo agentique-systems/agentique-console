@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { ChevronRightIcon, FolderGit2Icon, FolderIcon, PlusIcon } from "lucide-react";
 import type { WorkspaceResponse } from "@agentique-console/core";
 
@@ -26,7 +27,7 @@ export function WorkspaceGate() {
           <BrandMark />
           <Wordmark />
         </span>
-        <ThemeToggle />
+        <div className="flex items-center gap-4"><Link className="text-sm hover:underline" to="/settings/general">Settings</Link><ThemeToggle /></div>
       </header>
       <div className="flex flex-1 flex-col items-center px-4 py-8 sm:py-14">
         <div className="w-full max-w-xl">

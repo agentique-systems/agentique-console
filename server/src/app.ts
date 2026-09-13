@@ -1,3 +1,8 @@
+import { ConversationService } from "./operator/conversations.ts";
+import { openDatabase } from "./persistence/database.ts";
+import { SettingsStore } from "./persistence/settings-store.ts";
+import { SettingsService } from "./settings/service.ts";
+import type { CheckHttp } from "./provider/connection-check.ts";
 /**
  * The single composition root, shared by production (`main.ts`), the HTTP
  * tests, and the verification entrypoints: the clean-break runtime over the
@@ -29,6 +34,7 @@ import { createProviderRegistry } from "./provider/production.ts";
 import type { PublicationHooks } from "./workspace-state/index.ts";
 
 export interface CreateAppOptions {
+  connectionCheckHttp?: CheckHttp;
   config: Config;
   /** The provider SDK: the real binding in production, a fixture in tests. */
   sdk: ClaudeSdk;
@@ -76,6 +82,7 @@ export interface BootReport {
 }
 
 export interface App {
+  settings: SettingsService;
   config: Config;
   runtime: ConsoleRuntime;
   host: RunHost;
@@ -87,6 +94,7 @@ export interface App {
   admission: AdmissionGate;
   workspaces: WorkspaceService;
   launch: RunLaunchService;
+  conversations: ConversationService;
   diagnostics: BoundedDiagnostics;
   log: Logger;
   server: FastifyInstance;
@@ -110,12 +118,19 @@ function mcpCatalog(config: Config): Record<string, McpServerConfig> {
 /** Composes the application graph over the configuration; opens the database (a legacy database is refused here). */
 export function createApp(options: CreateAppOptions): App {
   const { config } = options;
+  const database = openDatabase(config.databaseFile);
+  let settings: SettingsService;
+  try { settings = new SettingsService(config, new SettingsStore(database.sqlite), options.connectionCheckHttp); }
+  catch (error) { database.close(); throw error; }
   const log = options.log ?? silent;
   const clock = options.clock ?? (() => new Date().toISOString() as Timestamp);
   const diagnostics = new BoundedDiagnostics(config.driver.diagnosticsRetained);
   const workerAllocation: Allocation = config.defaults.nodeAllocation;
   const providers = createProviderRegistry(config, options.sdk, options.adapterOverrides);
+  settings.attach(providers, () => createProviderRegistry(config, options.sdk, options.adapterOverrides));
   const runtime = composeConsoleRuntime({
+    database,
+    workspacePolicy: settings.policy,
     providers,
     databaseFile: config.databaseFile,
     blobRoot: config.blobRoot,
@@ -148,8 +163,11 @@ export function createApp(options: CreateAppOptions): App {
   });
   const events = new EventStream(runtime.ctx, runtime.stores.invocations, runtime.stores.runs);
   const admission = new AdmissionGate();
+  const launch = new RunLaunchService(runtime, { budget: config.defaults.budget, orchestratorAllocation: config.defaults.orchestratorAllocation, completionCheck: config.defaults.completionCheck, evaluator: config.defaults.evaluator, runKind: config.defaults.runKind });
+  launch.workspaceDefaults = (id) => settings.workspace(id);
+  const conversations = new ConversationService(runtime, launch, config, (id) => settings.workspace(id));
   const host = new RunHost(
-    { scheduler: runtime.scheduler, publication: runtime.publication, governor: runtime.governor, runs: runtime.stores.runs, publications: runtime.stores.publications, clock },
+    { afterPass: (runId) => conversations.reconcile(runId), scheduler: runtime.scheduler, publication: runtime.publication, governor: runtime.governor, runs: runtime.stores.runs, publications: runtime.stores.publications, clock },
     {
       maxConcurrentRuns: config.driver.maxConcurrentRuns,
       onDiagnostic: (diagnostic) => {
@@ -159,8 +177,8 @@ export function createApp(options: CreateAppOptions): App {
     },
   );
   const workspaces = new WorkspaceService(runtime.stores.workspaces, config.fsRoots.map((root) => root.path));
-  const launch = new RunLaunchService(runtime, { budget: config.defaults.budget, orchestratorAllocation: config.defaults.orchestratorAllocation, completionCheck: config.defaults.completionCheck, evaluator: config.defaults.evaluator, runKind: config.defaults.runKind });
   const app: App = {
+    settings,
     config,
     runtime,
     host,
@@ -170,6 +188,7 @@ export function createApp(options: CreateAppOptions): App {
     admission,
     workspaces,
     launch,
+    conversations,
     diagnostics,
     log,
     server: undefined as unknown as FastifyInstance,

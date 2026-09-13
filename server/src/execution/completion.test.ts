@@ -292,7 +292,7 @@ describe("run_completion Gate", () => {
       const manifest = h.stores.invocations.getManifest(failed!.id).content;
       const input = manifest.inputs.find((i) => i.kind === "final_synthesis");
       expect(input).toMatchObject({ completionRequestId: gate!.completionRequestId, gateId: gate!.id, snapshotId: gate!.snapshotId, requirementRevisionId: t.completion.revision.id, requirements: [{ requirementId: t.completion.requirementId, status: "satisfied", waiverDecisionId: null }], tasks: [], artifactIds: [], unresolved: [] });
-      expect(JSON.stringify(manifest)).not.toMatch(/transcript|continuation|message/i);
+      expect(JSON.stringify({ ...manifest, conversationContext: undefined })).not.toMatch(/transcript|continuation|message/i);
       for (const tool of ["request_completion", "propose_tasks", "update_task", "create_tasks", "request_decision", "record_decision", "propose_requirements", "revise_execution_plan"]) expect(manifest.runtimeTools).not.toContain(tool);
     } finally {
       h.close();

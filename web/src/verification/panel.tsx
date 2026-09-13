@@ -154,7 +154,7 @@ function describeGateFailure(failure: NonNullable<Gate["failure"]>): string {
   }
 }
 
-function FinalReportView({ artifactId }: { artifactId: string }) {
+export function FinalReportView({ artifactId, inline = false }: { artifactId: string; inline?: boolean }) {
   const text = useArtifactText(artifactId);
   return (
     <Section card title="Final report" description="The Orchestrator's synthesis of the verified result." actions={<ArtifactLink artifactId={artifactId} label="Open Artifact" />}>
@@ -176,10 +176,10 @@ function FinalReportView({ artifactId }: { artifactId: string }) {
                 <ReportList title="Risks" items={report.report.risks} tone="warning" />
                 <ReportList title="Follow-ups" items={report.report.followUps} />
               </div>
-              <div className="flex items-center gap-2 text-2xs text-muted-foreground">
+              {!inline && <div className="flex items-center gap-2 text-2xs text-muted-foreground">
                 <FileTextIcon className="size-3" />
                 Snapshot <IdChip id={report.snapshotId} />
-              </div>
+              </div>}
             </div>
           );
         }}

@@ -21,6 +21,20 @@ export class ProviderRegistry implements ProviderAdapter {
   get provider(): string { return this.defaults.provider; }
   get supportsContinuation(): boolean { return this.entry(this.provider).adapter.supportsContinuation; }
   catalog(): ProviderDescriptor[] { return structuredClone([...this.entries.values()].map((e) => e.descriptor)); }
+  replace(next: ProviderRegistry): void {
+    this.entries.clear();
+    for (const [id, entry] of next.entries) this.entries.set(id, entry);
+    Object.assign(this.defaults, next.defaults);
+  }
+  configureAvailability(readiness: (provider: string, model: string) => { configured: boolean; detail: string }): void {
+    for (const entry of this.entries.values()) {
+      for (const model of entry.descriptor.models) {
+        const next = readiness(entry.descriptor.id, model.id);
+        model.availability = model.availability?.detail === "Injected adapter" && !next.detail.includes("disabled") ? model.availability : next;
+      }
+      entry.descriptor.availability = { configured: entry.descriptor.models.some((m) => m.availability?.configured), detail: "Configure an enabled connection and credential in Settings." };
+    }
+  }
   describeModel(selection: { provider?: string; model: string }) {
     const model = this.entry(selection.provider ?? this.legacyProvider).descriptor.models.find((entry) => entry.id === selection.model);
     return model ? structuredClone(model) : undefined;

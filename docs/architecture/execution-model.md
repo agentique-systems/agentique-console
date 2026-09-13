@@ -9,6 +9,11 @@ The replacement rules are in [migration-contract.md](migration-contract.md).
 Everything here is normative; the invariants in §15 are the acceptance test
 for the implementation.
 
+The [conversation operator extension](conversation-operator.md) defines message
+admission, internal conversation contexts, reply and dispatch durability, and
+inline safeguards. It qualifies the work-Run and manifest-history rules below
+for the conversation-first experience.
+
 ## 1. Actors
 
 There are five actors and each has a fixed responsibility.

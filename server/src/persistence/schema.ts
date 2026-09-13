@@ -146,6 +146,12 @@ const timestamp = (name: string) => text(name);
 // Identity
 // ---------------------------------------------------------------------------
 
+export const applicationSettings = sqliteTable("application_settings", {
+  id: integer("id").primaryKey(),
+  revision: integer("revision").notNull(),
+  document: text("document").notNull(),
+});
+
 export const schemaInfo = sqliteTable(
   "schema_info",
   {
@@ -204,6 +210,7 @@ export const conversationMessages = sqliteTable(
   },
   (t) => [
     index("conversation_messages_conversation").on(t.conversationId, t.createdAt),
+    index("conversation_messages_invocation").on(t.invocationId),
     check("conversation_messages_author", sql`${t.author} IN (${inList(CONVERSATION_MESSAGE_AUTHORS)})`),
     check("conversation_messages_invocation", sql`${t.author} = 'orchestrator' OR ${t.invocationId} IS NULL`),
   ],
@@ -212,6 +219,7 @@ export const conversationMessages = sqliteTable(
 export const runs = sqliteTable(
   "runs",
   {
+    mode: text("mode").$type<"conversation">(),
     execution: text("execution", { mode: "json" }).$type<import("@agentique-console/core").ExecutionSelection>(),
     id: text("id").primaryKey(),
     conversationId: text("conversation_id")
@@ -250,6 +258,8 @@ export const runs = sqliteTable(
   (t) => [
     index("runs_conversation").on(t.conversationId, t.createdAt),
     index("runs_status").on(t.status),
+    uniqueIndex("runs_active_conversation_context").on(t.conversationId).where(sql`${t.mode} = 'conversation' AND ${t.status} NOT IN ('completed', 'failed', 'cancelled')`),
+    check("runs_mode", sql`${t.mode} IS NULL OR ${t.mode} = 'conversation'`),
     check("runs_kind", sql`${t.kind} IN (${inList(RUN_KINDS)})`),
     check("runs_status", sql`${t.status} IN (${inList(RUN_STATUSES)})`),
     check("runs_wait_reason", sql`${t.waitReason} IS NULL OR ${t.waitReason} IN (${inList(RUN_WAIT_REASONS)})`),
@@ -1900,7 +1910,23 @@ export const orchestratorInputs = sqliteTable(
   ],
 );
 
+export const conversationReceipts = sqliteTable("conversation_receipts", {
+  conversationId: text("conversation_id").notNull().references(() => conversations.id),
+  requestId: text("request_id").notNull(),
+  digest: text("digest").notNull(),
+  response: text("response").notNull(),
+}, (t) => [primaryKey({ columns: [t.conversationId, t.requestId] })]);
+
+export const conversationDispatches = sqliteTable("conversation_dispatches", {
+  invocationId: text("invocation_id").primaryKey().notNull().references(() => invocations.id),
+  workRunId: text("work_run_id").references(() => runs.id),
+  error: text("error"),
+});
+
 export const TABLE_NAMES = [
+  "application_settings",
+  "conversation_receipts",
+  "conversation_dispatches",
   "schema_info",
   "workspaces",
   "conversations",

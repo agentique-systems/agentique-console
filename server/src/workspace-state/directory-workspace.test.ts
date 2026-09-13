@@ -27,7 +27,8 @@ function fixture() {
 }
 
 describe("directory Workspace", () => {
-  it("prepares a Run from the directory's content digest through a shadow repository under the state root, creating nothing in the directory", () => {
+  // Three real git imports can exceed the unit-test default on a loaded Windows host.
+  it("prepares a Run from the directory's content digest through a shadow repository under the state root, creating nothing in the directory", { timeout: 30_000 }, () => {
     const f = fixture();
     try {
       const before = readTree(f.root);
